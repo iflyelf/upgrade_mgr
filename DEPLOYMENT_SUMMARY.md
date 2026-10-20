@@ -73,14 +73,14 @@
 
 依次添加以下 4 个 secrets：
 
-| Secret Name | Value |
-|-------------|-------|
-| `DOCKER_USERNAME` | `iflyelf` |
-| `DOCKER_PASSWORD` | `[REDACTED]` |
-| `HUAWEI_ACCESS_KEY` | `[REDACTED]` |
-| `HUAWEI_SWR_PASSWORD` | `[REDACTED]` |
+| Secret Name | 说明 |
+|-------------|------|
+| `DOCKER_USERNAME` | DockerHub 用户名 |
+| `DOCKER_PASSWORD` | DockerHub 密码/令牌 |
+| `HUAWEI_ACCESS_KEY` | 华为云 Access Key Id |
+| `HUAWEI_SWR_PASSWORD` | 华为云 SWR 登录密码 |
 
-详细说明请查看: `/xiaonuo/workspace/code/upgrade_mgr/GITHUB_SECRETS.md`
+> 具体凭据值见本地涉密文档，**不要提交到仓库**。
 
 ### 2. 触发首次构建
 

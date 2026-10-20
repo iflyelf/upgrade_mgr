@@ -17,3 +17,8 @@ etc/config.yaml
 
 # 前端依赖（dist 需提交以供 go:embed）
 web/node_modules/
+
+# 涉密文件（禁止提交）
+GITHUB_SECRETS.md
+*SECRETS*.md
+*secrets*.md
