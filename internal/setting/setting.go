@@ -38,7 +38,7 @@ var Registry = []Item{
 	{Key: "consul.token", Group: "Consul", Label: "Token", Type: "secret", Secret: true,
 		Get: func(c *config.Config) string { return c.Consul.Token },
 		Set: func(c *config.Config, v string) { c.Consul.Token = v }},
-	{Key: "consul.datacenter", Group: "Consul", Label: "数据中心", Type: "string",
+	{Key: "consul.datacenter", Group: "Consul", Label: "数据中心（留空自动探测）", Type: "string",
 		Get: func(c *config.Config) string { return c.Consul.Datacenter },
 		Set: func(c *config.Config, v string) { c.Consul.Datacenter = v }},
 	{Key: "consul.sync_interval", Group: "Consul", Label: "同步间隔(5m/1h)", Type: "string",

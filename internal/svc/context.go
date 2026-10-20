@@ -124,7 +124,7 @@ func (s *ServiceContext) ReloadConsul() {
 	}
 	s.consulRef.Store(cli)
 	s.AgentGW.SetConsul(cli) // 注入到 AgentGW 以便 Meta 回写
-	log.Printf("✅ Consul 已连接: %s (dc=%s)", c.Address, c.Datacenter)
+	log.Printf("✅ Consul 已连接: %s (dc=%s)", c.Address, cli.Datacenter())
 }
 
 // StartOrchestrator 启动灰度编排循环（按批次推进 running 任务）。

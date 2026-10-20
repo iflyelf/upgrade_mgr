@@ -66,10 +66,10 @@ make build
 # 访问 http://localhost:8090
 ```
 
-启用 Consul 同步（可选，或在设置页配置）：
+启用 Consul 同步（可选，或在设置页配置；`datacenter` 留空自动探测）：
 ```bash
 export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
-       CONSUL_TOKEN=xxx CONSUL_DATACENTER=xiaonuo
+       CONSUL_TOKEN=xxx
 ```
 
 ---
@@ -264,7 +264,7 @@ consul:  # 可选：同步主机清单
   enabled: true
   address: consul.internal:8500
   token: ${CONSUL_TOKEN}
-  datacenter: dc1
+  datacenter: ""  # 留空自动探测；多数据中心需显式指定
   leader_election: true  # 多实例高可用
 ```
 

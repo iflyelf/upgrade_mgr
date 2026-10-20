@@ -3,8 +3,9 @@
 // 独立实现，不引用 consul_mgr。关键点：
 //   - 禁用 HTTP 代理（Consul 在内网，HTTP_PROXY 会导致超时）；
 //   - 放宽连接池以支撑批量 Catalog 查询；
-//   - 不调用 Agent().Self()（只读网关/LB 后不可达，会拖满超时），
-//     数据中心以配置为准。
+//   - datacenter 留空时自动探测：优先 Agent API（最准确），
+//     失败则回退到 Catalog 单数据中心；均失败时保持空值，
+//     由 Consul 服务端默认使用本地数据中心。
 package consul
 
 import (
@@ -19,7 +20,7 @@ import (
 type Config struct {
 	Address    string
 	Token      string
-	Datacenter string
+	Datacenter string // 留空自动探测
 	Timeout    time.Duration
 }
 
@@ -56,7 +57,62 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("创建 Consul 客户端失败: %w", err)
 	}
-	return &Client{api: c, cfg: cfg}, nil
+	cli := &Client{api: c, cfg: cfg}
+	// datacenter 未配置时自动探测；探测失败保持空值（Consul 默认本地 DC）。
+	if cfg.Datacenter == "" {
+		cli.cfg.Datacenter = detectDatacenter(conf, timeout)
+	}
+	return cli, nil
+}
+
+// detectDatacenter 自动探测本地数据中心。
+//
+// 优先调用 Agent API /v1/agent/self（能准确拿到本地 DC），
+// 若 Agent API 不可达（只读网关/LB 场景），退而查询 Catalog 数据中心列表：
+// 仅当列表中只有一个 DC 时采用，多 DC 时无法确定本地 DC，返回空值。
+// 探测使用独立短超时，避免影响启动速度。
+func detectDatacenter(conf *capi.Config, timeout time.Duration) string {
+	probeTimeout := 3 * time.Second
+	if timeout > 0 && timeout < probeTimeout {
+		probeTimeout = timeout
+	}
+
+	probeConf := *conf
+	probeConf.Datacenter = ""
+	probeConf.HttpClient = &http.Client{
+		Timeout: probeTimeout,
+		Transport: &http.Transport{
+			Proxy:               nil, // 内网，禁用代理
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     30 * time.Second,
+		},
+	}
+	c, err := capi.NewClient(&probeConf)
+	if err != nil {
+		return ""
+	}
+
+	if self, err := c.Agent().Self(); err == nil {
+		if cfg, ok := self["Config"]; ok {
+			if dc, ok := cfg["Datacenter"].(string); ok && dc != "" {
+				return dc
+			}
+		}
+	}
+
+	if dcs, err := c.Catalog().Datacenters(); err == nil && len(dcs) == 1 {
+		return dcs[0]
+	}
+	return ""
+}
+
+// Datacenter 返回实际使用的数据中心（可能是自动探测结果，可能为空）。
+func (c *Client) Datacenter() string {
+	if c == nil {
+		return ""
+	}
+	return c.cfg.Datacenter
 }
 
 // TestConnection 通过 Catalog 数据中心探测连通性（不走 Agent API）。

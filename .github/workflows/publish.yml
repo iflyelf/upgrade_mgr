@@ -205,7 +205,10 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          # 华为云 SWR 不支持 OCI index/attestation，改用 Docker 媒体类型并关闭 provenance
+          provenance: false
+          sbom: false
+          outputs: type=registry,oci-mediatypes=false
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
           tags: ${{ steps.tags.outputs.tags }}

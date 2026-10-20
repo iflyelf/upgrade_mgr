@@ -164,7 +164,7 @@ func Default() *Config {
 			SSLMode: "disable", MaxOpenConns: 50, MaxIdleConns: 10, ConnMaxLifetime: 3600,
 		},
 		Auth:     AuthConfig{Provider: "builtin", AdminUsername: "admin"},
-		Consul:   ConsulConfig{Datacenter: "dc1", Timeout: 10, Concurrency: 16},
+		Consul:   ConsulConfig{Timeout: 10, Concurrency: 16},
 		Redis:    RedisConfig{Enabled: false, Host: "localhost", Port: 6379, TTL: 300},
 		Artifact: ArtifactConfig{Dir: "/var/lib/upgrade_mgr/artifacts"},
 		Agent: AgentConfig{

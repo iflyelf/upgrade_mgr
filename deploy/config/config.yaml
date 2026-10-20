@@ -36,7 +36,7 @@ consul:                       # 可选：主机与业务分组数据源
   enabled: false
   address: ""                 # 如 http://10.0.56.118:8500
   token: ""
-  datacenter: dc1
+  datacenter: ""              # 留空自动探测（Agent API → Catalog 兜底）
   timeout: 10
   concurrency: 16
   sync_on_start: false
