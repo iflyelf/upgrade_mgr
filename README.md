@@ -247,9 +247,20 @@ database:
   max_idle_conns: 10
 
 auth:
-  provider: builtin  # 或 casdoor（FlyIAM SSO）
+  provider: builtin  # builtin（本地账号）或 casdoor（FlyIAM SSO）
   admin_username: admin
-  admin_password: ${ADMIN_PASSWORD}  # 强密码，不使用默认值
+  admin_password: ""  # 留空则首次启动随机生成；建议用环境变量 ADMIN_PASSWORD 覆盖
+
+# 仅 auth.provider=casdoor 时需要；builtin 模式可全部留空
+casdoor:
+  endpoint: "http://10.0.56.118:8000"          # 服务端访问 Casdoor 的地址
+  public_endpoint: "https://flyiam.example.com" # 浏览器访问地址（和 endpoint 相同可留空）
+  client_id: "your-client-id"
+  client_secret: "your-client-secret"
+  organization: flyiam
+  application: flyiam
+  # redirect_uri: "https://upgrade.example.com/api/auth/callback"  # 留空按 external_url 自动推导
+  certificate: ""                              # 可选（预留）
 
 artifact:
   dir: /data/artifacts
@@ -263,10 +274,20 @@ agent:
 consul:  # 可选：同步主机清单
   enabled: true
   address: consul.internal:8500
-  token: ${CONSUL_TOKEN}
+  token: ""  # 建议用环境变量 CONSUL_TOKEN 覆盖
   datacenter: ""  # 留空自动探测；多数据中心需显式指定
   leader_election: true  # 多实例高可用
 ```
+
+> **配置优先级**：环境变量 > 配置文件 > 内置默认值。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过 `ADMIN_PASSWORD`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET` 等环境变量注入（可写入 systemd 的 `EnvironmentFile`）。
+
+**Casdoor 对接说明**：
+- `endpoint`：本服务后端访问 Casdoor 的地址（用于换取 token、拉取用户信息）。
+- `public_endpoint`：浏览器跳转授权页用的地址；Casdoor 内外网地址不同时才需填写，留空则复用 `endpoint`。
+- `client_id` / `client_secret`：Casdoor 应用的凭据。
+- `organization` / `application`：Casdoor 组织名与应用名（FlyIAM 默认均为 `flyiam`）。
+- 回调地址：留空时自动使用 `${server.external_url}/api/auth/callback`，需在 Casdoor 应用里配置相同的 Redirect URL。
 
 **systemd 单元**（`/etc/systemd/system/upgrade-mgr.service`）：
 

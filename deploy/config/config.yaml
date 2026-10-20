@@ -35,7 +35,7 @@ auth:
 consul:                       # 可选：主机与业务分组数据源
   enabled: false
   address: ""                 # 如 http://10.0.56.118:8500
-  token: ""
+  token: ""                   # 建议用环境变量 CONSUL_TOKEN 覆盖
   datacenter: ""              # 留空自动探测（Agent API → Catalog 兜底）
   timeout: 10
   concurrency: 16
@@ -43,14 +43,15 @@ consul:                       # 可选：主机与业务分组数据源
   sync_interval: ""           # 如 5m / 1h，留空不定时
   leader_election: true       # 多实例高可用（启用 Consul 时自动生效）
 
-casdoor:                      # 可选：与 consul_mgr 共用 FlyIAM 实现 SSO
-  endpoint: ""
-  public_endpoint: ""
+casdoor:                      # 可选：与 consul_mgr 共用 FlyIAM 实现 SSO（auth.provider=casdoor 时启用）
+  endpoint: ""                # 服务端访问 Casdoor 地址，如 http://10.0.56.118:8000
+  public_endpoint: ""         # 浏览器访问地址；留空复用 endpoint
   client_id: ""
   client_secret: ""
-  certificate: ""
+  certificate: ""             # 可选（预留）
   organization: flyiam
   application: flyiam
+  redirect_uri: ""            # 留空按 server.external_url + /api/auth/callback 推导
 
 redis:                        # 可选：缓存
   enabled: false
