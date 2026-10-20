@@ -85,6 +85,22 @@ jobs:
           name: binaries-agent-legacy
           path: dist/*
 
+  cleanup:
+    name: 清理旧的 workflow 运行记录
+    if: github.event_name == 'push'
+    needs: [build, agent-legacy]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: 清理旧的 workflow 运行记录
+        uses: Mattraks/delete-workflow-runs@v2.1.0
+        with:
+          repository: ${{ github.repository }}
+          retain_days: 1
+          keep_minimum_runs: 3
+
   release:
     name: 创建版本发布
     if: startsWith(github.ref, 'refs/tags/v')
