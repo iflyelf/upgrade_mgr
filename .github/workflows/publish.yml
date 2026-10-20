@@ -151,7 +151,7 @@ jobs:
         with:
           registry: swr.cn-east-3.myhuaweicloud.com
           username: cn-east-3@${{ secrets.HUAWEI_ACCESS_KEY }}
-          password: ${{ secrets.HUAWEI_SECRET_KEY }}
+          password: ${{ secrets.HUAWEI_SWR_PASSWORD }}
 
       - name: 构建并推送镜像(仅 latest)
         uses: docker/build-push-action@v7
