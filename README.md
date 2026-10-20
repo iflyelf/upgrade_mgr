@@ -190,6 +190,33 @@ Agent 只依赖标准库，所以用独立 modfile `build/agent-legacy.mod`（`g
 
 ---
 
+## CI/CD 与镜像发布
+
+推送代码到 `main` 或在 Actions 页面手动触发 `.github/workflows/publish.yml` 即构建，二进制与镜像统一发布到 `latest`：
+
+| 产物 | 位置 |
+|---|---|
+| 控制台二进制 | `upgrade-mgr-linux-{amd64,arm64,arm}.tar.gz` |
+| Agent 二进制 | `upgrade-agent-linux-{amd64,arm64,arm}.tar.gz` |
+| Agent Legacy（CentOS 6） | `upgrade-agent-linux-{amd64,386,arm64}-legacy.tar.gz` |
+| 华为云 SWR 镜像 | `swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest` |
+| DockerHub 镜像（可选） | `iflyelf/upgrade-mgr:latest` |
+
+二进制发布到 GitHub Release 的 `latest` 标签，下载统一走 `https://down.xiaonuo.live?url=` 加速。
+
+镜像凭据通过 GitHub Secrets 注入，**不要写入仓库**：
+
+| Secret | 说明 |
+|---|---|
+| `SWR_USERNAME` | 华为云 SWR 用户名，格式 `cn-east-3@<Access Key Id>` |
+| `SWR_PASSWORD` | 华为云 SWR 登录密码 |
+| `DOCKER_USERNAME` | DockerHub 用户名（可选） |
+| `DOCKER_PASSWORD` | DockerHub 密码/令牌（可选） |
+
+> 同一分支仅保留最新一次构建（自动取消旧构建）；工作流结束后自动清理 1 天前的旧运行记录，最少保留 3 次。
+
+---
+
 ## 部署指南
 
 ### 1. 准备数据库
@@ -307,10 +334,13 @@ server {
 # 方式1: 使用控制台生成的一键命令（推荐）
 # 登录控制台 → 设置页 → Agent 注册令牌 → 复制安装命令 → 目标机器执行
 
-# 方式2: 手动安装
-wget -O /tmp/upgrade-agent https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64
-chmod +x /tmp/upgrade-agent
-/tmp/upgrade-agent install --server https://upgrade.example.com --enroll-token <token>
+# 方式2: 手动安装（下载均通过 down.xiaonuo.live 加速）
+# 按需把 amd64 换成 arm64 / arm；CentOS 6 等老内核请使用 *-legacy 包
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent.tar.gz \
+  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
+tar -xzf /tmp/upgrade-agent.tar.gz -C /tmp
+chmod +x /tmp/upgrade-agent-linux-amd64
+/tmp/upgrade-agent-linux-amd64 install --server https://upgrade.example.com --enroll-token <token>
 
 # 检查服务状态
 systemctl status upgrade-agent  # systemd
