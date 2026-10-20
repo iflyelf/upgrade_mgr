@@ -7,11 +7,19 @@ package sync
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/consul"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/pglock"
 )
+
+// ErrSyncInProgress 同一时刻已有其他实例/请求在执行 Consul 同步。
+var ErrSyncInProgress = errors.New("已有 Consul 同步任务在执行")
+
+// syncLockKey Consul 同步跨实例互斥键。
+const syncLockKey int64 = 0x7570677261646504 // "upgrade\x04"
 
 // Result 一次同步的统计。
 type Result struct {
@@ -38,6 +46,18 @@ func (s *Syncer) SyncFromConsul(ctx context.Context, cli *consul.Client) (*Resul
 	if cli == nil {
 		return nil, fmt.Errorf("consul 客户端未初始化")
 	}
+	// 多副本/手动与定时并发时只允许一个同步写库，避免重复查询与重复 upsert。
+	lockCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	lock, ok, err := pglock.Try(lockCtx, s.db, syncLockKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrSyncInProgress
+	}
+	defer lock.Unlock()
+
 	res := &Result{StartedAt: time.Now()}
 
 	services, err := cli.Services()

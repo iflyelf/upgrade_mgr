@@ -39,12 +39,3 @@ func UpdateSettings(s *svc.ServiceContext) http.HandlerFunc {
 		httpx.OK(w, map[string]any{"applied": applied})
 	}
 }
-
-// Health 健康检查（无需认证）。
-func Health() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok","service":"upgrade_mgr"}`))
-	}
-}

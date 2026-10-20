@@ -6,7 +6,7 @@ server:
   host: 0.0.0.0
   port: 8090
   web_embedded: true
-  session_secret: ""          # 内置登录会话密钥，留空则每次启动随机（重启需重登）
+  session_secret: ""          # 会话密钥；留空则自动生成并持久化到数据库（多副本/重启共享），生产建议显式 32+ 字节
   external_url: ""            # Agent/浏览器实际访问地址；直连示例 http://10.0.56.118:8090（env SERVER_EXTERNAL_URL）
   trust_proxy: false          # 是否信任 X-Forwarded-For；无反向代理保持 false（env TRUST_PROXY）
   trusted_proxies: []         # 受信代理 IP/CIDR（env TRUSTED_PROXIES，逗号分隔）；XFF 从右往左跳过这些地址
@@ -41,7 +41,6 @@ consul:                       # 可选：主机与业务分组数据源
   concurrency: 16
   sync_on_start: false
   sync_interval: ""           # 如 5m / 1h，留空不定时
-  leader_election: true       # 多实例高可用（启用 Consul 时自动生效）
 
 casdoor:                      # 可选：与 consul_mgr 共用 FlyIAM 实现 SSO（auth.provider=casdoor 时启用）
   endpoint: ""                # 服务端访问 Casdoor 地址，如 http://10.0.56.118:8000

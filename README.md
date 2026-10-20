@@ -36,7 +36,7 @@
 **P5 企业级增强**
 - **Prometheus 指标**：`/metrics` 端点暴露关键指标（Agent 在线数/心跳延迟/任务进度/失败率/指令执行时间），支持 Grafana 监控大盘
 - **多租户 RBAC**：数据库增加 tenant_id 列（hosts/components/tasks），租户隔离查询，支持 admin/user/viewer 角色权限控制
-- **分布式编排器**：基于 Consul Leader 选举，多控制台实例高可用（仅 Leader 执行编排循环，自动故障转移）；多副本前置条件见「容器水平扩展」
+- **分布式编排器**：基于 PostgreSQL advisory lock，多控制台实例安全并行（每轮仅一个副本推进批次，自动故障转移）；单机与多副本共用同一逻辑，不依赖 Consul
 - **制品外部存储**：抽象 Backend 接口，支持本地/S3(MinIO)/阿里云 OSS 可切换，预签名 URL 下载
 
 **P6 数据库自动化**
@@ -59,6 +59,7 @@ Go 1.26（`CGO_ENABLED=0`，交叉编译 linux/amd64、arm64、arm）· 标准�
 # 必填数据库；其余可选
 export DATABASE_URL="postgresql://user:pass@host:5432/upgrade_mgr?sslmode=disable"
 export ADMIN_USERNAME=admin ADMIN_PASSWORD=your-strong-password
+# 生产建议显式设置；留空时程序会生成一次并持久化到数据库，供多副本/重启共享
 export SESSION_SECRET="至少16字节的会话密钥"
 
 make build
@@ -69,7 +70,7 @@ make build
 启用 Consul 同步（可选，或在设置页配置；`datacenter` 留空自动探测）：
 ```bash
 export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
-       CONSUL_TOKEN=xxx CONSUL_LEADER_ELECTION=true
+       CONSUL_TOKEN=xxx CONSUL_SYNC_INTERVAL=5m
 ```
 
 ---
@@ -109,7 +110,7 @@ server:
   host: 0.0.0.0
   port: 8090
   external_url: http://your-server-ip:8090
-  session_secret: "请替换为至少16字节的随机密钥"
+  session_secret: "请替换为至少16字节的随机密钥；留空会自动生成并持久化到数据库"
 
 database:
   dsn: "postgresql://user:pass@localhost:5432/upgrade_mgr?sslmode=disable"
@@ -278,16 +279,15 @@ agent:
   require_enroll_token: true  # 生产环境强烈建议开启
   allow_exec_mode: false
 
-consul:  # 可选：同步主机清单
+consul:  # 可选：同步主机清单；编排器不依赖 Consul
   enabled: true
   address: consul.internal:8500
   token: ""  # 建议用环境变量 CONSUL_TOKEN 覆盖
   datacenter: ""  # 留空自动探测；多数据中心需显式指定
-  leader_election: true  # 多实例高可用
 ```
 
-> **配置优先级**：环境变量 > 配置文件 > 内置默认值。
-> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_LEADER_ELECTION`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET`（可写入 systemd 的 `EnvironmentFile`）。
+> **配置优先级**：运行期「设置页」写入的 `app_settings` > 环境变量 > 配置文件 > 内置默认值。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
 
 **`server.external_url` 怎么填**：
 
@@ -619,7 +619,7 @@ histogram_quantile(0.95, rate(upgrade_mgr_agents_heartbeat_lag_seconds_bucket[5m
 
 1. **HTTPS 强制**：生产环境务必配置 Nginx HTTPS，避免 token 明文传输
 2. **网络隔离**：控制台与 Agent 通信走内网，避免公网暴露
-3. **强密码**：修改默认管理员密码，配置强随机 `session_secret`
+3. **强密码**：修改默认管理员密码，显式配置 32+ 字节随机 `session_secret`（留空会生成并持久化到数据库）
 4. **注册令牌**：生产环境开启 `require_enroll_token`，防止未授权 Agent 注册
 5. **最小权限**：数据库用户仅授予必要权限，避免使用 superuser
 6. **审计日志**：定期检查 `audit_logs` 表，监控敏感操作
@@ -671,55 +671,125 @@ ldd your-binary  # 应为静态链接（not a dynamic executable）
 
 ---
 
-## 容器水平扩展（多副本）
+## 容器水平扩展（多副本）与滚动重启
 
-服务端 HTTP API 基本无状态，**可以运行多个副本**，但升级编排、会话和制品存储有额外要求。默认 `docker-compose.yml` 只在单副本前提下验证过，不能直接 `--scale`。
+服务端 HTTP API 基本无状态，**单机和多副本使用同一套代码**：编排器每 5 秒用 PostgreSQL advisory lock 抢占一次执行权，抢不到就跳过，因此不需要 Consul，也不会重复推进任务。默认 `docker-compose.yml` 仍是单副本编排，不能直接 `--scale`。
 
 ### 必须满足的条件
 
 | 条件 | 要求 | 原因 |
 |---|---|---|
-| 数据库 | 所有副本使用同一个 PostgreSQL | 任务、指令、Agent、审计等状态都在 DB |
-| `SESSION_SECRET` | 所有副本设置相同值，至少 16 字节，建议 32+ | 会话 Cookie 和 Casdoor OAuth state 都用它做 HMAC；留空时每个进程随机生成，换副本就会登录失效 |
+| 数据库 | 所有副本使用同一个 PostgreSQL，账号需有 `app_settings` 读写权限 | 任务、指令、Agent、审计、设置都在 DB；advisory lock 和会话密钥持久化也依赖它 |
+| `SESSION_SECRET` | 建议所有副本显式设置相同值（32+ 字节）；留空时程序会生成一次并持久化到 `app_settings`，多副本/重启共享 | 会话 Cookie 和 Casdoor OAuth state 都用它做 HMAC；滚动重启时不要随意更换 |
 | 制品存储 | `artifact.storage_type: s3` 或 `oss`；或所有副本挂载同一个 RWX 共享目录 | 默认 `local` 写在容器本地盘，上传和下载命中不同副本会 404 |
-| 编排器 | `consul.enabled: true` 且 `consul.leader_election: true`，并确保 Consul 启动时可用 | 未启用时每个副本都会跑编排循环，可能给同一主机重复下发升级指令 |
+| 编排器 | 无需额外配置；数据库连接可用即可 | PostgreSQL advisory lock 自动保证同一时刻只有一个副本推进批次 |
 | Agent 二进制 | 使用镜像内置的 `/opt/upgrade-mgr/dist/upgrade-agent-linux-<arch>`，或共享 `agent_binary_dir` | 一键安装命令需要从服务端目录读取二进制 |
+| 连接池 | `database.max_open_conns` 至少 4（默认 50；小于 4 时自动调整，建议 10+） | 编排器、维护、Consul 同步各自可能持锁并同时查询 |
 
-生产建议配置：
+推荐配置：
 
 ```yaml
 server:
-  session_secret: "所有副本一致的 32+ 字节随机串"
+  session_secret: "所有副本一致的 32+ 字节随机串"  # 也可留空，由 DB 持久化共享
 artifact:
   storage_type: s3          # 或 oss；尽量不用 local
-consul:
+  s3_endpoint: obs.cn-east-3.myhuaweicloud.com
+  s3_region: cn-east-3
+  s3_bucket: upgrade-mgr
+  s3_use_ssl: true
+database:
+  max_open_conns: 50
+consul:                     # 可选，仅用于主机清单同步，不参与编排主备
   enabled: true
-  leader_election: true
+  address: consul.internal:8500
+  sync_interval: 5m
 ```
 
-也可用环境变量：`CONSUL_ENABLED=true`、`CONSUL_LEADER_ELECTION=true`、`CONSUL_SYNC_INTERVAL=5m`。
+S3/OSS 凭据可用环境变量注入，避免写进配置文件：`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_S3_ENDPOINT`、`ARTIFACT_S3_REGION`、`ARTIFACT_S3_BUCKET`、`ARTIFACT_S3_ACCESS_KEY`、`ARTIFACT_S3_SECRET_KEY`、`ARTIFACT_S3_USE_SSL`，以及对应的 `ARTIFACT_OSS_*`。
+
+### Kubernetes 滚动发布
+
+仓库提供 `deploy/k8s/upgrade-mgr.yaml` 和 `deploy/k8s/secret.example.yaml`：
+
+- Deployment 默认 3 副本，`maxUnavailable: 0`、`maxSurge: 1`，新 Pod 就绪后才终止旧 Pod
+- 就绪探针 `GET /ready`（检查数据库），存活探针 `GET /health`
+- `terminationGracePeriodSeconds: 40` + `preStop sleep 5`，覆盖 Agent 20 秒长轮询
+- PDB `maxUnavailable: 1`，节点维护不会一次驱逐多个副本
+- 清单默认 `trust_proxy: false`；放在 Ingress/Nginx 后时改为 `true`，并只填实际代理 CIDR
+- **单机模式**：把 Deployment 的 `replicas` 改为 `1` 即可；不需要 Consul。若使用 `artifact.storage_type: local`，把 `emptyDir` 换成持久化 PVC（多副本需要 RWX 共享 PVC）
+
+使用步骤：
+
+```bash
+# 0. 创建命名空间（主清单也包含 Namespace，可跳过此步直接 apply 主清单）
+kubectl create namespace upgrade-mgr --dry-run=client -o yaml | kubectl apply -f -
+
+# 1. 复制 Secret 模板并填入真实数据库/S3/管理员密码（不要提交填好的文件）
+cp deploy/k8s/secret.example.yaml /tmp/upgrade-mgr-secret.yaml
+vi /tmp/upgrade-mgr-secret.yaml
+kubectl apply -f /tmp/upgrade-mgr-secret.yaml
+
+# 2. 修改 ConfigMap 里的 external_url、S3/OSS 地址和桶名后应用
+vi deploy/k8s/upgrade-mgr.yaml
+kubectl apply -f deploy/k8s/upgrade-mgr.yaml
+
+# 3. 查看滚动状态
+kubectl -n upgrade-mgr rollout status deployment/upgrade-mgr
+```
+
+### 变更后滚动重启所有副本
+
+**推荐路径：设置页修改 → 滚动重启。** 设置页会把值写入数据库并只立即更新当前副本内存；滚动重启后所有副本在启动时重新加载 `app_settings`，最终一致。
+
+```bash
+kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
+kubectl -n upgrade-mgr rollout status deployment/upgrade-mgr
+```
+
+如果改的是 ConfigMap / Secret / YAML：
+
+```bash
+kubectl apply -f /tmp/upgrade-mgr-secret.yaml   # 若改了 Secret
+kubectl apply -f deploy/k8s/upgrade-mgr.yaml
+# K8s 不会因为 ConfigMap/Secret 变化自动重启 Pod，必须显式 rollout restart
+kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
+```
+
+注意事项：
+
+1. **DB 设置优先级最高**：`app_settings` 中的值会覆盖 YAML/环境变量。若要从 YAML/env 接管某个配置，先删除对应 DB 行（设置页保存过的键才有行），再滚动重启：
+   ```sql
+   DELETE FROM app_settings WHERE key = 'consul.address';
+   ```
+2. **不要在同一次滚动中更换 `SESSION_SECRET`**：新旧副本密钥不同会导致用户会话和 Casdoor state 校验失败。需要轮换时单独安排窗口，并接受所有用户重新登录。
+3. **数据库迁移必须向后兼容**：新副本启动时可能先执行迁移，而旧副本仍在跑。新增列/表通常安全；删除/重命名列请用 expand-contract 或停机窗口。
+4. **切换制品存储前先迁移历史制品**：从 `local` 切到 S3/OSS 时，旧制品不会自动上传；否则旧版本下载会 404。
+5. **切换认证方式会有短暂不一致**：滚动期间旧副本仍用旧 provider，新副本用新 provider。建议在维护窗口操作，或确认两种登录方式都能接受。
 
 ### 启动后确认
 
-- 日志出现 `✅ 灰度编排器已启动（分布式模式，Leader 选举）` 才表示多副本编排安全。
-- 若出现 `⚠️ ... Consul 不可用，当前退化为单机编排`，说明当前是多副本单机编排，存在重复下发风险；请恢复 Consul 并重启，或暂时只保留一个副本。
-- 若出现 `⚠️ Consul 已启用但未开启 leader_election`，请补上 `leader_election: true`。
+- 所有副本日志出现 `✅ 灰度编排器已启动（PostgreSQL advisory lock，单机/多副本通用）`。
+- 确认制品后端没有出现“降级为 local”告警；多副本使用本地盘会导致上传/下载命中不同副本时 404。
+- `GET /ready` 返回 200 且 `{"status":"ready"}`；`GET /health` 只表示进程存活。
+- 多副本下任意副本被终止，其他副本下一轮会自动抢到编排锁，任务继续推进。
+- 手动 Consul 同步与定时同步并发时，只有一个会执行；另一个返回 409 或直接跳过。
 
 ### 副本间不一致的点（可接受但需知悉）
 
-- **设置页不是跨副本热更新**：修改只写入当前副本内存和数据库，其他副本不会重新加载；多副本请用 YAML/环境变量，变更后滚动重启全部副本。部分设置（如认证方式、制品目录）本来就需要重启。
+- **设置页不是跨副本热更新**：修改只写入当前副本内存和数据库，其他副本不会重新加载；多副本请改完后滚动重启全部副本。
 - **限流是进程内内存**：每个副本各算一份，N 个副本的实际阈值约为 N 倍；公网建议在 Ingress/WAF 做全局限流。
 - **指标按副本独立**：Prometheus 需要抓取所有 Pod/容器，不能只抓一个。
 - **会话撤销有最多 30 秒本地缓存**：改密/禁用后，其他副本最迟约 30 秒后拒绝旧会话。
-- **Consul 定时同步每个副本都会执行**：upsert 幂等，但会产生重复查询；不影响一致性。
+- **Consul 同步已加跨副本锁**：同一时刻只有一个副本写库；其他副本跳过本轮，不影响一致性。
 
 ### 容器编排注意事项
 
+- PostgreSQL advisory lock 是**会话级锁**；如果数据库前面有 PgBouncer，请使用 `session pooling`，不要用 transaction pooling，否则加锁/解锁可能落到不同后端连接。
 - 默认 `deploy/docker/docker-compose.yml` 带 `container_name` 和固定宿主机端口，不能直接 `docker compose up --scale`；多副本请用 Kubernetes/ECS/Nomad，或去掉 `container_name`、改用 `expose` 并由前置负载均衡转发。
 - Agent 使用 HTTP 长轮询，单次最长 `agent.poll_hold` 秒（默认 20）；负载均衡/Ingress 空闲超时需大于 20 秒（Nginx 默认 60 秒可以）。
-- 优雅关闭等待最多 30 秒；Kubernetes 建议 `terminationGracePeriodSeconds: 35`。
-- 健康检查可用 `GET /health`；应用在启动时就会校验数据库连接，数据库不可用会直接退出。
-- 需要多副本但不打算部署 Consul 时，当前版本不建议运行多个编排副本；可暂时只保留一个服务副本，或后续改为 PostgreSQL advisory lock 后再全量扩副本。
+- 优雅关闭等待最多 30 秒；Kubernetes 建议 `terminationGracePeriodSeconds: 40`（清单已配置）。
+- 健康检查用 `GET /health` 做存活、`GET /ready` 做就绪；数据库不可用时 `/ready` 返回 503，应用启动阶段数据库不可用会直接退出。
+- 不部署 Consul 也可以多副本：Consul 只影响主机清单同步，不影响编排、会话和制品。
 
 ---
 
@@ -729,9 +799,9 @@ consul:
 
 1. **Go 版本与内核兼容性**：控制台和默认 Agent 用 Go 1.26 构建，要求 Linux 内核 ≥ 3.2。CentOS 6（内核 2.6.32）请使用 `make agent-legacy` 产出的 Go 1.23 版 Agent，见上文「CentOS 6 / 老内核 Agent」。
 
-2. **多实例部署**：不是开箱即用，必须同时满足共享 `SESSION_SECRET`、共享/对象制品存储、Consul Leader 选举等条件，见「容器水平扩展（多副本）」。未启用 Leader 选举时多实例会重复编排任务。
+2. **多实例部署**：编排器已改为 PostgreSQL advisory lock，不再依赖 Consul Leader；多副本需共享数据库、共享/对象制品存储，并建议使用一致的 `SESSION_SECRET`，见「容器水平扩展（多副本）与滚动重启」。
 
-3. **配置热更新**：设置页只对当前副本生效，其他副本不会重新加载；多副本请用 YAML/环境变量，修改后滚动重启。部分配置（如 `allow_exec_mode`、认证方式、制品目录）也需要重启。
+3. **配置热更新**：设置页只对当前副本即时生效（同时写入 DB）；多副本需在修改后滚动重启全部副本。`app_settings` 优先级高于 YAML/环境变量，切回配置文件前需清理对应 DB 行。部分配置（如 `allow_exec_mode`、认证方式、制品目录）本来就需要重启。
 
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
@@ -758,14 +828,17 @@ consul:
 
 *编排器核心重构*：
 - 租约回收：dispatched/accepted/running 超时自动置为 timeout，pending 过期置为 expired
-- 批次下发改为单事务：CAS 批次状态 + FOR UPDATE SKIP LOCKED 认领主机，防重复下发
+- 批次下发改为全局 advisory lock + 单主机事务（FOR UPDATE），防多副本/滚动重启重复下发
 - HealthWait 实现：检查上一批次 finished_at，未到等待时间不下发
 - 失败批次处理：超阈值时批次置为 failed 任务转 paused，Promote 后跳过 failed 批次继续
 - Cancel 完整实现：取消未完成的 commands 和 task_hosts，更新任务状态
 - 百分比灰度至少分配 1 台（`task.go` 整数除法归零修复，新增 3 个测试用例）
 
 *并发与性能*：
-- Leader 选举改为 `Run` 循环，session 失效/续约失败后自动重新竞选
+- 编排器改为 PostgreSQL advisory lock，移除 Consul Leader 选举依赖；单机/多副本统一，滚动重启可自动接管
+- 批次通过/失败与任务暂停同一事务提交，避免重启窗口误推进下一批
+- 空 `SESSION_SECRET` 自动生成并持久化到 `app_settings`，多副本/重启共享
+- 新增 `GET /ready` 就绪探针，`/health` 仅作存活探针
 - `setting.Apply` 热更新用 `Snapshot()` 方法消除竞态
 - 迁移系统死锁修复：`migrate.go` 重构为 querier 接口，全程在持锁连接上执行
 - `/8` 等大网段展开限制为 65536 条（`ipx.go` 预先计算），防 OOM
@@ -811,7 +884,7 @@ internal/
   config/ setting/ svc/ auth/ middleware/ handler/
   logic/{agentgw,component,artifact,sync,task}
   agent/{watchdog,svcmgr,downloader,binswap,executor,installer,selfupdate}
-  pkg/{ipx,runner,notify,signer,consul,httpx,safepath,...}
+  pkg/{ipx,runner,notify,signer,consul,httpx,safepath,pglock,...}
   migrate/       数据库迁移
   storage/       制品存储（local/s3/oss）
   metrics/       Prometheus 指标
@@ -830,7 +903,7 @@ scripts/      工具脚本
 - [x] **P2**：组件/制品完整 CRUD、任务模型、长轮询原子取件、维护租约、ack/stage/report 闭环、端到端验证
 - [x] **P3**：灰度编排器、Agent 指令验签、全 Go 安装器、保活 watchdog、CI 多架构交叉编译
 - [x] **P4**：Agent 自升级、Consul Meta 版本回写、enroll-token 生成 API、主机升级历史 API
-- [x] **P5**：Prometheus 指标、多租户 RBAC、分布式编排器（Consul Leader 选举）、制品外部存储（S3/OSS）
+- [x] **P5**：Prometheus 指标、多租户 RBAC、分布式编排器（PostgreSQL advisory lock）、制品外部存储（S3/OSS）
 - [x] **P6**：数据库自动化（自动创建/版本化迁移/自动维护/零停机更新）
 
 ---

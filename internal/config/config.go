@@ -82,15 +82,14 @@ type AuthConfig struct {
 
 // ConsulConfig 可选：主机与业务分组数据源。
 type ConsulConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	Address        string `yaml:"address"`
-	Token          string `yaml:"token"`
-	Datacenter     string `yaml:"datacenter"`
-	Timeout        int    `yaml:"timeout"`     // 秒
-	Concurrency    int    `yaml:"concurrency"` // 批量查询并发
-	SyncOnStart    bool   `yaml:"sync_on_start"`
-	SyncInterval   string `yaml:"sync_interval"`   // 如 5m/1h，空则不定时
-	LeaderElection bool   `yaml:"leader_election"` // 启用 Leader 选举（多实例高可用）
+	Enabled      bool   `yaml:"enabled"`
+	Address      string `yaml:"address"`
+	Token        string `yaml:"token"`
+	Datacenter   string `yaml:"datacenter"`
+	Timeout      int    `yaml:"timeout"`     // 秒
+	Concurrency  int    `yaml:"concurrency"` // 批量查询并发
+	SyncOnStart  bool   `yaml:"sync_on_start"`
+	SyncInterval string `yaml:"sync_interval"` // 如 5m/1h，空则不定时
 }
 
 // CasdoorConfig 可选：FlyIAM/Casdoor SSO。
@@ -229,7 +228,6 @@ func (c *Config) applyEnv() {
 	setStr(&c.Consul.Address, "CONSUL_ADDRESS")
 	setStr(&c.Consul.Token, "CONSUL_TOKEN")
 	setStr(&c.Consul.Datacenter, "CONSUL_DATACENTER")
-	setBool(&c.Consul.LeaderElection, "CONSUL_LEADER_ELECTION")
 	setBool(&c.Consul.SyncOnStart, "CONSUL_SYNC_ON_START")
 	setStr(&c.Consul.SyncInterval, "CONSUL_SYNC_INTERVAL")
 
@@ -247,6 +245,17 @@ func (c *Config) applyEnv() {
 	setStr(&c.Redis.Password, "REDIS_PASSWORD")
 
 	setStr(&c.Artifact.Dir, "ARTIFACT_DIR")
+	setStr(&c.Artifact.StorageType, "ARTIFACT_STORAGE_TYPE")
+	setStr(&c.Artifact.S3Endpoint, "ARTIFACT_S3_ENDPOINT")
+	setStr(&c.Artifact.S3Region, "ARTIFACT_S3_REGION")
+	setStr(&c.Artifact.S3Bucket, "ARTIFACT_S3_BUCKET")
+	setStr(&c.Artifact.S3AccessKey, "ARTIFACT_S3_ACCESS_KEY")
+	setStr(&c.Artifact.S3SecretKey, "ARTIFACT_S3_SECRET_KEY")
+	setBool(&c.Artifact.S3UseSSL, "ARTIFACT_S3_USE_SSL")
+	setStr(&c.Artifact.OSSEndpoint, "ARTIFACT_OSS_ENDPOINT")
+	setStr(&c.Artifact.OSSBucket, "ARTIFACT_OSS_BUCKET")
+	setStr(&c.Artifact.OSSAccessKey, "ARTIFACT_OSS_ACCESS_KEY")
+	setStr(&c.Artifact.OSSSecretKey, "ARTIFACT_OSS_SECRET_KEY")
 	setStr(&c.Log.Level, "LOG_LEVEL")
 
 	if c.Server.Host == "" {

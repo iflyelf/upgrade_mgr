@@ -1,0 +1,199 @@
+# upgrade-mgr Kubernetes 部署清单（多副本 + 滚动重启）
+#
+# 使用前：
+#   1. 修改 ConfigMap 中的 external_url、S3/OSS 地址和桶名。
+#   2. 按 secret.example.yaml 创建真实 Secret（不要提交真实凭据）。
+#   3. kubectl apply -f deploy/k8s/upgrade-mgr.yaml
+#
+# 单机模式：把 Deployment 的 replicas 改为 1 即可；编排器使用 PostgreSQL
+# advisory lock，单副本和多副本走同一套逻辑，不依赖 Consul。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: upgrade-mgr
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upgrade-mgr-config
+  namespace: upgrade-mgr
+data:
+  config.yaml: |
+    server:
+      host: 0.0.0.0
+      port: 8090
+      web_embedded: true
+      # 改成负载均衡/Ingress 的对外地址；不要填 Pod IP 或 localhost。
+      external_url: "https://upgrade.example.com"
+      # 位于 Ingress/Nginx 之后时改为 true，并只填代理所在 CIDR。
+      # 直连 Service/端口转发保持 false，避免伪造 X-Forwarded-For。
+      trust_proxy: false
+      trusted_proxies: []
+      # auto 按 external_url 推断；若用 HTTP 端口转发调试，临时改为 "false"。
+      cookie_secure: "auto"
+
+    database:
+      max_open_conns: 50
+      max_idle_conns: 10
+      conn_max_lifetime: 3600
+
+    artifact:
+      # 多副本必须使用 S3/OSS，或给所有副本挂载同一个 RWX 共享目录。
+      storage_type: s3
+      dir: /data/artifacts
+      s3_endpoint: "obs.cn-east-3.myhuaweicloud.com"
+      s3_region: "cn-east-3"
+      s3_bucket: "upgrade-mgr"
+      s3_use_ssl: true
+
+    agent:
+      poll_hold: 20
+      allow_exec_mode: false
+
+    consul:
+      enabled: false
+      # 需要同步主机清单时再开启；不参与编排器主备。
+      address: ""
+      sync_on_start: false
+      sync_interval: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upgrade-mgr
+  namespace: upgrade-mgr
+  labels:
+    app.kubernetes.io/name: upgrade-mgr
+spec:
+  # 单机模式改为 1；多副本建议 3 起步。
+  replicas: 3
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 新 Pod 就绪后才终止旧 Pod，滚动期间不中断服务。
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: upgrade-mgr
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: upgrade-mgr
+    spec:
+      # Agent 长轮询默认 20s，预留 preStop + Shutdown 时间。
+      terminationGracePeriodSeconds: 40
+      # SWR 私有镜像时取消注释并创建对应拉取凭据。
+      # imagePullSecrets:
+      #   - name: swr-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: upgrade-mgr
+      containers:
+        - name: upgrade-mgr
+          image: swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest
+          imagePullPolicy: Always
+          args: ["-c", "/etc/upgrade-mgr/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          envFrom:
+            - secretRef:
+                name: upgrade-mgr-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /etc/upgrade-mgr
+              readOnly: true
+            - name: artifacts
+              mountPath: /data/artifacts
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: upgrade-mgr-config
+        - name: artifacts
+          # S3/OSS 模式仅作临时目录；单机 local 模式请换成持久化 PVC。
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upgrade-mgr
+  namespace: upgrade-mgr
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: upgrade-mgr
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: upgrade-mgr
+  namespace: upgrade-mgr
+spec:
+  # 节点维护时最多中断 1 个副本；单副本模式下也不会永久阻塞驱逐。
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: upgrade-mgr

@@ -45,9 +45,24 @@ func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error
 
 // Promote 人工推进：auto_promote=false 时，将 paused 任务恢复为 running 以继续下一批。
 // 仅限 paused 状态（失败超阈值暂停后，Promote 跳过 failed 批次继续推进）。
+//
+// 「跳过失败批次」和「恢复任务」在同一事务内完成：先锁批次行，再更新任务，
+// 与 completeBatch 的加锁顺序一致，避免并发 Promote/编排器互相死锁。
 func (s *Service) Promote(ctx context.Context, sc scope.Scope, taskID int64) error {
 	tCond, tArgs := sc.Where("", 2)
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 先锁失败批次，再恢复任务；与 completeBatch 的加锁顺序一致。
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE task_batches SET status='skipped', finished_at=COALESCE(finished_at,NOW())
+		 WHERE task_id=$1 AND status='failed'`, taskID); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
 		`UPDATE upgrade_tasks SET status='running', updated_at=NOW() WHERE id=$1 AND `+tCond+` AND status='paused'`,
 		append([]any{taskID}, tArgs...)...)
 	if err != nil {
@@ -56,7 +71,7 @@ func (s *Service) Promote(ctx context.Context, sc scope.Scope, taskID int64) err
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("任务非暂停状态，无法推进")
 	}
-	return nil
+	return tx.Commit()
 }
 
 // Pause 暂停任务（仅限 running 状态）。
@@ -72,7 +87,7 @@ func (s *Service) Pause(ctx context.Context, sc scope.Scope, taskID int64) error
 // 将未完成的 commands 和 task_hosts 置为 canceled。
 func (s *Service) Cancel(ctx context.Context, sc scope.Scope, taskID int64) error {
 	tCond, tArgs := sc.Where("", 2)
-	
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -94,20 +109,21 @@ func (s *Service) Cancel(ctx context.Context, sc scope.Scope, taskID int64) erro
 		return fmt.Errorf("任务已处于终态 %s，无法取消", status)
 	}
 
-	// 2. 取消未完成的 commands（pending/dispatched/accepted/running）
+	// 2. 先锁 task_hosts，再取消 commands，与 dispatchHost 的加锁顺序一致，
+	//    避免 Cancel 与下发事务互相等待。
 	_, err = tx.ExecContext(ctx, `
-		UPDATE commands 
-		SET status='canceled', finished_at=NOW() 
-		WHERE task_id=$1 AND status IN ('pending','dispatched','accepted','running')`, taskID)
+		UPDATE task_hosts
+		SET status='canceled', finished_at=NOW()
+		WHERE task_id=$1 AND status IN ('pending','running')`, taskID)
 	if err != nil {
 		return err
 	}
 
-	// 3. 取消未完成的 task_hosts（pending/running）
+	// 3. 取消未完成的 commands（pending/dispatched/accepted/running）
 	_, err = tx.ExecContext(ctx, `
-		UPDATE task_hosts 
-		SET status='canceled', finished_at=NOW() 
-		WHERE task_id=$1 AND status IN ('pending','running')`, taskID)
+		UPDATE commands
+		SET status='canceled', finished_at=NOW()
+		WHERE task_id=$1 AND status IN ('pending','dispatched','accepted','running')`, taskID)
 	if err != nil {
 		return err
 	}

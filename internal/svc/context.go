@@ -6,7 +6,10 @@ package svc
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"errors"
 	"log"
 	"strings"
 	"sync/atomic"
@@ -16,7 +19,6 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/config"
-	"github.com/iflyelf/upgrade_mgr/internal/leader"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
@@ -67,6 +69,9 @@ func New(c *config.Config) *ServiceContext {
 	if err := settings.Load(context.Background()); err != nil {
 		log.Printf("⚠️ 加载应用设置失败（用默认/env）: %v", err)
 	}
+
+	// 未显式配置会话密钥时，生成一次并持久化到 DB，供多副本/重启共享。
+	ensureSessionSecret(db, c)
 
 	compRepo := component.NewRepo(db)
 	artRepo := initArtifactRepo(db, &c.Artifact)
@@ -128,42 +133,12 @@ func (s *ServiceContext) ReloadConsul() {
 }
 
 // StartOrchestrator 启动灰度编排循环（按批次推进 running 任务）。
-// 若启用 Consul，则使用 Leader 选举（仅 Leader 执行编排）。
+//
+// 所有副本都运行同一循环，每轮用 PostgreSQL advisory lock 抢占执行权；
+// 单机模式下同样走这条路径，不需要 Consul，也不需要额外 HA 配置。
 func (s *ServiceContext) StartOrchestrator(ctx context.Context) {
-	consul := s.Consul()
-	if consul != nil && s.Config.Consul.LeaderElection {
-		// 分布式模式：Leader 选举
-		go s.startOrchestratorWithLeaderElection(ctx)
-		log.Println("✅ 灰度编排器已启动（分布式模式，Leader 选举）")
-		return
-	}
-	if s.Config.Consul.Enabled && s.Config.Consul.LeaderElection {
-		// 配置了 HA 但 Consul 启动时不可用：保留单机模式以免任务停滞，
-		// 但必须显式告警——多副本同时运行会重复下发升级指令。
-		log.Println("⚠️ 已配置 Consul Leader 选举但 Consul 不可用，当前退化为单机编排；多副本可能重复下发，请检查 Consul")
-	} else if s.Config.Consul.Enabled {
-		log.Println("⚠️ Consul 已启用但未开启 leader_election，多副本会重复编排任务")
-	}
-	// 单机模式
 	go task.NewOrchestrator(s.Task).Run(ctx)
-	log.Println("✅ 灰度编排器已启动（单机模式）")
-}
-
-func (s *ServiceContext) startOrchestratorWithLeaderElection(ctx context.Context) {
-	consul := s.Consul()
-	if consul == nil {
-		return
-	}
-
-	election := leader.NewElection(consul.API(), "service/upgrade-mgr/orchestrator-leader")
-	orch := task.NewOrchestrator(s.Task)
-
-	// 使用 Run 循环：自动处理 session 失效后重新竞选
-	election.Run(ctx, func(leaderCtx context.Context) {
-		log.Println("✅ 成为 Leader，启动编排器")
-		orch.Run(leaderCtx)
-		log.Println("⚠️ 失去 Leader，停止编排")
-	})
+	log.Println("✅ 灰度编排器已启动（PostgreSQL advisory lock，单机/多副本通用）")
 }
 
 // StartMetrics 启动指标采集循环。
@@ -208,6 +183,9 @@ func (s *ServiceContext) runSyncOnce() {
 		return
 	}
 	res, err := s.Syncer.SyncFromConsul(context.Background(), cli)
+	if errors.Is(err, synclogic.ErrSyncInProgress) {
+		return // 其他副本/请求正在同步，本轮跳过
+	}
 	if err != nil {
 		log.Printf("⚠️ Consul 同步失败: %v", err)
 		return
@@ -221,7 +199,14 @@ func mustOpenDB(c *config.Config) *sql.DB {
 	if err != nil {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
-	db.SetMaxOpenConns(c.Database.MaxOpenConns)
+	maxOpen := c.Database.MaxOpenConns
+	if maxOpen > 0 && maxOpen < 4 {
+		// 编排器/维护/Consul 同步各自可能持有 1 个 advisory lock 连接，
+		// 同时还需要查询连接；过小会导致连接池互相等待。
+		maxOpen = 4
+		log.Println("⚠️ database.max_open_conns 过小，已调整为 4（建议 10+）")
+	}
+	db.SetMaxOpenConns(maxOpen)
 	db.SetMaxIdleConns(c.Database.MaxIdleConns)
 	db.SetConnMaxLifetime(time.Duration(c.Database.ConnMaxLifetime) * time.Second)
 	if err := db.Ping(); err != nil {
@@ -229,6 +214,62 @@ func mustOpenDB(c *config.Config) *sql.DB {
 	}
 	log.Println("✅ 数据库连接成功")
 	return db
+}
+
+const sessionSecretSettingKey = "server.session_secret"
+
+// ensureSessionSecret 在未显式配置 SESSION_SECRET 时，生成一次并持久化到 DB。
+//
+// 这样单机重启不会让所有人掉线，多副本也能共享同一密钥；显式设置 16+ 字节
+// 的 SESSION_SECRET 时仍以显式值为准。该 key 不在设置页注册表中，不会回显。
+func ensureSessionSecret(db *sql.DB, c *config.Config) {
+	if len(c.Server.SessionSecret) >= 16 {
+		return
+	}
+	if c.Server.SessionSecret != "" {
+		log.Println("⚠️ SESSION_SECRET 过短（<16 字节），改用数据库持久化密钥")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var secret string
+	err := db.QueryRowContext(ctx,
+		`SELECT value FROM app_settings WHERE key=$1`, sessionSecretSettingKey).Scan(&secret)
+	if err != nil && err != sql.ErrNoRows {
+		log.Printf("⚠️ 读取数据库 SESSION_SECRET 失败: %v", err)
+		return
+	}
+	if len(secret) >= 16 {
+		c.Server.SessionSecret = secret
+		log.Println("ℹ️ 已使用数据库持久化的 SESSION_SECRET（多副本/重启共享）")
+		return
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		log.Printf("⚠️ 生成 SESSION_SECRET 失败: %v", err)
+		return
+	}
+	generated := base64.RawURLEncoding.EncodeToString(buf)
+	// 并发启动时只保留第一个有效值；若其他副本已写入 16+ 字节密钥则不覆盖。
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO app_settings (key, value, updated_at) VALUES ($1,$2,NOW())
+		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
+		WHERE length(app_settings.value) < 16`, sessionSecretSettingKey, generated); err != nil {
+		log.Printf("⚠️ 持久化 SESSION_SECRET 失败: %v", err)
+		return
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT value FROM app_settings WHERE key=$1`, sessionSecretSettingKey).Scan(&secret); err != nil {
+		log.Printf("⚠️ 读取数据库 SESSION_SECRET 失败: %v", err)
+		return
+	} else if len(secret) < 16 {
+		log.Println("⚠️ 数据库中的 SESSION_SECRET 长度不足 16 字节")
+		return
+	}
+	c.Server.SessionSecret = secret
+	log.Println("ℹ️ SESSION_SECRET 未显式配置，已生成并持久化到数据库（多副本/重启共享）")
 }
 
 func buildAuth(c *config.Config, db *sql.DB) auth.Provider {

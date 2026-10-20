@@ -78,15 +78,15 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Println("正在关闭...")
-	
+
 	// 取消所有后台任务（编排器、长轮询等）
 	cancel()
-	
+
 	// 停止限流器（清理 goroutine）
 	for _, rl := range limiters {
 		rl.Stop()
 	}
-	
+
 	// 给足够时间让长轮询正常结束（默认 20s + 余量）
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutCancel()
@@ -115,6 +115,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 
 	// 公开
 	mux.HandleFunc("GET /health", handler.Health())
+	mux.HandleFunc("GET /ready", handler.Ready(sc))
 	mux.HandleFunc("GET /api/auth/config", handler.AuthConfig(sc))
 	mux.Handle("POST /api/auth/login", middleware.RateLimitMiddleware(loginLimiter)(http.HandlerFunc(handler.Login(sc))))
 	mux.HandleFunc("POST /api/auth/logout", handler.Logout(sc))

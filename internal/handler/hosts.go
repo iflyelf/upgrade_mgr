@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
@@ -115,6 +117,10 @@ func SyncHosts(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		res, err := s.Syncer.SyncFromConsul(r.Context(), cli)
+		if errors.Is(err, synclogic.ErrSyncInProgress) {
+			httpx.Fail(w, http.StatusConflict, "已有同步任务正在执行，请稍后重试")
+			return
+		}
 		if err != nil {
 			httpx.FailErr(w, http.StatusBadGateway, fmt.Errorf("同步失败: %w", err))
 			return

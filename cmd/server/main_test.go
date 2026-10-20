@@ -49,6 +49,11 @@ func TestServerIntegration(t *testing.T) {
 		t.Fatalf("health failed: %d %s", code, body)
 	}
 
+	// ready（数据库可用）
+	if body, code := get(t, client, ts.URL+"/ready"); code != 200 || !strings.Contains(body, "ready") {
+		t.Fatalf("ready failed: %d %s", code, body)
+	}
+
 	// 未认证访问 hosts → 401
 	if _, code := get(t, client, ts.URL+"/api/hosts"); code != 401 {
 		t.Fatalf("expected 401 unauth, got %d", code)
