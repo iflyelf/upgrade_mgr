@@ -62,6 +62,10 @@ COPY --from=builder /tmp/upgrade-mgr /usr/local/bin/upgrade-mgr
 COPY --from=builder /tmp/upgrade-agent /usr/local/bin/upgrade-agent
 RUN chmod +x /usr/local/bin/upgrade-mgr /usr/local/bin/upgrade-agent
 
+# 一键安装：Agent 二进制放入 server.agent_binary_dir（默认 ./dist）
+ARG TARGETARCH=amd64
+COPY --from=builder --chown=upgrade:upgrade /tmp/upgrade-agent /opt/upgrade-mgr/dist/upgrade-agent-linux-${TARGETARCH}
+
 # 拷贝默认配置示例（可选）
 COPY --chown=upgrade:upgrade deploy/config/config.yaml /etc/upgrade-mgr/config.example.yaml
 

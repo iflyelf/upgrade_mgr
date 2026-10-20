@@ -87,9 +87,16 @@ wget -q -c --no-check-certificate -O /tmp/upgrade-mgr.tar.gz \
   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-mgr-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-mgr.tar.gz -C /tmp
 
+# 1.1 下载 Agent 二进制（供控制台生成一键安装命令时下载）
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent.tar.gz \
+  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
+tar -xzf /tmp/upgrade-agent.tar.gz -C /tmp
+
 # 2. 替换二进制(mv -f 原子覆盖)
+mkdir -p /opt/upgrade-mgr/dist
 mv -f /tmp/upgrade-mgr-linux-amd64 /usr/local/bin/upgrade-mgr
 chmod +x /usr/local/bin/upgrade-mgr
+mv -f /tmp/upgrade-agent-linux-amd64 /opt/upgrade-mgr/dist/upgrade-agent-linux-amd64
 
 # 3. 准备配置目录和数据库
 mkdir -p /etc/upgrade-mgr /data/artifacts
@@ -395,6 +402,11 @@ systemctl status upgrade-agent  # systemd
 # 或
 status upgrade-agent            # upstart
 ```
+
+> **一键安装说明**：控制台生成的安装命令从 `server.agent_binary_dir`（默认 `./dist`）下载
+> `upgrade-agent-linux-<arch>`。systemd 部署请按上面步骤把 Agent 二进制放到
+> `/opt/upgrade-mgr/dist/`（服务的 `WorkingDirectory`），Docker 镜像已内置对应架构的 Agent。
+> 若自定义目录，请设置环境变量 `AGENT_BINARY_DIR`。
 
 ---
 
