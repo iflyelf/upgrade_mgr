@@ -236,7 +236,7 @@ createdb upgrade_mgr
 
 ### 2. 启动控制台
 
-**生产环境配置示例**（`config.yaml`）：
+**生产环境配置示例**（`config.yaml`，以 Nginx/HTTPS 为例；Nginx 不是必需组件，直连示例见下）：
 
 ```yaml
 server:
@@ -287,7 +287,7 @@ consul:  # 可选：同步主机清单
 ```
 
 > **配置优先级**：环境变量 > 配置文件 > 内置默认值。
-> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过 `ADMIN_PASSWORD`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET` 等环境变量注入（可写入 systemd 的 `EnvironmentFile`）。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET`（可写入 systemd 的 `EnvironmentFile`）。
 
 **`server.external_url` 怎么填**：
 
@@ -315,6 +315,43 @@ consul:  # 可选：同步主机清单
 - 反向代理后如需获取真实客户端 IP，设置 `trust_proxy: true`，并配置 `trusted_proxies`
 
 > 临时不确定时可以留空：生成安装命令会回退使用当前请求的 Host（按 `http://` 拼接）。但 HTTPS、反向代理或 Casdoor 场景务必显式填写，否则协议/回调地址会出错。
+
+**不用 Nginx 可以吗？**
+
+可以。控制台自带 HTTP 服务、内嵌前端和 Agent 长轮询接口，不依赖 Nginx，也不使用 WebSocket。无 Nginx 的最小配置：
+
+```yaml
+server:
+  host: 0.0.0.0          # 或绑定具体内网 IP，缩小暴露面
+  port: 8090
+  web_embedded: true     # 默认 true，直接提供前端页面
+  external_url: "http://10.0.88.88:8090"
+  trust_proxy: false     # 没有反向代理时必须保持 false
+  cookie_secure: "auto"  # HTTP 下自动为 false，登录正常
+```
+
+Docker 环境变量方式：
+
+```bash
+SERVER_EXTERNAL_URL=http://10.0.88.88:8090
+TRUST_PROXY=false
+COOKIE_SECURE=auto
+```
+
+Agent 安装命令里的 `--server` 使用同一地址：
+
+```bash
+/tmp/upgrade-agent-linux-amd64 install \
+  --server http://10.0.88.88:8090 \
+  --enroll-token '<token>'
+```
+
+注意：
+
+- 防火墙/安全组放行 8090，且 Agent 机器能直接访问该地址。
+- 纯 HTTP 下不要设置 `cookie_secure: true`，否则浏览器不回传 Cookie，表现为登录后仍跳回登录页。
+- 纯 HTTP 传输的密码、会话 Cookie、Agent 令牌和指令都是明文，仅适合可信内网；公网部署仍建议加 TLS。
+- 如使用 Casdoor，`external_url` 与 Casdoor 应用回调必须一致；Casdoor 是否允许 `http://` 回调取决于其配置。
 
 **Casdoor 对接说明**：
 - `endpoint`：本服务后端访问 Casdoor 的地址（用于换取 token、拉取用户信息）。
@@ -395,6 +432,7 @@ wget -q -c --no-check-certificate -O /tmp/upgrade-agent.tar.gz \
   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-agent.tar.gz -C /tmp
 chmod +x /tmp/upgrade-agent-linux-amd64
+# 无 Nginx 直连时把 --server 换成 http://<服务器IP>:8090
 /tmp/upgrade-agent-linux-amd64 install --server https://upgrade.example.com --enroll-token <token>
 
 # 检查服务状态

@@ -15,6 +15,9 @@ services:
       # 可选：通过环境变量覆盖配置
       - TZ=Asia/Shanghai
       # - DATABASE_URL=postgresql://user:pass@postgres:5432/upgrade_mgr?sslmode=disable
+      # - SERVER_EXTERNAL_URL=http://10.0.88.88:8090
+      # - TRUST_PROXY=false
+      # - COOKIE_SECURE=auto
       # - ADMIN_PASSWORD=your-strong-password
       # - SESSION_SECRET=your-session-secret
     networks:

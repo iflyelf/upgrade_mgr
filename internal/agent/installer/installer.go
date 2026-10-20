@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/iflyelf/upgrade_mgr/internal/agent/osinfo"
@@ -35,6 +36,7 @@ func Install(opts Options) error {
 	if opts.StatePath == "" {
 		opts.StatePath = "/var/lib/upgrade-agent/state.json"
 	}
+	opts.ServerURL = strings.TrimRight(opts.ServerURL, "/")
 	info := osinfo.Detect()
 
 	// 1. 复制当前二进制到目标路径（若不同）

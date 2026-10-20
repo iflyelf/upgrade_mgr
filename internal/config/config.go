@@ -39,8 +39,8 @@ type ServerConfig struct {
 	SessionSecret string   `yaml:"session_secret"` // 内置登录会话签名密钥，空则随机
 	// CookieSecure 会话 Cookie 的 Secure 属性：auto（按 ExternalURL 是否 https 推断）/true/false。
 	// 生产环境务必经 HTTPS 暴露，否则会话令牌可被明文窃取。
-	CookieSecure  string   `yaml:"cookie_secure"`
-	ExternalURL   string   `yaml:"external_url"`   // 对外可达地址，用于生成 Agent 安装命令
+	CookieSecure string `yaml:"cookie_secure"`
+	ExternalURL  string `yaml:"external_url"` // 对外可达地址，用于生成 Agent 安装命令
 	// TrustProxy 是否信任 X-Forwarded-For / X-Real-IP 头。
 	//
 	// 安全要点：仅当服务确实部署在可信反向代理（Nginx/LB）之后才可开启。
@@ -188,6 +188,8 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	c.applyEnv()
+	// 统一去掉结尾斜杠，避免拼接出 //api/... 导致 404。
+	c.Server.ExternalURL = strings.TrimRight(c.Server.ExternalURL, "/")
 	return c, nil
 }
 
@@ -196,6 +198,9 @@ func (c *Config) applyEnv() {
 	setStr(&c.Server.Host, "SERVER_HOST")
 	setInt(&c.Server.Port, "SERVER_PORT")
 	setStr(&c.Server.SessionSecret, "SESSION_SECRET")
+	setStr(&c.Server.ExternalURL, "SERVER_EXTERNAL_URL")
+	setBool(&c.Server.TrustProxy, "TRUST_PROXY")
+	setStr(&c.Server.CookieSecure, "COOKIE_SECURE")
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
 		c.Server.CORSOrigins = splitTrim(v)
 	}

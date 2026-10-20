@@ -250,7 +250,7 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", nil)
 
-		serverURL := s.Config.Server.ExternalURL
+		serverURL := strings.TrimRight(s.Config.Server.ExternalURL, "/")
 		if serverURL == "" {
 			serverURL = "http://" + r.Host
 		}

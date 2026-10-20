@@ -41,6 +41,8 @@ type Agent struct {
 
 // New 创建 Agent
 func New(cfg Config) *Agent {
+	// 容忍 --server 末尾多写斜杠，避免请求路径变成 //api/...
+	cfg.ServerURL = strings.TrimRight(cfg.ServerURL, "/")
 	info := osinfo.Detect()
 	return &Agent{
 		cfg:    cfg,
