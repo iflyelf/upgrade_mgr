@@ -235,7 +235,7 @@ createdb upgrade_mgr
 server:
   host: 0.0.0.0
   port: 8090
-  external_url: https://upgrade.example.com  # Agent 安装命令用
+  external_url: https://upgrade.example.com  # Agent/浏览器实际访问地址，见下方说明
   web_embedded: true
   session_secret: "your-64-byte-random-secret"
   trust_proxy: false  # 仅可信反向代理后开启
@@ -281,6 +281,33 @@ consul:  # 可选：同步主机清单
 
 > **配置优先级**：环境变量 > 配置文件 > 内置默认值。
 > 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过 `ADMIN_PASSWORD`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET` 等环境变量注入（可写入 systemd 的 `EnvironmentFile`）。
+
+**`server.external_url` 怎么填**：
+
+填写 **Agent/浏览器实际访问本服务的地址**，不是监听地址（`host`/`port`）。它会影响：
+
+- 控制台生成的一键安装命令（下载 Agent、`--server` 参数）
+- Casdoor OAuth 回调地址推导
+- `cookie_secure: auto` 时是否给会话 Cookie 加 `Secure`
+
+按部署方式选择：
+
+| 部署方式 | 填写示例 |
+|---|---|
+| 局域网直连（无域名） | `http://10.0.88.88:8090` |
+| Nginx/HTTPS 反向代理 | `https://upgrade.xiaonuo.live` |
+| Docker 端口映射 | `http://10.0.88.88:8090` |
+
+规则：
+
+- 必须带协议头：`http://` 或 `https://`
+- 不要带结尾斜杠，不要带路径（如 `/upgrade`）
+- **不要填 `localhost` / `127.0.0.1`**，否则其他机器上的 Agent 无法访问
+- 端口不是 80/443 时必须写端口
+- `server.port` 是服务监听端口；反向代理场景下 `external_url` 是代理后的域名，通常不带 8090
+- 反向代理后如需获取真实客户端 IP，设置 `trust_proxy: true`，并配置 `trusted_proxies`
+
+> 临时不确定时可以留空：生成安装命令会回退使用当前请求的 Host（按 `http://` 拼接）。但 HTTPS、反向代理或 Casdoor 场景务必显式填写，否则协议/回调地址会出错。
 
 **Casdoor 对接说明**：
 - `endpoint`：本服务后端访问 Casdoor 的地址（用于换取 token、拉取用户信息）。

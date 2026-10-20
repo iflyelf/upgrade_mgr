@@ -7,7 +7,7 @@ server:
   port: 8090
   web_embedded: true
   session_secret: ""          # 内置登录会话密钥，留空则每次启动随机（重启需重登）
-  external_url: ""            # 对外可达地址，用于生成 Agent 安装命令
+  external_url: ""            # Agent/浏览器实际访问地址，如 http://10.0.56.118:8090 或 https://upgrade.example.com
   trust_proxy: false          # 是否信任 X-Forwarded-For（仅可信反向代理后开启）
   trusted_proxies: []         # 受信代理 IP/CIDR（env TRUSTED_PROXIES，逗号分隔）；XFF 从右往左跳过这些地址
   cookie_secure: "auto"       # 会话 Cookie Secure 属性：auto/true/false
