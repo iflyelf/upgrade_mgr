@@ -135,11 +135,18 @@ func (s *ServiceContext) StartOrchestrator(ctx context.Context) {
 		// 分布式模式：Leader 选举
 		go s.startOrchestratorWithLeaderElection(ctx)
 		log.Println("✅ 灰度编排器已启动（分布式模式，Leader 选举）")
-	} else {
-		// 单机模式
-		go task.NewOrchestrator(s.Task).Run(ctx)
-		log.Println("✅ 灰度编排器已启动（单机模式）")
+		return
 	}
+	if s.Config.Consul.Enabled && s.Config.Consul.LeaderElection {
+		// 配置了 HA 但 Consul 启动时不可用：保留单机模式以免任务停滞，
+		// 但必须显式告警——多副本同时运行会重复下发升级指令。
+		log.Println("⚠️ 已配置 Consul Leader 选举但 Consul 不可用，当前退化为单机编排；多副本可能重复下发，请检查 Consul")
+	} else if s.Config.Consul.Enabled {
+		log.Println("⚠️ Consul 已启用但未开启 leader_election，多副本会重复编排任务")
+	}
+	// 单机模式
+	go task.NewOrchestrator(s.Task).Run(ctx)
+	log.Println("✅ 灰度编排器已启动（单机模式）")
 }
 
 func (s *ServiceContext) startOrchestratorWithLeaderElection(ctx context.Context) {
@@ -225,6 +232,9 @@ func mustOpenDB(c *config.Config) *sql.DB {
 }
 
 func buildAuth(c *config.Config, db *sql.DB) auth.Provider {
+	if len(c.Server.SessionSecret) < 16 {
+		log.Println("⚠️ SESSION_SECRET 未设置或过短（<16 字节）：多副本会话/Casdoor 登录不互通，重启后需重新登录；生产请设置所有副本一致的 32+ 字节密钥")
+	}
 	if c.Auth.Provider == "casdoor" {
 		redirect := c.Casdoor.RedirectURI
 		if redirect == "" && c.Server.ExternalURL != "" {

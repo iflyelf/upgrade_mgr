@@ -229,6 +229,9 @@ func (c *Config) applyEnv() {
 	setStr(&c.Consul.Address, "CONSUL_ADDRESS")
 	setStr(&c.Consul.Token, "CONSUL_TOKEN")
 	setStr(&c.Consul.Datacenter, "CONSUL_DATACENTER")
+	setBool(&c.Consul.LeaderElection, "CONSUL_LEADER_ELECTION")
+	setBool(&c.Consul.SyncOnStart, "CONSUL_SYNC_ON_START")
+	setStr(&c.Consul.SyncInterval, "CONSUL_SYNC_INTERVAL")
 
 	setStr(&c.Casdoor.Endpoint, "CASDOOR_ENDPOINT")
 	setStr(&c.Casdoor.PublicEndpoint, "CASDOOR_PUBLIC_ENDPOINT")

@@ -36,7 +36,7 @@
 **P5 企业级增强**
 - **Prometheus 指标**：`/metrics` 端点暴露关键指标（Agent 在线数/心跳延迟/任务进度/失败率/指令执行时间），支持 Grafana 监控大盘
 - **多租户 RBAC**：数据库增加 tenant_id 列（hosts/components/tasks），租户隔离查询，支持 admin/user/viewer 角色权限控制
-- **分布式编排器**：基于 Consul Leader 选举，多控制台实例高可用（仅 Leader 执行编排循环，自动故障转移）
+- **分布式编排器**：基于 Consul Leader 选举，多控制台实例高可用（仅 Leader 执行编排循环，自动故障转移）；多副本前置条件见「容器水平扩展」
 - **制品外部存储**：抽象 Backend 接口，支持本地/S3(MinIO)/阿里云 OSS 可切换，预签名 URL 下载
 
 **P6 数据库自动化**
@@ -69,7 +69,7 @@ make build
 启用 Consul 同步（可选，或在设置页配置；`datacenter` 留空自动探测）：
 ```bash
 export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
-       CONSUL_TOKEN=xxx
+       CONSUL_TOKEN=xxx CONSUL_LEADER_ELECTION=true
 ```
 
 ---
@@ -287,7 +287,7 @@ consul:  # 可选：同步主机清单
 ```
 
 > **配置优先级**：环境变量 > 配置文件 > 内置默认值。
-> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET`（可写入 systemd 的 `EnvironmentFile`）。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_LEADER_ELECTION`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET`（可写入 systemd 的 `EnvironmentFile`）。
 
 **`server.external_url` 怎么填**：
 
@@ -671,15 +671,67 @@ ldd your-binary  # 应为静态链接（not a dynamic executable）
 
 ---
 
+## 容器水平扩展（多副本）
+
+服务端 HTTP API 基本无状态，**可以运行多个副本**，但升级编排、会话和制品存储有额外要求。默认 `docker-compose.yml` 只在单副本前提下验证过，不能直接 `--scale`。
+
+### 必须满足的条件
+
+| 条件 | 要求 | 原因 |
+|---|---|---|
+| 数据库 | 所有副本使用同一个 PostgreSQL | 任务、指令、Agent、审计等状态都在 DB |
+| `SESSION_SECRET` | 所有副本设置相同值，至少 16 字节，建议 32+ | 会话 Cookie 和 Casdoor OAuth state 都用它做 HMAC；留空时每个进程随机生成，换副本就会登录失效 |
+| 制品存储 | `artifact.storage_type: s3` 或 `oss`；或所有副本挂载同一个 RWX 共享目录 | 默认 `local` 写在容器本地盘，上传和下载命中不同副本会 404 |
+| 编排器 | `consul.enabled: true` 且 `consul.leader_election: true`，并确保 Consul 启动时可用 | 未启用时每个副本都会跑编排循环，可能给同一主机重复下发升级指令 |
+| Agent 二进制 | 使用镜像内置的 `/opt/upgrade-mgr/dist/upgrade-agent-linux-<arch>`，或共享 `agent_binary_dir` | 一键安装命令需要从服务端目录读取二进制 |
+
+生产建议配置：
+
+```yaml
+server:
+  session_secret: "所有副本一致的 32+ 字节随机串"
+artifact:
+  storage_type: s3          # 或 oss；尽量不用 local
+consul:
+  enabled: true
+  leader_election: true
+```
+
+也可用环境变量：`CONSUL_ENABLED=true`、`CONSUL_LEADER_ELECTION=true`、`CONSUL_SYNC_INTERVAL=5m`。
+
+### 启动后确认
+
+- 日志出现 `✅ 灰度编排器已启动（分布式模式，Leader 选举）` 才表示多副本编排安全。
+- 若出现 `⚠️ ... Consul 不可用，当前退化为单机编排`，说明当前是多副本单机编排，存在重复下发风险；请恢复 Consul 并重启，或暂时只保留一个副本。
+- 若出现 `⚠️ Consul 已启用但未开启 leader_election`，请补上 `leader_election: true`。
+
+### 副本间不一致的点（可接受但需知悉）
+
+- **设置页不是跨副本热更新**：修改只写入当前副本内存和数据库，其他副本不会重新加载；多副本请用 YAML/环境变量，变更后滚动重启全部副本。部分设置（如认证方式、制品目录）本来就需要重启。
+- **限流是进程内内存**：每个副本各算一份，N 个副本的实际阈值约为 N 倍；公网建议在 Ingress/WAF 做全局限流。
+- **指标按副本独立**：Prometheus 需要抓取所有 Pod/容器，不能只抓一个。
+- **会话撤销有最多 30 秒本地缓存**：改密/禁用后，其他副本最迟约 30 秒后拒绝旧会话。
+- **Consul 定时同步每个副本都会执行**：upsert 幂等，但会产生重复查询；不影响一致性。
+
+### 容器编排注意事项
+
+- 默认 `deploy/docker/docker-compose.yml` 带 `container_name` 和固定宿主机端口，不能直接 `docker compose up --scale`；多副本请用 Kubernetes/ECS/Nomad，或去掉 `container_name`、改用 `expose` 并由前置负载均衡转发。
+- Agent 使用 HTTP 长轮询，单次最长 `agent.poll_hold` 秒（默认 20）；负载均衡/Ingress 空闲超时需大于 20 秒（Nginx 默认 60 秒可以）。
+- 优雅关闭等待最多 30 秒；Kubernetes 建议 `terminationGracePeriodSeconds: 35`。
+- 健康检查可用 `GET /health`；应用在启动时就会校验数据库连接，数据库不可用会直接退出。
+- 需要多副本但不打算部署 Consul 时，当前版本不建议运行多个编排副本；可暂时只保留一个服务副本，或后续改为 PostgreSQL advisory lock 后再全量扩副本。
+
+---
+
 ## 已知限制与问题
 
 ### 关键限制
 
 1. **Go 版本与内核兼容性**：控制台和默认 Agent 用 Go 1.26 构建，要求 Linux 内核 ≥ 3.2。CentOS 6（内核 2.6.32）请使用 `make agent-legacy` 产出的 Go 1.23 版 Agent，见上文「CentOS 6 / 老内核 Agent」。
 
-2. **多实例部署**：未启用 Consul Leader 选举时，多实例会重复编排任务。生产环境务必开启 `consul.leader_election: true`。
+2. **多实例部署**：不是开箱即用，必须同时满足共享 `SESSION_SECRET`、共享/对象制品存储、Consul Leader 选举等条件，见「容器水平扩展（多副本）」。未启用 Leader 选举时多实例会重复编排任务。
 
-3. **配置热更新**：部分配置（如 `allow_exec_mode`）修改后需重启生效，页面设置不会实时生效。
+3. **配置热更新**：设置页只对当前副本生效，其他副本不会重新加载；多副本请用 YAML/环境变量，修改后滚动重启。部分配置（如 `allow_exec_mode`、认证方式、制品目录）也需要重启。
 
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
