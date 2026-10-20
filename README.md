@@ -160,8 +160,8 @@ docker compose logs -f
 ```
 
 镜像仓库：
-- DockerHub: `iflyelf/upgrade-mgr:latest`
-- 华为云 SWR: `swr.cn-east-3.myhuaweicloud.com/danxiaonuo/upgrade-mgr:latest`
+- 华为云 SWR（推荐，国内可访问）: `swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest`
+- DockerHub（可选）: `iflyelf/upgrade-mgr:latest`
 
 ---
 

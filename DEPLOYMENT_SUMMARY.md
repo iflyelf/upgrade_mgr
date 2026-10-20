@@ -27,7 +27,7 @@
 - **Docker 镜像**: 
   - 多架构构建（linux/amd64, linux/arm64）
   - 推送到 DockerHub: `iflyelf/upgrade-mgr:latest`
-  - 推送到华为云 SWR: `swr.cn-east-3.myhuaweicloud.com/danxiaonuo/upgrade-mgr:latest`
+  - 推送到华为云 SWR: `swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest`
 - **自动清理**: 保留最近 1 天内的 workflow 运行记录，最少保留 3 次
 
 **文件位置**: `/xiaonuo/workspace/code/upgrade_mgr/.github/workflows/publish.yml`
@@ -71,14 +71,14 @@
 
 访问 https://github.com/iflyelf/upgrade_mgr/settings/secrets/actions/new
 
-依次添加以下 4 个 secrets：
+按需添加以下 secrets（华为云 SWR 必填，DockerHub 可选）：
 
 | Secret Name | 说明 |
 |-------------|------|
-| `DOCKER_USERNAME` | DockerHub 用户名 |
-| `DOCKER_PASSWORD` | DockerHub 密码/令牌 |
-| `HUAWEI_ACCESS_KEY` | 华为云 Access Key Id |
-| `HUAWEI_SWR_PASSWORD` | 华为云 SWR 登录密码 |
+| `SWR_USERNAME` | 华为云 SWR 用户名（格式 `cn-east-3@<Access Key Id>`） |
+| `SWR_PASSWORD` | 华为云 SWR 登录密码 |
+| `DOCKER_USERNAME` | DockerHub 用户名（可选） |
+| `DOCKER_PASSWORD` | DockerHub 密码/令牌（可选） |
 
 > 具体凭据值见本地涉密文档，**不要提交到仓库**。
 
@@ -111,7 +111,7 @@ https://github.com/iflyelf/upgrade_mgr/releases/tag/latest
 docker pull iflyelf/upgrade-mgr:latest
 
 # 拉取华为云 SWR 镜像
-docker pull swr.cn-east-3.myhuaweicloud.com/danxiaonuo/upgrade-mgr:latest
+docker pull swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest
 ```
 
 ## 🎯 部署指南

@@ -13,12 +13,14 @@ on:
       - main
     paths:
       - 'Dockerfile'
+      - 'Makefile'
       - 'go.mod'
       - 'go.sum'
       - 'cmd/**'
       - 'internal/**'
       - 'web/**'
       - 'build/**'
+      - 'deploy/**'
       - '.github/workflows/publish.yml'
   workflow_dispatch:
     inputs:
@@ -29,26 +31,39 @@ on:
   watch:
     types: [started]
 
+# 镜像推送目标（华为云 SWR: 国内可访问, 替代 docker.io）
+# 组织名称可直接修改, 凭据通过 Secrets: SWR_USERNAME / SWR_PASSWORD
+env:
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_ORGANIZATION: iflyelf
+  IMAGE_NAME: upgrade-mgr
+
 # 同一分支仅保留最新一次构建：快速连续提交时自动取消旧构建，
 # 避免多个多架构（QEMU）构建并发堆积、互相拖慢导致镜像迟迟不更新。
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  actions: write
+  contents: read
+  packages: write
+
 jobs:
   # 编译多架构二进制并更新 latest Release
   binaries:
+    name: 编译多架构二进制
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: 检出代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: 安装 Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v7.0.0
         with:
           go-version: '1.26'
 
@@ -85,8 +100,9 @@ jobs:
           wget -q https://go.dev/dl/go1.23.12.linux-amd64.tar.gz
           tar -xzf go1.23.12.linux-amd64.tar.gz -C /tmp
           export PATH=/tmp/go/bin:$PATH
+          export GOTOOLCHAIN=local
           go version
-          
+
           # 使用独立 modfile 编译 legacy Agent
           for arch in amd64 386 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
@@ -98,13 +114,16 @@ jobs:
       - name: 打包并生成校验和
         run: |
           cd dist
-          for f in upgrade-*-linux-*; do
+          for f in upgrade-mgr-linux-* upgrade-agent-linux-*; do
+            case "$f" in
+              *.tar.gz) continue ;;
+            esac
             tar -czf "${f}.tar.gz" "$f"
             sha256sum "${f}.tar.gz" >> checksums.txt
           done
 
       - name: 发布到 latest Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v3.0.3
         with:
           tag_name: latest
           name: latest
@@ -116,13 +135,21 @@ jobs:
 
   # 构建并推送镜像到 latest
   image:
+    name: 构建并推送镜像
     runs-on: ubuntu-latest
     permissions:
       actions: write
       contents: read
+      packages: write
+    env:
+      # 凭据仅在 step 内通过 env 判断是否存在，避免空 Secret 导致登录失败
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -131,30 +158,49 @@ jobs:
         run: echo "version=latest-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: 安装 QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@v4.4.0
         with:
           platforms: all
 
       - name: 安装 docker buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4.4.1
         with:
           version: latest
 
-      - name: 登录 DockerHub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
       - name: 登录华为云 SWR
-        uses: docker/login-action@v4
+        if: env.SWR_USERNAME != '' && env.SWR_PASSWORD != ''
+        uses: docker/login-action@v4.6.0
         with:
-          registry: swr.cn-east-3.myhuaweicloud.com
-          username: cn-east-3@${{ secrets.HUAWEI_ACCESS_KEY }}
-          password: ${{ secrets.HUAWEI_SWR_PASSWORD }}
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ env.SWR_USERNAME }}
+          password: ${{ env.SWR_PASSWORD }}
 
-      - name: 构建并推送镜像(仅 latest)
-        uses: docker/build-push-action@v7
+      - name: 登录 DockerHub（可选）
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_PASSWORD != ''
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_PASSWORD }}
+
+      - name: 生成镜像标签
+        id: tags
+        run: |
+          TAGS=""
+          if [ -n "${SWR_USERNAME}" ] && [ -n "${SWR_PASSWORD}" ]; then
+            TAGS="${SWR_REGISTRY}/${SWR_ORGANIZATION}/${IMAGE_NAME}:latest"
+          fi
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_PASSWORD}" ]; then
+            TAGS="${TAGS:+${TAGS},}${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
+          fi
+          if [ -z "${TAGS}" ]; then
+            echo "::error::未配置镜像仓库凭据（SWR_USERNAME/SWR_PASSWORD 或 DOCKER_USERNAME/DOCKER_PASSWORD）"
+            exit 1
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "将推送以下标签: ${TAGS}"
+
+      - name: 构建并推送镜像（仅 latest）
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -162,12 +208,10 @@ jobs:
           push: true
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/upgrade-mgr:latest
-            swr.cn-east-3.myhuaweicloud.com/danxiaonuo/upgrade-mgr:latest
+          tags: ${{ steps.tags.outputs.tags }}
 
       - name: 清理旧的 workflow 运行记录
-        uses: Mattraks/delete-workflow-runs@main
+        uses: Mattraks/delete-workflow-runs@v2.1.0
         with:
           repository: ${{ github.repository }}
           retain_days: 1

@@ -1,4 +1,4 @@
-name: Build & Release
+name: 构建与发布
 
 on:
   push:
@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   build:
+    name: 编译多架构二进制
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -23,13 +24,15 @@ jobs:
           - os: linux
             arch: arm
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-go@v5
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 安装 Go
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
-      
-      - name: Build Server
+
+      - name: 编译控制台
         env:
           CGO_ENABLED: 0
           GOOS: ${{ matrix.os }}
@@ -37,8 +40,8 @@ jobs:
         run: |
           make build
           mv bin/upgrade-mgr bin/upgrade-mgr-${{ matrix.os }}-${{ matrix.arch }}
-      
-      - name: Build Agent
+
+      - name: 编译 Agent
         env:
           CGO_ENABLED: 0
           GOOS: ${{ matrix.os }}
@@ -46,52 +49,57 @@ jobs:
         run: |
           make build-agent
           mv bin/upgrade-agent bin/upgrade-agent-${{ matrix.os }}-${{ matrix.arch }}
-      
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: binaries-${{ matrix.os }}-${{ matrix.arch }}
           path: bin/*
 
   agent-legacy:
     # CentOS 6（内核 2.6.32）兼容：Go 1.24+ 要求内核 ≥ 3.2，Agent 用 Go 1.23 单独编译
+    name: 编译 Agent Legacy (Go 1.23)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-go@v5
+      - name: 安装 Go 1.23
+        uses: actions/setup-go@v7.0.0
         with:
           go-version: '1.23.12'
 
-      - name: Test Agent (Go 1.23)
+      - name: 运行 Agent 测试 (Go 1.23)
         env:
           GOTOOLCHAIN: local
         run: make test-agent-legacy LEGACY_GO=local
 
-      - name: Build Agent (Go 1.23)
+      - name: 编译 Agent (Go 1.23)
         env:
           GOTOOLCHAIN: local
         run: make agent-legacy LEGACY_GO=local
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: binaries-agent-legacy
           path: dist/*
 
   release:
+    name: 创建版本发布
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, agent-legacy]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: 下载构建产物
+        uses: actions/download-artifact@v8.0.2
         with:
           path: artifacts
-      
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v3.0.3
         with:
           files: artifacts/**/*
           generate_release_notes: true
