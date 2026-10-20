@@ -1,0 +1,27 @@
+[Unit]
+Description=Upgrade Manager - 灰度升级控制平台
+Documentation=https://github.com/iflyelf/upgrade_mgr
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/upgrade-mgr
+ExecStart=/usr/local/bin/upgrade-mgr -c /etc/upgrade-mgr/config.yaml
+Restart=always
+RestartSec=5
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+# 环境变量文件（可选）
+EnvironmentFile=-/etc/upgrade-mgr/.env
+
+# 标准输出/错误日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=upgrade-mgr
+
+[Install]
+WantedBy=multi-user.target

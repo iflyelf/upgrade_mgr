@@ -1,0 +1,12 @@
+-- 回滚初始化 schema（与 001_init.up.sql 权威表一致）
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS commands;
+DROP TABLE IF EXISTS task_hosts;
+DROP TABLE IF EXISTS task_batches;
+DROP TABLE IF EXISTS upgrade_tasks;
+DROP TABLE IF EXISTS artifacts;
+DROP TABLE IF EXISTS components;
+DROP TABLE IF EXISTS agents;
+DROP TABLE IF EXISTS hosts;
+DROP TABLE IF EXISTS local_users;
+DROP TABLE IF EXISTS app_settings;

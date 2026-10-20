@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="warm">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#f5efe6" />
+  <title>升级控制平台</title>
+  <script>
+    // 防首屏闪烁：Vue/渲染前先设置主题
+    (function () {
+      try {
+        var legacy = { light: 'warm', blue: 'cool' };
+        var t = localStorage.getItem('upgrade_mgr_theme');
+        if (t && legacy[t]) t = legacy[t];
+        if (t !== 'warm' && t !== 'cool' && t !== 'dark') {
+          t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'warm';
+        }
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) { document.documentElement.setAttribute('data-theme', 'warm'); }
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  upgrade-mgr:
+    image: iflyelf/upgrade-mgr:latest
+    container_name: upgrade-mgr
+    restart: always
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./config/config.yaml:/etc/upgrade-mgr/config.yaml:ro
+      - ./data/artifacts:/data/artifacts
+      - ./logs:/var/log/upgrade-mgr
+    environment:
+      # 可选：通过环境变量覆盖配置
+      - TZ=Asia/Shanghai
+      # - DATABASE_URL=postgresql://user:pass@postgres:5432/upgrade_mgr?sslmode=disable
+      # - ADMIN_PASSWORD=your-strong-password
+      # - SESSION_SECRET=your-session-secret
+    networks:
+      - upgrade-net
+    depends_on:
+      - postgres
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: upgrade-mgr-postgres
+    restart: always
+    environment:
+      - POSTGRES_DB=upgrade_mgr
+      - POSTGRES_USER=upgrade_mgr
+      - POSTGRES_PASSWORD=upgrade_mgr_password
+      - TZ=Asia/Shanghai
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - upgrade-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U upgrade_mgr"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  upgrade-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local

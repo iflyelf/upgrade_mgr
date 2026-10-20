@@ -1,0 +1,89 @@
+# upgrade-mgr 配置示例
+# 优先级：环境变量 > 本文件默认；运行期「设置页」(app_settings) 覆盖为最高。
+# 必填：database；可选：consul / casdoor / redis（缺失仅降级，不阻塞启动）。
+
+server:
+  host: 0.0.0.0
+  port: 8090
+  web_embedded: true
+  session_secret: ""          # 内置登录会话密钥，留空则每次启动随机（重启需重登）
+  external_url: ""            # 对外可达地址，用于生成 Agent 安装命令
+  trust_proxy: false          # 是否信任 X-Forwarded-For（仅可信反向代理后开启）
+  trusted_proxies: []         # 受信代理 IP/CIDR（env TRUSTED_PROXIES，逗号分隔）；XFF 从右往左跳过这些地址
+  cookie_secure: "auto"       # 会话 Cookie Secure 属性：auto/true/false
+  cors_origins: []
+  metrics_token: ""           # /metrics Bearer 令牌（env METRICS_TOKEN）；留空则需登录会话
+  agent_binary_dir: ./dist    # Agent 二进制目录（env AGENT_BINARY_DIR），供 /api/agent/binary/{name} 下载
+
+database:                     # 必填
+  dsn: ""                     # 优先使用；如 postgresql://user:pass@host:5432/upgrade_mgr?sslmode=disable
+  host: localhost
+  port: 5432
+  user: postgres
+  password: ""
+  dbname: upgrade_mgr
+  sslmode: disable
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: 3600
+
+auth:
+  provider: builtin           # builtin(内置账号) 或 casdoor(FlyIAM SSO)
+  admin_username: admin
+  admin_password: ""          # 明文或 bcrypt 哈希（env ADMIN_PASSWORD）；留空则首次启动随机生成并仅打印一次
+
+consul:                       # 可选：主机与业务分组数据源
+  enabled: false
+  address: ""                 # 如 http://10.0.56.118:8500
+  token: ""
+  datacenter: dc1
+  timeout: 10
+  concurrency: 16
+  sync_on_start: false
+  sync_interval: ""           # 如 5m / 1h，留空不定时
+  leader_election: true       # 多实例高可用（启用 Consul 时自动生效）
+
+casdoor:                      # 可选：与 consul_mgr 共用 FlyIAM 实现 SSO
+  endpoint: ""
+  public_endpoint: ""
+  client_id: ""
+  client_secret: ""
+  certificate: ""
+  organization: flyiam
+  application: flyiam
+
+redis:                        # 可选：缓存
+  enabled: false
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  ttl: 300
+
+artifact:
+  dir: /var/lib/upgrade_mgr/artifacts
+  max_size: 0
+  storage_type: local         # local/s3/oss
+  # S3/MinIO 配置（storage_type=s3 时）
+  # s3_endpoint: http://minio:9000
+  # s3_region: us-east-1
+  # s3_bucket: artifacts
+  # s3_access_key: ""
+  # s3_secret_key: ""
+  # s3_use_ssl: false
+  # 阿里云 OSS 配置（storage_type=oss 时）
+  # oss_endpoint: oss-cn-hangzhou.aliyuncs.com
+  # oss_bucket: artifacts
+  # oss_access_key: ""
+  # oss_secret_key: ""
+
+agent:
+  poll_hold: 20               # 长轮询挂起秒数
+  lease_max: 1h               # 升级维护窗口上限
+  clock_skew: 5m              # 指令时间戳允许偏移
+  enroll_token_ttl: 15m
+  require_enroll_token: true  # 是否强制要求注册令牌（生产环境强烈建议开启）
+  allow_exec_mode: false      # 是否允许 exec/replace_exec 部署模式
+
+log:
+  level: info

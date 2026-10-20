@@ -1,0 +1,97 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: linux
+            arch: arm
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      
+      - name: Build Server
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          make build
+          mv bin/upgrade-mgr bin/upgrade-mgr-${{ matrix.os }}-${{ matrix.arch }}
+      
+      - name: Build Agent
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          make build-agent
+          mv bin/upgrade-agent bin/upgrade-agent-${{ matrix.os }}-${{ matrix.arch }}
+      
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: bin/*
+
+  agent-legacy:
+    # CentOS 6（内核 2.6.32）兼容：Go 1.24+ 要求内核 ≥ 3.2，Agent 用 Go 1.23 单独编译
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.12'
+
+      - name: Test Agent (Go 1.23)
+        env:
+          GOTOOLCHAIN: local
+        run: make test-agent-legacy LEGACY_GO=local
+
+      - name: Build Agent (Go 1.23)
+        env:
+          GOTOOLCHAIN: local
+        run: make agent-legacy LEGACY_GO=local
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-agent-legacy
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, agent-legacy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

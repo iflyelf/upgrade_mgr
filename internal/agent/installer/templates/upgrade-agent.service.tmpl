@@ -1,0 +1,16 @@
+[Unit]
+Description=Upgrade Agent (upgrade_mgr)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{.BinPath}} run --server {{.ServerURL}} --state {{.StatePath}}
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+KillMode=mixed
+# 可选僵死检测（Agent 已实现 sd_notify）：
+# WatchdogSec=60
+
+[Install]
+WantedBy=multi-user.target
