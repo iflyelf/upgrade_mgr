@@ -452,6 +452,11 @@ status upgrade-agent            # upstart
 > `systemctl stop upgrade-agent && rm -f /var/lib/upgrade-agent/state.json`，
 > 再在控制台生成新令牌（一次性，默认 15 分钟有效）并重新执行安装命令。
 > 若日志出现 `HTTP 401`，通常是令牌已过期或已被使用；`HTTP 429` 是连续失败触发的限流。
+>
+> **可重复执行**：同一条安装命令可反复执行。安装器会先删除 `/tmp/upgrade-agent` 重新下载，
+> 已注册的 `state.json` 会保留 `AgentID`/`Token`/`Secret`，不会重复注册；systemd 会先
+> `reset-failed` 再 `restart`，因此失败重启计数不会阻止重装。只有需要“换服务器/重新注册”时，
+> 才需要删除 state 并生成新令牌。
 
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
 

@@ -163,6 +163,8 @@ func installSystemd(opts Options) error {
 	if err := run("systemctl", "enable", "upgrade-agent"); err != nil {
 		return err
 	}
+	// 连续失败会触发 systemd start-limit，先清掉失败计数，保证重复安装能拉起。
+	_ = run("systemctl", "reset-failed", "upgrade-agent")
 	// 服务可能已在运行（例如重装/修复），必须显式 restart 才会加载新二进制和新 state。
 	return run("systemctl", "restart", "upgrade-agent")
 }
