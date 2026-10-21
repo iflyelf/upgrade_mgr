@@ -316,9 +316,11 @@
     'exit $?',
   ].join('\n');
 
-  // post_install：首次安装时根据 init 系统写 systemd unit 或 SysV init 脚本；
+  // post_install 脚本：首次安装时根据 init 系统写 systemd unit 或 SysV init 脚本；
   // 服务启动由 Agent 在 post_install 之后完成。已存在的文件不覆盖。
-  var NODE_EXPORTER_POST_INSTALL = [
+  // 该脚本保存到组件的 post_install_script 字段，由 Agent 写入临时文件后执行。
+  var NODE_EXPORTER_POST_INSTALL_SCRIPT = [
+    '#!/bin/sh',
     'set -e',
     'mkdir -p /opt/monitor/exporter/metrics',
     'if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then',
@@ -364,30 +366,47 @@
     {
       key: 'node_exporter_script',
       label: 'node_exporter（上传安装脚本，Agent 下载后执行）',
-      desc: '把 examples/node_exporter/install.sh 作为制品上传（版本 latest，架构选 all）。Agent 下载后用 Shell 执行；脚本会自行下载 iflyelf/node_exporter latest 静态二进制，并按目标机 init 写 systemd unit 或 SysV init。script 模式需要在“设置”里打开 agent.allow_exec_mode；高级配置 JSON 留空即可。',
+      desc: '直接使用真实可用的 script_url（通过 proxy.xiaonuo.live 代理本仓库 examples/node_exporter/install.sh），不需要上传制品。Agent 下载脚本后用 Shell 执行；脚本会自行从 iflyelf/node_exporter latest 下载静态二进制（当前 1.12.1，仅 amd64/arm64），并按目标机 init 写 systemd unit 或 SysV init。script 模式需要在“设置”里打开 agent.allow_exec_mode；高级配置 JSON 已预填 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd，post_install 脚本文本框也填入了一段可选的安装后检查示例，可直接修改参考。若不想依赖外链，删除高级 JSON 中的 script_url，改为上传 examples/node_exporter/install.sh 作为制品即可。',
       comp: {
         name: 'node_exporter', display_name: 'Node Exporter', deploy_mode: 'script',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter',
-        service_name: 'node_exporter', service_mgr: 'auto', enabled: true
+        service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
+        script_url: 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh',
+        exec_env: ['NODE_EXPORTER_VERSION=latest'],
+        exec_timeout: '10m',
+        health_cmd: [['pgrep', '-x', 'node_exporter']],
+        version_cmd: [['/opt/monitor/exporter/node_exporter', '--version']],
+        post_install_script: [
+          '#!/bin/sh',
+          '# post_install 脚本示例（可选）：在安装脚本执行后由 Agent 运行。',
+          '# 可在这里补充配置、注册服务或做安装后检查；不需要时整段删除。',
+          'if [ -f /etc/systemd/system/node_exporter.service ]; then',
+          '  echo "node_exporter systemd unit found"',
+          'elif [ -f /etc/init.d/node_exporter ]; then',
+          '  echo "node_exporter SysV init found"',
+          'else',
+          '  echo "WARN: node_exporter service file not found"',
+          'fi'
+        ].join('\n')
       }
     },
     {
       key: 'node_exporter_binary',
-      label: 'node_exporter（高级：二进制替换 + post_install 注册服务）',
-      desc: '把对应架构的 node_exporter 静态二进制作为制品上传。Agent 替换到安装路径后，post_install 判断目标机 init 并写 unit/init。该示例高级 JSON 较长，通常优先使用上面的脚本安装示例。',
+      label: 'node_exporter（高级：二进制替换 + post_install 脚本注册服务）',
+      desc: '把对应架构的 node_exporter 静态二进制作为制品上传。Agent 替换到安装路径后，执行下方“post_install 脚本”：判断目标机 init 并写 unit/init。脚本单独存放，不再塞进高级配置 JSON。',
       comp: {
         name: 'node_exporter', display_name: 'Node Exporter', deploy_mode: 'replace',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
-        post_install: [['/bin/sh', '-c', NODE_EXPORTER_POST_INSTALL]],
+        post_install_script: NODE_EXPORTER_POST_INSTALL_SCRIPT,
         health_cmd: [['pgrep', '-x', 'node_exporter']],
         version_cmd: [['/opt/monitor/exporter/node_exporter', '--version']]
       }
     }
   ];
-  var ADV_KEYS = ['exec_path', 'exec_args', 'exec_as_user', 'exec_timeout', 'exec_env', 'work_dir',
+  var ADV_KEYS = ['exec_path', 'exec_args', 'exec_as_user', 'exec_timeout', 'exec_env', 'work_dir', 'script_url',
     'ignore_error', 'pre_install', 'post_install', 'stop_cmd', 'start_cmd', 'restart_cmd',
     'version_cmd', 'version_regex', 'health_cmd', 'consul_maint', 'backup_dir'];
 
@@ -405,7 +424,7 @@
       ]);
     }
     var d = h('details', { class: 'card help' }, [
-      h('summary', {}, ['📘 快速上手：接入主机 → 组件 → 制品 → 任务（以 node_exporter 为例）']),
+      h('summary', {}, ['📘 快速上手：接入主机 → 组件 →（可选）制品 → 任务（以 node_exporter 为例）']),
       step('1', '主机 接入 Agent', 'hosts', [
         '管理员在“主机”页选择目标机器架构，点“生成接入命令”，复制到目标机器用 root 执行。',
         'Agent 注册成功后主机自动出现在列表：IP 取服务端看到的来源地址，主机名、OS、ARCH 由 Agent 上报。',
@@ -413,17 +432,21 @@
         '“同步 Consul”也能导入主机，但没装 Agent 的主机在任务下发时会被跳过。'
       ]),
       step('2', '组件 定义装什么、装到哪', 'components', [
-        '点“新建组件”，再点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 留空。',
+        '点“新建组件”，再点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
+        '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
         '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',
         'CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11：无 systemd，脚本自动写 /etc/init.d/node_exporter。',
-        'script 模式需要管理员在“设置”里打开 agent.allow_exec_mode：Agent 会下载上传的安装脚本并以 Shell 执行（优先 bash，缺失时 sh）。',
+        'script 模式需要管理员在“设置”里打开 agent.allow_exec_mode：Agent 会下载安装脚本并以 Shell 执行（优先 bash，缺失时 sh）。',
+        '高级配置 JSON 的 exec_args / exec_env / exec_timeout / work_dir 会直接控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。',
         '安装脚本会自行下载 node_exporter 二进制、注册服务并启动，不需要在 post_install 里写大段 shell。',
+        '需要平台备份/回滚时改用“填入二进制替换示例”：服务注册逻辑放在独立的 post_install 脚本文本框里，不再写进高级配置 JSON。',
         '脚本输出会记录在任务日志；登录目标机后也可以用 systemctl/service 查看服务状态。'
       ]),
-      step('3', '制品 上传安装脚本', 'artifacts', [
-        '脚本安装只需上传 examples/node_exporter/install.sh 一个文件，不需要另外上传 node_exporter 二进制：脚本会自动从 proxy 下载 iflyelf latest 静态二进制。',
-        '组件选 node_exporter，版本填 latest（创建任务时选同一个版本），架构选 all（通用脚本）；脚本会用 uname -m 自动识别目标机架构。',
-        '如果要固定架构，也可以在组件 exec_args 里传 amd64 / arm64 / arm / 386；默认不传即自动识别。',
+      step('3', '制品（可选）上传安装脚本', 'artifacts', [
+        '脚本示例已预填真实 script_url，通常可以跳过本页，直接去“任务”创建。',
+        '如果不想依赖外链，删除组件高级 JSON 中的 script_url，再在这里上传 examples/node_exporter/install.sh：版本 latest，架构 all（通用脚本）。',
+        '不需要另外上传 node_exporter 二进制：脚本会自动从 proxy 下载 iflyelf latest 静态二进制（amd64/arm64）。',
+        '脚本用 uname -m 自动识别目标机架构；如果要固定架构，可在组件 exec_args 里传 amd64 / arm64。',
         '安装脚本是纯文本文件，直接上传即可；平台不会解压文件，也不需要 tar.gz。'
       ], codeBlock([
         '# 仓库里已经自带单文件安装脚本（内嵌 systemd unit 与 SysV init）',
@@ -432,8 +455,8 @@
         '# 可选：先在目标机手动试跑（需要 root，会自动下载并安装）',
         'sudo bash examples/node_exporter/install.sh',
         '',
-        '# 平台流程：制品页上传 examples/node_exporter/install.sh',
-        '# 版本选 latest，架构选 all（通用脚本）'
+        '# 平台默认流程：组件高级 JSON 已用真实 script_url，无需上传制品',
+        '# 备用流程：删除 script_url 后，在制品页上传 install.sh（版本 latest，架构 all）'
       ].join('\n'))),
       step('4', '任务 选择主机并执行', 'tasks', [
         '组件选 node_exporter，版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
@@ -626,8 +649,13 @@
       var osEl = h('input', { value: c.os_match || '', placeholder: '留空即可' }, []);
       var archEl = h('input', { value: c.arch_match || '', placeholder: '留空即可' }, []);
       var enabledEl = h('input', { type: 'checkbox', checked: c.enabled !== false }, []);
-      var advEl = h('textarea', { rows: '10', placeholder: '{"post_install":[["/bin/sh","-c","..."]]}' }, []);
+      var advEl = h('textarea', { rows: '10', placeholder: '{"script_url":"https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh","exec_args":["amd64"],"exec_env":["NODE_EXPORTER_VERSION=latest"],"health_cmd":[["pgrep","-x","node_exporter"]]}' }, []);
       advEl.value = advText(c);
+      var postScriptEl = h('textarea', {
+        rows: '12',
+        placeholder: '#!/bin/sh\n# post_install 脚本：Agent 会写入临时文件后用 bash/sh 执行'
+      }, []);
+      postScriptEl.value = c.post_install_script || '';
 
       var saveComp = function () {
         var base = c.id ? JSON.parse(JSON.stringify(c)) : {
@@ -645,6 +673,8 @@
         base.arch_match = archEl.value.trim();
         base.enabled = enabledEl.checked;
 
+        // 高级配置以文本框为准：先移除旧值，确保删除 script_url 等字段后保存能生效。
+        ADV_KEYS.forEach(function (k) { delete base[k]; });
         if (advEl.value.trim()) {
           var adv;
           try { adv = JSON.parse(advEl.value); } catch (e) {
@@ -661,6 +691,8 @@
           delete adv._tpl;
           Object.assign(base, adv);
         }
+        // post_install_script 只从独立文本框读取，避免高级 JSON 与文本框内容冲突。
+        base.post_install_script = postScriptEl.value;
 
         var method = base.id ? 'PUT' : 'POST';
         var url = base.id ? '/api/components/' + base.id : '/api/components';
@@ -682,7 +714,7 @@
           field('显示名称 (display_name)', dispEl, '页面上展示的名字。')
         ]),
         h('div', { class: 'grid2' }, [
-          field('部署模式 (deploy_mode)', modeEl, 'script / exec / replace_exec 需要在“设置”里打开 agent.allow_exec_mode。'),
+          field('部署模式 (deploy_mode)', modeEl, 'script / exec / replace_exec 需要在“设置”里打开 agent.allow_exec_mode。script 模式可用高级 JSON 的 script_url 自定义 HTTP(S) 下载地址（需新版 Agent）。'),
           field('服务名称 (service_name)', svcEl, 'systemd/sysv 服务名。首次安装时服务尚不存在，Agent 会跳过停服，安装后再启动。')
         ]),
         h('div', { class: 'grid2' }, [
@@ -700,7 +732,8 @@
           field('OS 匹配 (os_match)', osEl, '仅记录，当前版本不参与匹配。'),
           field('架构匹配 (arch_match)', archEl, '仅记录，当前版本不参与匹配。')
         ]),
-        field('高级配置 JSON（可选）', advEl, '脚本安装示例留空即可。支持 ' + ADV_KEYS.join('、') + '；命令是二维数组，例如 [["/bin/sh","-c","echo hi"]]。'),
+        field('高级配置 JSON（可选）', advEl, '支持 ' + ADV_KEYS.join('、') + '；命令是二维数组，例如 [["/bin/sh","-c","echo hi"]]。script 模式可用 script_url 指定 HTTP(S) 脚本地址（设置后不再要求上传制品；脚本示例已填真实地址），exec_args / exec_env / exec_timeout / work_dir 控制脚本执行。post_install 脚本请填到下方单独文本框。'),
+        field('post_install 脚本（可选）', postScriptEl, 'Agent 在 post_install 命令之后把脚本写入临时文件，并用 bash/sh 执行；失败会触发回滚。脚本不会写入高级配置 JSON。'),
         h('div', { class: 'toolbar' }, [
           h('button', { class: 'btn', onclick: saveComp }, ['保存']),
           h('button', { class: 'btn ghost', onclick: function () { state.editingComp = null; state.err = ''; render(); } }, ['取消']),
@@ -908,8 +941,10 @@
       value: f.component_id,
       onchange: function () {
         f.component_id = compEl.value;
+        var comp = state.components.filter(function (x) { return String(x.id) === String(f.component_id); })[0];
         var vers = versionsFor(f.component_id);
-        if (vers.length && vers.indexOf(f.version) < 0) f.version = '';
+        if (comp && comp.script_url) f.version = 'latest';
+        else if (vers.length && vers.indexOf(f.version) < 0) f.version = '';
         state.preview = null;
         render();
       }
@@ -976,7 +1011,7 @@
 
     function checkForm() {
       if (!f.component_id || !f.version.trim()) {
-        state.err = '请先选择组件并填写目标版本（版本要和制品的版本一致）';
+        state.err = '请先选择组件并填写目标版本（使用制品时需与制品版本一致；使用 script_url 时可填 latest）';
         state.preview = null;
         render();
         return false;
@@ -1012,7 +1047,7 @@
       }
       var vers = versionsFor(comp.id);
       f.component_id = String(comp.id);
-      f.version = vers[0] || 'latest';
+      f.version = comp.script_url ? 'latest' : (vers[0] || 'latest');
       f.name = 'node_exporter 升级示例';
       f.ip_expr = '10.1.255.24-26';
       f.mode = 'canary';
@@ -1046,7 +1081,7 @@
         field('组件', compEl, state.components.length ? '' : '还没有组件，请先到“组件”页创建。')
       ]),
       h('div', { class: 'grid2' }, [
-        field('目标版本', verEl, '从该组件已上传的制品中选择；下拉没有候选说明制品还没传。'),
+        field('目标版本', verEl, '使用制品时从已上传制品中选择；使用 script_url 时可填 latest（仅作记录）。'),
         field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
       ]),
       datalist,

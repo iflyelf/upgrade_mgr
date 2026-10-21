@@ -470,23 +470,100 @@ systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 | 安装路径 | `/opt/monitor/exporter`（仅说明；实际路径固定在脚本内） |
 | 服务名 | `node_exporter` |
 | 服务管理器 | `auto` |
-| 高级配置 JSON | 留空 |
+| 脚本下载地址 | 已预填真实可用的 `script_url`，无需上传制品 |
+| 高级配置 JSON | 已预填 `script_url`、`exec_env`、`exec_timeout`、`health_cmd` 与 `version_cmd`，可直接保存 |
+| post_install 脚本 | 已预填一段可选的“安装后检查”示例，可直接修改或删除 |
+
+示例使用的真实脚本地址（通过 `proxy.xiaonuo.live` 代理本仓库 `main` 分支文件）：
+
+```text
+https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh
+```
+
+可直接打开验证：
+<https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh>
+
+> `proxy.xiaonuo.live` 与上文的 `down.xiaonuo.live` 都是下载代理，两个地址均可
+> 代理 GitHub 文件；脚本示例统一使用 `proxy.xiaonuo.live`。
+
+点“填入脚本安装示例”后，高级配置 JSON 的完整内容如下，可直接参考修改：
+
+```json
+{
+  "exec_timeout": "10m",
+  "exec_env": ["NODE_EXPORTER_VERSION=latest"],
+  "script_url": "https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh",
+  "version_cmd": [["/opt/monitor/exporter/node_exporter", "--version"]],
+  "health_cmd": [["pgrep", "-x", "node_exporter"]]
+}
+```
+
+目标机需要能访问 `proxy.xiaonuo.live`。脚本本身也会通过同一代理下载
+`iflyelf/node_exporter` 的 `latest` 静态二进制（当前验证为 `1.12.1`，仅提供
+`amd64` / `arm64`）。如果不想依赖外链，删除 `script_url` 后按 5.3 上传
+`examples/node_exporter/install.sh` 即可。
+
+`post_install 脚本` 文本框同时填入：
+
+```sh
+#!/bin/sh
+# post_install 脚本示例（可选）：在安装脚本执行后由 Agent 运行。
+# 可在这里补充配置、注册服务或做安装后检查；不需要时整段删除。
+if [ -f /etc/systemd/system/node_exporter.service ]; then
+  echo "node_exporter systemd unit found"
+elif [ -f /etc/init.d/node_exporter ]; then
+  echo "node_exporter SysV init found"
+else
+  echo "WARN: node_exporter service file not found"
+fi
+```
 
 `script` 模式不会替换 `install_path`，也不会做平台侧二进制备份；安装、升级、
 服务注册全部由脚本完成。首次安装时服务还不存在，Agent 会跳过停服，脚本执行完
 后再检查并启动服务。
 
-脚本模板默认不填 `health_cmd`。需要平台层健康检查时，可在高级配置 JSON 里加：
+脚本模板默认已填 `health_cmd`（`pgrep -x node_exporter`）与 `version_cmd`
+（`/opt/monitor/exporter/node_exporter --version`）。不需要平台层检查时，可从高级配置
+JSON 中删除对应字段。
+
+##### script 模式：自定义下载与执行
+
+`script` 模式不设置 `script_url` 时从制品库下载脚本；设置后直接从该 HTTP(S) 地址
+下载。node_exporter 示例已经预填真实地址：
 
 ```json
 {
-  "health_cmd": [["pgrep", "-x", "node_exporter"]]
+  "script_url": "https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh",
+  "exec_args": ["amd64"],
+  "exec_env": ["NODE_EXPORTER_VERSION=latest"],
+  "exec_timeout": "10m"
 }
 ```
 
-#### 5.3 制品：上传安装脚本
+`exec_args` 示例里的 `amd64` 只用于演示；不传时脚本会用 `uname -m` 自动识别架构。
 
-进入「制品」页：
+- `script_url`：绝对 `http://` / `https://` 地址。设置后不再查找/上传制品，任务版本
+  仅用于展示与记录；Agent 直接从该地址下载。为空时沿用制品库。
+- `exec_args` / `exec_env` / `exec_timeout`：传给下载后的脚本，分别控制参数、
+  环境变量和执行超时。
+- `work_dir`：可选的工作目录，必须已存在；不填则继承 Agent 进程目录。
+- Agent 不会把自身的 Agent token 发送到自定义 `script_url`；请确保目标机能直接
+  访问该地址（必要时在 URL 中自带凭据）。私有脚本仍建议上传为制品。
+- `script_url` 需要同步更新目标机 Agent。旧版 Agent 不认识该字段，会因没有制品
+  而下载失败（不会向自定义地址发送 Agent 凭据）。
+- 自定义地址下载默认没有 MD5/SHA256 校验；需要完整性校验时请使用制品上传。
+
+`post_install_script` 是独立的脚本文本框，主要用于 `replace` / `replace_exec` 等需要
+“替换二进制后再注册服务”的场景；`script` 模式如果也配置了，会在安装脚本之后执行。
+Agent 会在 `post_install` 命令之后把脚本写入
+备份目录的临时文件，用 bash/sh 执行；脚本失败会触发平台回滚。脚本内容不会写入
+高级配置 JSON。该脚本同样属于任意命令执行，只应允许可信管理员编辑组件。
+使用前需同步更新目标机 Agent：旧版 Agent 不认识该字段，会跳过脚本。
+
+#### 5.3 制品（可选）：上传安装脚本
+
+脚本示例默认使用 5.2 中真实可用的 `script_url`，通常不需要本节。如果不想依赖
+外链，先删除组件高级配置 JSON 里的 `script_url`，再进入「制品」页：
 
 1. 组件选 `node_exporter`。
 2. 版本填 `latest`（创建任务时必须选同一个版本）。
@@ -497,6 +574,8 @@ systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 > 不需要另外上传 node_exporter 二进制。脚本会自己从
 > `proxy.xiaonuo.live` 代理下载 iflyelf/node_exporter latest 静态编译二进制。
 
+此时 Agent 从制品库下载脚本，不再访问 `script_url`；任务版本需要和制品版本一致。
+
 #### 5.4 任务：安装到目标机
 
 1. 「任务」页选组件 `node_exporter`、版本 `latest`。
@@ -505,12 +584,14 @@ systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 4. 想先装一台：策略选「金丝雀」、首批 1 台、取消「自动推进」；首批成功后点「推进」。
 
 Agent 执行顺序：下载安装脚本 → 跳过平台备份 → `pre_install` → 停旧服务
-（存在时）→ 用 Shell 执行脚本（优先 bash，缺失时 sh）→ 检查/启动服务 → `post_install` →
-健康检查（如配置了 `health_cmd`）→ 版本确认（如配置了 `version_cmd`）。脚本输出会记录在任务日志里。
+（存在时）→ 用 Shell 执行脚本（优先 bash，缺失时 sh）→ 检查/启动服务 → `post_install`
+（命令数组；如配置了 `post_install_script` 则随后执行）→ 健康检查（如配置了 `health_cmd`）
+→ 版本确认（如配置了 `version_cmd`）。脚本输出会记录在任务日志里。
 
 #### 5.5 脚本做了什么
 
-`install.sh` 会：
+5.2 的 `script_url` 直接指向本仓库 `main` 分支的
+`examples/node_exporter/install.sh`，所以不需要先上传制品。`install.sh` 会：
 
 - 按 `uname -m` 识别 `amd64` / `arm64` / `arm` / `386`（也可用
   `NODE_EXPORTER_ARCH` 或第一个参数覆盖）。
@@ -562,8 +643,17 @@ sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
 - `script` 模式执行下载的脚本，服务端被攻破时风险等同于任意命令执行；务必依赖
   `agent.allow_exec_mode` 和 RBAC，只允许可信管理员操作。
 - `script` 模式不做平台侧备份/自动回滚；需要平台备份和回滚时，改用
-  「填入示例：node_exporter（二进制替换）」，按主机架构上传二进制。该示例的
-  `post_install` 较长，适合需要平台回滚能力的场景。
+  「填入示例：node_exporter（二进制替换）」，按主机架构上传二进制。该示例把
+  服务注册逻辑放在独立的 `post_install_script` 字段中，Agent 在 post_install
+  阶段写入临时文件并执行，不需要再往高级配置 JSON 里塞大段 shell。
+- `script_url` 只支持绝对 HTTP(S) 地址，且不会携带 Agent 凭据；目标机必须能
+  直接访问该地址。node_exporter 示例依赖 `proxy.xiaonuo.live`，内网受限时请删除
+  `script_url` 并改用 5.3 的制品上传。
+- 自定义地址下载不校验 MD5/SHA256；示例脚本在运行时自行下载二进制。对完整性校验
+  有要求时，用制品上传安装脚本，并按需给二进制制品填写 MD5/SHA256。
+- `script_url` 设置后任务不再依赖制品；任务版本仍会记录，但不会用于匹配文件。
+  需要按任务版本下载不同脚本时，请为不同版本准备不同的组件/`script_url`，
+  或继续使用制品库。
 - 脚本会覆盖已有的同名 unit/init，以保证服务参数与当前示例一致；如需保留自定义
   服务文件，请先备份或改脚本。
 - 当前 iflyelf latest 通常只提供 `amd64` / `arm64`；`arm` / `386` 若下载 404，

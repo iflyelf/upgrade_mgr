@@ -253,18 +253,22 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 		if arch == "" {
 			arch = "amd64"
 		}
-		art, err := o.svc.artRepo.Find(ctx, sc, compID, version, arch, r.os)
-		if err != nil {
-			o.markHostSkipped(ctx, r.thID)
-			continue
+		art, customURL := scriptArtifact(spec, version, arch, r.os)
+		if !customURL {
+			found, err := o.svc.artRepo.Find(ctx, sc, compID, version, arch, r.os)
+			if err != nil {
+				o.markHostSkipped(ctx, r.thID)
+				continue
+			}
+			art = protocol.Artifact{
+				ID: found.ID, Version: found.Version, Arch: found.Arch, OSFamily: found.OSFamily,
+				URL: fmt.Sprintf("/api/artifacts/%d/download", found.ID),
+				MD5: found.MD5, SHA256: found.SHA256, Size: found.Size, InnerPath: found.InnerPath,
+			}
 		}
 		payload := protocol.CommandPayload{
 			Component: spec, ToVersion: version,
-			Artifact: protocol.Artifact{
-				ID: art.ID, Version: art.Version, Arch: art.Arch, OSFamily: art.OSFamily,
-				URL: fmt.Sprintf("/api/artifacts/%d/download", art.ID),
-				MD5: art.MD5, SHA256: art.SHA256, Size: art.Size, InnerPath: art.InnerPath,
-			},
+			Artifact: art,
 		}
 		pj, _ := json.Marshal(payload)
 		ok, err := o.dispatchHost(ctx, taskID, r.thID, r.hostID, r.aid, pj)
@@ -404,6 +408,21 @@ func (o *Orchestrator) markBatch(ctx context.Context, taskID int64, batchIdx int
 		 finished_at=CASE WHEN $3::varchar IN ('success','failed') THEN NOW() ELSE finished_at END
 		 WHERE task_id=$1 AND batch_index=$2`, taskID, batchIdx, status)
 	return err
+}
+
+// scriptArtifact 返回 script 模式自定义下载地址对应的下发制品。
+//
+// ok=false 表示未配置 script_url（或不是 script 模式），调用方应回退到制品库。
+func scriptArtifact(spec protocol.ComponentSpec, version, arch, osFamily string) (protocol.Artifact, bool) {
+	if spec.DeployMode != protocol.DeployScript || spec.ScriptURL == "" {
+		return protocol.Artifact{}, false
+	}
+	return protocol.Artifact{
+		Version: version, Arch: arch, OSFamily: osFamily,
+		// 自定义地址只放在 Component.ScriptURL，Artifact.URL 保持为空：
+		// 不识别的旧版 Agent 会安全地下载失败，而不是带着 Agent 凭据
+		// 去请求第三方脚本地址。
+	}, true
 }
 
 func (o *Orchestrator) markHostSkipped(ctx context.Context, thID int64) {

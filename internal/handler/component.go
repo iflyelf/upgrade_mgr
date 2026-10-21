@@ -48,6 +48,10 @@ func ComponentCreate(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "name 必填")
 			return
 		}
+		if err := component.ValidateScriptURL(c.ScriptURL); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		id, err := s.Component.Create(r.Context(), reqScope(r), &c)
 		auditOp(s, r, audit.ActionComponentCreate, "component", strconv.FormatInt(id, 10), c.Name, err)
 		if err != nil {
@@ -68,6 +72,10 @@ func ComponentUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		c.ID = id
+		if err := component.ValidateScriptURL(c.ScriptURL); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		err := s.Component.Update(r.Context(), reqScope(r), &c)
 		auditOp(s, r, audit.ActionComponentUpdate, "component", strconv.FormatInt(id, 10), c.Name, err)
 		if err != nil {

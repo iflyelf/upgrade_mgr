@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -53,18 +55,35 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	}
 
 	// 1. 下载
-	logf(protocol.StageDownloading, "下载 %s", art.URL)
+	downloadURL := art.URL
+	downloadAuth := authHeader
+	if comp.DeployMode == protocol.DeployScript && comp.ScriptURL != "" {
+		scriptURL := strings.TrimSpace(comp.ScriptURL)
+		if err := validateScriptURL(scriptURL); err != nil {
+			logf(protocol.StageDone, "script_url 非法: %v", err)
+			return res, fmt.Errorf("script_url 非法: %w", err)
+		}
+		// 以组件字段为准，避免同一指令里 Artifact.URL 与 ScriptURL 不一致。
+		downloadURL = scriptURL
+		// 自定义地址可能是第三方仓库，绝不携带平台 Agent 凭据。
+		downloadAuth = ""
+	}
+	logf(protocol.StageDownloading, "下载 %s", redactURL(downloadURL))
 	tmpDir := filepath.Join(comp.BackupDir, ".tmp")
 	os.MkdirAll(tmpDir, 0755)
-	dlPath := filepath.Join(tmpDir, filepath.Base(art.URL))
+	dlPath := filepath.Join(tmpDir, artifactFilename(downloadURL))
 	if err := downloader.Download(ctx, downloader.Spec{
-		URL: art.URL, Dest: dlPath, MD5: art.MD5, SHA256: art.SHA256,
-		AuthHeader: authHeader, MaxRetries: 3, Timeout: 20 * time.Minute,
+		URL: downloadURL, Dest: dlPath, MD5: art.MD5, SHA256: art.SHA256,
+		AuthHeader: downloadAuth, MaxRetries: 3, Timeout: 20 * time.Minute,
 	}); err != nil {
 		logf(protocol.StageDone, "下载失败: %v", err)
 		return res, err
 	}
-	logf(protocol.StageDownloaded, "下载完成，校验和验证通过")
+	if art.MD5 != "" || art.SHA256 != "" {
+		logf(protocol.StageDownloaded, "下载完成，校验和验证通过")
+	} else {
+		logf(protocol.StageDownloaded, "下载完成（未提供校验和，跳过校验）")
+	}
 
 	// 2. 备份（script 模式由安装脚本自行处理升级/备份）
 	if comp.DeployMode == protocol.DeployScript {
@@ -181,11 +200,28 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		}
 	}
 
-	// 7. post_install 钩子
+	// 7. post_install 钩子：先执行命令数组，再执行 post_install_script。
 	if len(comp.PostInstall) > 0 {
 		logf(protocol.StagePostInstall, "执行 post_install")
 		if err := runHooks(ctx, comp.PostInstall); err != nil && !comp.IgnoreError {
 			logf(protocol.StageRollback, "post_install 失败，执行回滚: %v", err)
+			if res.BackupPath != "" {
+				binswap.Rollback(res.BackupPath, comp.InstallPath)
+				if svcExists() {
+					svcMgr.Restart(comp.ServiceName)
+				}
+			}
+			return res, err
+		}
+	}
+	if comp.PostInstallScript != "" {
+		logf(protocol.StagePostInstall, "执行 post_install 脚本")
+		out, err := runPostInstallScript(ctx, comp)
+		if strings.TrimSpace(out) != "" {
+			logf(protocol.StagePostInstall, "脚本输出:\n%s", strings.TrimSpace(out))
+		}
+		if err != nil && !comp.IgnoreError {
+			logf(protocol.StageRollback, "post_install 脚本失败，执行回滚: %v", err)
 			if res.BackupPath != "" {
 				binswap.Rollback(res.BackupPath, comp.InstallPath)
 				if svcExists() {
@@ -274,11 +310,7 @@ func runScript(ctx context.Context, comp protocol.ComponentSpec, path string) (s
 	if err := os.Chmod(path, 0755); err != nil {
 		return "", fmt.Errorf("设置安装脚本可执行权限失败: %w", err)
 	}
-	shell := "/bin/sh"
-	if _, err := os.Stat("/bin/bash"); err == nil {
-		shell = "/bin/bash"
-	}
-	argv := append([]string{shell, path}, comp.ExecArgs...)
+	argv := append([]string{shellPath(), path}, comp.ExecArgs...)
 	timeout, _ := time.ParseDuration(comp.ExecTimeout)
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
@@ -297,6 +329,63 @@ func runScript(ctx context.Context, comp protocol.ComponentSpec, path string) (s
 		return stdout, fmt.Errorf("安装脚本退出码 %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return stdout, nil
+}
+
+// runPostInstallScript 把组件中的 post_install_script 写入临时文件后执行。
+//
+// 脚本存放在备份目录（Agent 已可写）而非 /tmp，便于与安装流程使用同一挂载策略；
+// 通过解释器执行，避免备份目录挂载 noexec。超时、工作目录与环境变量复用 exec_* 配置。
+func runPostInstallScript(ctx context.Context, comp protocol.ComponentSpec) (string, error) {
+	dir := comp.BackupDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("创建脚本目录失败: %w", err)
+	}
+	f, err := os.CreateTemp(dir, "post-install-*.sh")
+	if err != nil {
+		return "", fmt.Errorf("创建 post_install 脚本失败: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := f.WriteString(comp.PostInstallScript); err != nil {
+		f.Close()
+		return "", fmt.Errorf("写入 post_install 脚本失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("写入 post_install 脚本失败: %w", err)
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		return "", fmt.Errorf("设置 post_install 脚本权限失败: %w", err)
+	}
+
+	timeout, _ := time.ParseDuration(comp.ExecTimeout)
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	res, err := runner.Run(ctx, runner.Spec{
+		Argv: []string{shellPath(), path}, Dir: comp.WorkDir, Env: comp.ExecEnv, Timeout: timeout,
+	})
+	var out string
+	if res != nil {
+		out = strings.TrimSpace(strings.TrimSpace(res.Stdout) + "\n" + strings.TrimSpace(res.Stderr))
+	}
+	if err != nil {
+		return out, fmt.Errorf("post_install 脚本启动失败: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return out, fmt.Errorf("post_install 脚本退出码 %d", res.ExitCode)
+	}
+	return out, nil
+}
+
+// shellPath 选择目标机可用的 Shell：优先 bash，缺失时回退 sh。
+func shellPath() string {
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		return "/bin/bash"
+	}
+	return "/bin/sh"
 }
 
 func runHealthCheck(ctx context.Context, cmd [][]string) bool {
@@ -352,6 +441,57 @@ func allowInstallRoots() []string {
 		"/usr/local/", "/opt/", "/home/", "/data/", "/app/", "/srv/",
 		"/var/lib/", "/usr/share/", "/tmp/", "/var/tmp/",
 	}
+}
+
+// validateScriptURL 在 Agent 侧再次限制 script_url 只能是绝对 http/https URL，
+// 防止服务端被攻破后通过 file:// 等协议读取本机文件。
+func validateScriptURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > 2048 {
+		return fmt.Errorf("地址过长（最多 2048 字符）")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("格式错误: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("仅支持 http/https")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("必须是绝对地址")
+	}
+	return nil
+}
+
+// redactURL 去掉 URL 中的凭据和查询参数，避免 token 被写入任务日志。
+func redactURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if u.User != nil {
+		u.User = url.User("***")
+	}
+	if u.RawQuery != "" {
+		u.RawQuery = "***"
+	}
+	if u.Fragment != "" {
+		u.Fragment = "***"
+	}
+	return u.String()
+}
+
+// artifactFilename 从 URL 的 path 部分取文件名，避免 query 参数进入本地文件名。
+func artifactFilename(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil {
+		if base := path.Base(u.Path); base != "." && base != ".." && base != "/" && base != "" {
+			return base
+		}
+	}
+	return "artifact"
 }
 
 // validateInstallPath 校验 install_path，防止越权替换/删除敏感文件。

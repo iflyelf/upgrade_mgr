@@ -143,8 +143,9 @@ func toComponentSpec(c *component.Component) protocol.ComponentSpec {
 	return protocol.ComponentSpec{
 		Name: c.Name, DeployMode: c.DeployMode, InstallPath: c.InstallPath, BackupDir: c.BackupDir,
 		ExecPath: c.ExecPath, ExecArgs: c.ExecArgs, ExecEnv: c.ExecEnv, WorkDir: c.WorkDir,
-		ExecTimeout: c.ExecTimeout, IgnoreError: c.IgnoreError, PreInstall: c.PreInstall,
-		PostInstall: c.PostInstall, ServiceName: c.ServiceName, ServiceMgr: c.ServiceMgr,
+		ExecTimeout: c.ExecTimeout, ScriptURL: c.ScriptURL, IgnoreError: c.IgnoreError, PreInstall: c.PreInstall,
+		PostInstall: c.PostInstall, PostInstallScript: c.PostInstallScript,
+		ServiceName: c.ServiceName, ServiceMgr: c.ServiceMgr,
 		StopCmd: c.StopCmd, StartCmd: c.StartCmd, RestartCmd: c.RestartCmd,
 		VersionCmd: c.VersionCmd, VersionRegex: c.VersionRegex, HealthCmd: c.HealthCmd,
 		ConsulMaint: c.ConsulMaint,

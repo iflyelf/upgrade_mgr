@@ -5,36 +5,40 @@ import "time"
 
 // Component 组件定义
 type Component struct {
-	ID           int64      `json:"id"`
-	Name         string     `json:"name"`
-	DisplayName  string     `json:"display_name"`
-	DeployMode   string     `json:"deploy_mode"`
-	BinaryName   string     `json:"binary_name"`
-	InstallPath  string     `json:"install_path"`
-	BackupDir    string     `json:"backup_dir"`
-	ExecPath     string     `json:"exec_path,omitempty"`
-	ExecArgs     []string   `json:"exec_args,omitempty"`
-	ExecAsUser   string     `json:"exec_as_user,omitempty"`
-	ExecTimeout  string     `json:"exec_timeout,omitempty"`
-	ExecEnv      []string   `json:"exec_env,omitempty"`
-	WorkDir      string     `json:"work_dir,omitempty"`
-	IgnoreError  bool       `json:"ignore_error"`
-	PreInstall   [][]string `json:"pre_install,omitempty"`
-	PostInstall  [][]string `json:"post_install,omitempty"`
-	ServiceName  string     `json:"service_name,omitempty"`
-	ServiceMgr   string     `json:"service_mgr"`
-	StopCmd      [][]string `json:"stop_cmd,omitempty"`
-	StartCmd     [][]string `json:"start_cmd,omitempty"`
-	RestartCmd   [][]string `json:"restart_cmd,omitempty"`
-	VersionCmd   [][]string `json:"version_cmd,omitempty"`
-	VersionRegex string     `json:"version_regex,omitempty"`
-	HealthCmd    [][]string `json:"health_cmd,omitempty"`
-	ConsulMaint  bool       `json:"consul_maint"`
-	OSMatch      string     `json:"os_match,omitempty"`
-	ArchMatch    string     `json:"arch_match,omitempty"`
-	Enabled      bool       `json:"enabled"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	DisplayName string   `json:"display_name"`
+	DeployMode  string   `json:"deploy_mode"`
+	BinaryName  string   `json:"binary_name"`
+	InstallPath string   `json:"install_path"`
+	BackupDir   string   `json:"backup_dir"`
+	ExecPath    string   `json:"exec_path,omitempty"`
+	ExecArgs    []string `json:"exec_args,omitempty"`
+	ExecAsUser  string   `json:"exec_as_user,omitempty"`
+	ExecTimeout string   `json:"exec_timeout,omitempty"`
+	// ScriptURL 为 script 模式的自定义脚本下载地址（绝对 http/https）。
+	ScriptURL   string     `json:"script_url,omitempty"`
+	ExecEnv     []string   `json:"exec_env,omitempty"`
+	WorkDir     string     `json:"work_dir,omitempty"`
+	IgnoreError bool       `json:"ignore_error"`
+	PreInstall  [][]string `json:"pre_install,omitempty"`
+	PostInstall [][]string `json:"post_install,omitempty"`
+	// PostInstallScript 为 post_install 阶段执行的脚本内容（Agent 写入临时文件后执行）。
+	PostInstallScript string     `json:"post_install_script,omitempty"`
+	ServiceName       string     `json:"service_name,omitempty"`
+	ServiceMgr        string     `json:"service_mgr"`
+	StopCmd           [][]string `json:"stop_cmd,omitempty"`
+	StartCmd          [][]string `json:"start_cmd,omitempty"`
+	RestartCmd        [][]string `json:"restart_cmd,omitempty"`
+	VersionCmd        [][]string `json:"version_cmd,omitempty"`
+	VersionRegex      string     `json:"version_regex,omitempty"`
+	HealthCmd         [][]string `json:"health_cmd,omitempty"`
+	ConsulMaint       bool       `json:"consul_maint"`
+	OSMatch           string     `json:"os_match,omitempty"`
+	ArchMatch         string     `json:"arch_match,omitempty"`
+	Enabled           bool       `json:"enabled"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // Artifact 制品

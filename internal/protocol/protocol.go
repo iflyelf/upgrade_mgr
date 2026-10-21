@@ -117,27 +117,32 @@ type Artifact struct {
 
 // ComponentSpec 组件部署规格（下发给 Agent 执行）。
 type ComponentSpec struct {
-	Name         string     `json:"name"`
-	DeployMode   string     `json:"deploy_mode"`
-	InstallPath  string     `json:"install_path"`
-	BackupDir    string     `json:"backup_dir"`
-	ExecPath     string     `json:"exec_path,omitempty"`
-	ExecArgs     []string   `json:"exec_args,omitempty"`
-	ExecEnv      []string   `json:"exec_env,omitempty"`
-	WorkDir      string     `json:"work_dir,omitempty"`
-	ExecTimeout  string     `json:"exec_timeout,omitempty"`
-	IgnoreError  bool       `json:"ignore_error,omitempty"`
-	PreInstall   [][]string `json:"pre_install,omitempty"`
-	PostInstall  [][]string `json:"post_install,omitempty"`
-	ServiceName  string     `json:"service_name,omitempty"`
-	ServiceMgr   string     `json:"service_mgr,omitempty"`
-	StopCmd      [][]string `json:"stop_cmd,omitempty"`
-	StartCmd     [][]string `json:"start_cmd,omitempty"`
-	RestartCmd   [][]string `json:"restart_cmd,omitempty"`
-	VersionCmd   [][]string `json:"version_cmd,omitempty"`
-	VersionRegex string     `json:"version_regex,omitempty"`
-	HealthCmd    [][]string `json:"health_cmd,omitempty"`
-	ConsulMaint  bool       `json:"consul_maint,omitempty"`
+	Name        string   `json:"name"`
+	DeployMode  string   `json:"deploy_mode"`
+	InstallPath string   `json:"install_path"`
+	BackupDir   string   `json:"backup_dir"`
+	ExecPath    string   `json:"exec_path,omitempty"`
+	ExecArgs    []string `json:"exec_args,omitempty"`
+	ExecEnv     []string `json:"exec_env,omitempty"`
+	WorkDir     string   `json:"work_dir,omitempty"`
+	ExecTimeout string   `json:"exec_timeout,omitempty"`
+	// ScriptURL 是 script 模式的自定义脚本下载地址（绝对 http/https）。
+	// 非空时服务端不再查找制品，Agent 直接从该地址下载并执行。
+	ScriptURL   string     `json:"script_url,omitempty"`
+	IgnoreError bool       `json:"ignore_error,omitempty"`
+	PreInstall  [][]string `json:"pre_install,omitempty"`
+	PostInstall [][]string `json:"post_install,omitempty"`
+	// PostInstallScript 为 post_install 阶段执行的脚本内容（Agent 写入临时文件后执行）。
+	PostInstallScript string     `json:"post_install_script,omitempty"`
+	ServiceName       string     `json:"service_name,omitempty"`
+	ServiceMgr        string     `json:"service_mgr,omitempty"`
+	StopCmd           [][]string `json:"stop_cmd,omitempty"`
+	StartCmd          [][]string `json:"start_cmd,omitempty"`
+	RestartCmd        [][]string `json:"restart_cmd,omitempty"`
+	VersionCmd        [][]string `json:"version_cmd,omitempty"`
+	VersionRegex      string     `json:"version_regex,omitempty"`
+	HealthCmd         [][]string `json:"health_cmd,omitempty"`
+	ConsulMaint       bool       `json:"consul_maint,omitempty"`
 }
 
 // CommandPayload 指令载荷。

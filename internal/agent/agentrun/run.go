@@ -182,16 +182,20 @@ func (a *Agent) verifyCommand(cmd protocol.Command) error {
 }
 
 func (a *Agent) executeUpgrade(ctx context.Context, cmd protocol.Command) {
-	// 把制品相对 URL 补全为绝对地址
-	if strings.HasPrefix(cmd.Payload.Artifact.URL, "/") {
-		cmd.Payload.Artifact.URL = a.cfg.ServerURL + cmd.Payload.Artifact.URL
+	// script_url 优先于 Artifact.URL（与执行器保持一致），再按实际下载地址决定
+	// 是否携带 Agent 凭据：只有平台相对路径才附带，避免泄露给第三方脚本仓库。
+	downloadURL := cmd.Payload.Artifact.URL
+	if cmd.Payload.Component.DeployMode == protocol.DeployScript && cmd.Payload.Component.ScriptURL != "" {
+		downloadURL = cmd.Payload.Component.ScriptURL
 	}
+	artifactURL, downloadAuth := a.resolveArtifactURL(downloadURL)
+	cmd.Payload.Artifact.URL = artifactURL
 
 	// 进入维护窗口（申请租约，避免升级期间被判掉线）
 	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
 		protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: protocol.StageMaintenance, ExpectedSeconds: 600}, nil)
 
-	res, err := executor.Execute(ctx, cmd, a.svcMgr, a.authHeader(), func(stage string) {
+	res, err := executor.Execute(ctx, cmd, a.svcMgr, downloadAuth, func(stage string) {
 		_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
 			protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: stage}, nil)
 	})
@@ -266,6 +270,18 @@ func LoadState(path string) (Config, error) {
 	}
 	err = json.Unmarshal(data, &cfg)
 	return cfg, err
+}
+
+// resolveArtifactURL 返回下载地址和应携带的认证头。
+//
+// 相对路径视为平台制品端点，补全 ServerURL 并附带 Agent 凭据；
+// 绝对地址视为自定义下载源（如组件 script_url），不发送 Agent 凭据，
+// 避免脚本托管在第三方仓库时泄露 Agent token。
+func (a *Agent) resolveArtifactURL(raw string) (string, string) {
+	if strings.HasPrefix(raw, "/") {
+		return a.cfg.ServerURL + raw, a.authHeader()
+	}
+	return raw, ""
 }
 
 // authHeader 返回制品下载所用的认证头，与 Agent API 一致。
