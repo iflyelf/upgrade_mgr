@@ -455,8 +455,12 @@ status upgrade-agent            # upstart
 >
 > **可重复执行**：同一条安装命令可反复执行。安装器会先删除 `/tmp/upgrade-agent` 重新下载，
 > 已注册的 `state.json` 会保留 `AgentID`/`Token`/`Secret`，不会重复注册；systemd 会先
-> `reset-failed` 再 `restart`，因此失败重启计数不会阻止重装。只有需要“换服务器/重新注册”时，
-> 才需要删除 state 并生成新令牌。
+> `reset-failed` 再 `restart`，因此失败重启计数不会阻止重装。
+>
+> **强制重新注册**：页面“接入主机”卡片勾选“强制重新注册”后生成的命令会带 `--force`，
+> 覆盖目标机已有 state 并用新令牌重新注册。也可手动执行：
+> `/tmp/upgrade-agent install --server '<url>' --enroll-token '<新令牌>' --force`。
+> `--force` 必须同时提供 `--enroll-token`；普通重装请勿勾选，否则会生成新的 Agent 身份。
 
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
 
@@ -1047,6 +1051,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - 缺少令牌或凭据残缺时直接返回可操作的错误，不再向服务端反复发起注定失败的注册（避免触发 HTTP 429）。
 - watchdog 遇到空/损坏/未注册的 state 时直接报错，不再误判为崩溃并触发二进制回滚。
 - 已注册且 `AgentID` / `Token` / `Secret` 完整的 state 在重装时保留，避免丢失 Agent 身份。
+- 新增 `install --force` 与页面“强制重新注册”选项：显式覆盖旧 state 并重新注册，需同时提供新令牌。
 
 ### 本轮修复（2026-10-19）
 

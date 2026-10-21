@@ -27,6 +27,7 @@ type Options struct {
 	BinPath     string // 目标安装路径，默认 /usr/local/bin/upgrade-agent
 	StatePath   string
 	InstallCron bool // 是否安装 cron 看门狗兜底
+	Force       bool // 强制重新注册：忽略已有 state 中的凭据并覆盖
 }
 
 // Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选 cron。
@@ -50,9 +51,13 @@ func Install(opts Options) error {
 			return fmt.Errorf("安装二进制失败: %w", err)
 		}
 	}
+	// 强制重新注册必须携带新令牌；否则会覆盖旧凭据却无法注册。
+	if opts.Force && opts.EnrollToken == "" {
+		return fmt.Errorf("--force 需要同时提供 --enroll-token")
+	}
 	// 服务启动时只带 --server/--state，不带 --enroll-token；必须先把注册信息
 	// 写入 0600 的 state，否则 Agent 每次启动都会用空令牌注册并返回 401。
-	if err := writeInitialState(opts.StatePath, opts.ServerURL, opts.EnrollToken); err != nil {
+	if err := writeInitialState(opts.StatePath, opts.ServerURL, opts.EnrollToken, opts.Force); err != nil {
 		return fmt.Errorf("写入 Agent 注册状态失败: %w", err)
 	}
 	if opts.EnrollToken == "" {
@@ -99,9 +104,9 @@ type persistedState struct {
 
 // writeInitialState 在服务启动前写入 ServerURL/EnrollToken。
 //
-// 已注册且凭据完整的 state 不会被覆盖，避免重装二进制时丢失 Agent 身份；
-// 需要重新注册时请先删除 state.json，或换一台新机器执行安装命令。
-func writeInitialState(path, serverURL, enrollToken string) error {
+// 默认情况下，已注册且凭据完整的 state 不会被覆盖，避免重装二进制时丢失
+// Agent 身份；force=true 时忽略旧凭据并重新注册（需同时提供 enrollToken）。
+func writeInitialState(path, serverURL, enrollToken string, force bool) error {
 	if path == "" {
 		return nil
 	}
@@ -115,11 +120,13 @@ func writeInitialState(path, serverURL, enrollToken string) error {
 		_ = os.Chmod(dir, 0700)
 	}
 
-	if b, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(b)) > 0 {
-		var existing persistedState
-		if json.Unmarshal(b, &existing) == nil &&
-			existing.AgentID != "" && existing.Token != "" && existing.Secret != "" {
-			return nil
+	if !force {
+		if b, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(b)) > 0 {
+			var existing persistedState
+			if json.Unmarshal(b, &existing) == nil &&
+				existing.AgentID != "" && existing.Token != "" && existing.Secret != "" {
+				return nil
+			}
 		}
 	}
 	return writeStateAtomic(path, persistedState{

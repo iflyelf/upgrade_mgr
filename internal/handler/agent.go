@@ -260,7 +260,8 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusInternalServerError, "服务器 URL 配置错误")
 			return
 		}
-		installCmd := buildInstallCommand(safeURL, arch, token)
+		force := r.URL.Query().Get("force") == "1"
+		installCmd := buildInstallCommand(safeURL, arch, token, force)
 		httpx.OK(w, map[string]any{
 			"enroll_token":    token,
 			"expires_in":      int(ttl.Seconds()),
@@ -273,12 +274,17 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 //
 // 必须先删除 /tmp/upgrade-agent：wget -c 会把上一次下载的旧二进制当成
 // 完整文件跳过下载，导致重装后仍运行旧版本（例如仍带 401 缺陷的 Agent）。
-func buildInstallCommand(safeURL, arch, token string) string {
-	return "rm -f /tmp/upgrade-agent \\\n" +
+func buildInstallCommand(safeURL, arch, token string, force bool) string {
+	cmd := "rm -f /tmp/upgrade-agent \\\n" +
 		"  && wget -c --tries=5 --timeout=30 --waitretry=5 -O /tmp/upgrade-agent \\\n" +
 		"  '" + safeURL + "/api/agent/binary/linux-" + arch + "' \\\n" +
 		"  && chmod +x /tmp/upgrade-agent \\\n" +
 		"  && /tmp/upgrade-agent install --server '" + safeURL + "' --enroll-token '" + token + "'"
+	if force {
+		// 显式覆盖目标机已有 AgentID/Token/Secret，重新注册为当前服务端的新 Agent。
+		cmd += " --force"
+	}
+	return cmd
 }
 
 func randHex(n int) string {

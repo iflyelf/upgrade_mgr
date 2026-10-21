@@ -110,6 +110,7 @@ func installCmd() {
 	binPath := fs.String("bin", "/usr/local/bin/upgrade-agent", "安装路径")
 	statePath := fs.String("state", "/var/lib/upgrade-agent/state.json", "状态文件路径")
 	installCron := fs.Bool("cron", true, "安装 cron 看门狗兜底")
+	force := fs.Bool("force", false, "强制重新注册：覆盖已有 state 凭据（需 --enroll-token）")
 	fs.Parse(os.Args[2:])
 	if *serverURL == "" {
 		fmt.Fprintln(os.Stderr, "错误: --server 必填")
@@ -118,6 +119,7 @@ func installCmd() {
 	opts := installer.Options{
 		ServerURL: *serverURL, EnrollToken: *enrollToken,
 		BinPath: *binPath, StatePath: *statePath, InstallCron: *installCron,
+		Force: *force,
 	}
 	if err := installer.Install(opts); err != nil {
 		log.Fatalf("安装失败: %v", err)

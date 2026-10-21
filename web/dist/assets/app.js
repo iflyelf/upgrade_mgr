@@ -538,20 +538,23 @@
 
   // enrollCard 生成一次性接入命令，主机执行后自动注册到列表。
   function enrollCard() {
-    var archEl = h('select', { value: (state.enroll && state.enroll.arch) || 'amd64' },
-      AGENT_ARCHES.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
     var e = state.enroll;
+    var archEl = h('select', { value: (e && e.arch) || 'amd64' },
+      AGENT_ARCHES.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
+    var forceEl = h('input', { type: 'checkbox', checked: !!(e && e.force) }, []);
     return h('div', { class: 'card' }, [
       h('h3', {}, ['接入主机（安装 Agent）']),
       hint('主机信息来自 Agent 注册：IP 取服务端看到的来源地址，主机名、OS、架构、init 系统由 Agent 上报。所以装好客户端，主机就会带着 IP 出现在列表里。'),
       field('目标机器架构', archEl, '在目标机器执行 uname -m：x86_64 选 amd64，aarch64 选 arm64。镜像里默认只带构建架构的 Agent，选其他架构下载可能 404。'),
+      field('强制重新注册', forceEl, '勾选后命令会带 --force，覆盖目标机已有 state.json 并重新注册。仅在换服务端、数据库重置或重新接入同一台机器时使用；普通重装请勿勾选。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
           type: 'button', class: 'btn', onclick: function () {
             var arch = archEl.value;
-            api('/api/agent/enroll-token?arch=' + encodeURIComponent(arch))
-              .then(function (d) { state.enroll = { arch: arch, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
-              .catch(function (err) { state.enroll = { arch: arch, err: err.message }; render(); });
+            var force = forceEl.checked;
+            api('/api/agent/enroll-token?arch=' + encodeURIComponent(arch) + (force ? '&force=1' : ''))
+              .then(function (d) { state.enroll = { arch: arch, force: force, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
+              .catch(function (err) { state.enroll = { arch: arch, force: force, err: err.message }; render(); });
           }
         }, ['生成接入命令'])
       ]),
@@ -559,7 +562,9 @@
       e && e.cmd ? h('div', {}, [
         hint('在目标机器用 root 执行（令牌一次性使用，' + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）：'),
         codeBlock(e.cmd),
-        hint('执行完成后点上方“搜索”刷新列表。如果 IP 显示成了代理地址，检查服务端 server.trust_proxy 配置。')
+        e.force ? hint('当前为强制重新注册命令（含 --force）：会覆盖目标机现有 Agent 身份，旧 Agent 记录将不再被该主机使用。') : null,
+        hint('执行完成后点上方“搜索”刷新列表。如果 IP 显示成了代理地址，检查服务端 server.trust_proxy 配置。'),
+        hint('目标机已注册时，普通命令会保留原身份（本次令牌不会被使用）；需要覆盖重注册请勾选“强制重新注册”后重新生成。')
       ]) : null
     ]);
   }

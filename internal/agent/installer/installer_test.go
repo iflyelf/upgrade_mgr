@@ -9,7 +9,7 @@ import (
 
 func TestWriteInitialStateWritesServerAndToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := writeInitialState(path, "https://mgr.example.com", "tok-123"); err != nil {
+	if err := writeInitialState(path, "https://mgr.example.com", "tok-123", false); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
 	}
 
@@ -41,7 +41,7 @@ func TestWriteInitialStateOverwritesEmptyFile(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeInitialState(path, "https://mgr.example.com", "tok-456"); err != nil {
+	if err := writeInitialState(path, "https://mgr.example.com", "tok-456", false); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
 	}
 
@@ -62,13 +62,11 @@ func TestWriteInitialStateKeepsRegisteredCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeInitialState(path, "https://new.example.com", "new-token"); err != nil {
+	if err := writeInitialState(path, "https://new.example.com", "new-token", false); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
 	}
 
-	var st struct {
-		ServerURL, AgentID, Token, Secret string
-	}
+	var st persistedState
 	b, _ := os.ReadFile(path)
 	if err := json.Unmarshal(b, &st); err != nil {
 		t.Fatalf("解析 state: %v", err)
@@ -78,5 +76,29 @@ func TestWriteInitialStateKeepsRegisteredCredentials(t *testing.T) {
 	}
 	if st.ServerURL != "https://old.example.com" {
 		t.Fatalf("ServerURL 被意外修改: %q", st.ServerURL)
+	}
+}
+
+func TestWriteInitialStateForceOverwritesCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	original := `{"ServerURL":"https://old.example.com","AgentID":"agent-1","Token":"token-1","Secret":"secret-1"}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeInitialState(path, "https://new.example.com", "new-token", true); err != nil {
+		t.Fatalf("writeInitialState: %v", err)
+	}
+
+	var st persistedState
+	b, _ := os.ReadFile(path)
+	if err := json.Unmarshal(b, &st); err != nil {
+		t.Fatalf("解析 state: %v", err)
+	}
+	if st.AgentID != "" || st.Token != "" || st.Secret != "" {
+		t.Fatalf("--force 应清空旧凭据，got %+v", st)
+	}
+	if st.ServerURL != "https://new.example.com" || st.EnrollToken != "new-token" {
+		t.Fatalf("--force 应写入新服务端/令牌，got %+v", st)
 	}
 }
