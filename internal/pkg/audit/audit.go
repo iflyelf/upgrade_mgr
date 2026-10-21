@@ -111,4 +111,5 @@ const (
 	ActionTenantCreate    = "tenant.create"
 	ActionLogin           = "auth.login"
 	ActionLogout          = "auth.logout"
+	ActionPasswordChange  = "auth.password_change"
 )

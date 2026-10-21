@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -232,6 +233,82 @@ func (b *Builtin) defaultLookup(ctx context.Context, idStr string) (*cachedUser,
 	b.cache[idStr] = cu
 	b.cacheMu.Unlock()
 	return cu, nil
+}
+
+// ChangePassword 修改用户密码（自助）。
+//
+// 验证旧密码，更新为新密码，使旧会话失效，返回新会话 token。
+// 注意：updated_at 更新后，iat 早于该时间的会话均失效（包括其他设备）。
+func (b *Builtin) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) (string, error) {
+	if err := ValidatePassword(oldPassword, newPassword); err != nil {
+		return "", err
+	}
+	
+	// 查询当前密码哈希
+	var currentHash string
+	var disabled bool
+	var username string
+	err := b.db.QueryRowContext(ctx,
+		`SELECT password_hash, disabled, username FROM local_users WHERE id=$1`,
+		userID).Scan(&currentHash, &disabled, &username)
+	if err == sql.ErrNoRows {
+		return "", ErrUnauthorized
+	}
+	if err != nil {
+		return "", err
+	}
+	if disabled {
+		return "", ErrUnauthorized
+	}
+	
+	// 验证旧密码
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(oldPassword)); err != nil {
+		return "", ErrWrongPassword
+	}
+	
+	// 生成新哈希
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	
+	// 更新密码（乐观锁：仅当哈希未变时更新，防并发修改）
+	var updatedAt time.Time
+	err = b.db.QueryRowContext(ctx,
+		`UPDATE local_users SET password_hash=$2, updated_at=NOW()
+		 WHERE id=$1 AND password_hash=$3
+		 RETURNING updated_at`,
+		userID, string(newHash), currentHash).Scan(&updatedAt)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("密码已被修改，请重新登录")
+	}
+	if err != nil {
+		return "", err
+	}
+	
+	// 清除缓存，使旧会话在下次认证时失效
+	b.cacheMu.Lock()
+	delete(b.cache, userID)
+	b.cacheMu.Unlock()
+	
+	// 签发新会话，iat 使用 updated_at 确保不早于密码修改时间
+	u, err := b.lookupUser(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	token := b.sc.signAt(&User{
+		ID: userID, Username: u.Username, DisplayName: u.Display,
+		IsAdmin: u.IsAdmin, TenantID: u.TenantID, Roles: u.Roles,
+	}, updatedAt)
+	
+	return token, nil
+}
+
+// InvalidateUser 清除指定用户的缓存（用于管理员重置密码后主动失效会话）。
+func (b *Builtin) InvalidateUser(userID string) {
+	b.cacheMu.Lock()
+	delete(b.cache, userID)
+	b.cacheMu.Unlock()
 }
 
 // evictCache 定期清理过期缓存条目（防内存泄漏）。

@@ -124,6 +124,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 
 	// 需登录
 	mux.HandleFunc("GET /api/auth/userinfo", middleware.RequireAuth(auth, handler.UserInfo(sc)))
+	mux.Handle("PUT /api/auth/password", middleware.RateLimitMiddleware(loginLimiter)(middleware.RequireAuth(auth, handler.ChangePassword(sc))))
 	mux.HandleFunc("GET /api/hosts", middleware.RequireAuth(auth, handler.ListHosts(sc)))
 	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, handler.SyncHosts(sc)))
 

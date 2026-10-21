@@ -60,6 +60,7 @@
       h('div', { class: 'brand' }, ['🚀 升级控制平台']),
       h('div', { class: 'spacer' }, []),
       themeSwitcher(),
+      state.user ? h('button', { class: 'btn', onclick: function() { switchView('password'); } }, ['修改密码']) : null,
       state.user ? h('button', { class: 'btn', onclick: logout }, ['退出']) : null
     ]);
   }
@@ -76,10 +77,12 @@
 
   function switchView(v) {
     state.view = v;
+    state.err = '';
     if (v === 'settings') loadSettings();
     else if (v === 'components') loadComponents();
     else if (v === 'artifacts') loadArtifacts();
     else if (v === 'tasks') loadTasks();
+    else if (v === 'password') render();
     else loadHosts();
   }
 
@@ -155,25 +158,289 @@
   function simpleTable(cols, rows, cells) {
     var head = h('tr', {}, cols.map(function (t) { return h('th', {}, [t]); }));
     var body = rows.map(function (x) {
-      return h('tr', {}, cells(x).map(function (c) { return h('td', {}, [String(c == null ? '-' : c)]); }));
+      return h('tr', {}, cells(x).map(function (c) { 
+        // 支持 DOM 节点或字符串
+        return h('td', {}, [typeof c === 'string' ? c : c]); 
+      }));
     });
     return h('div', { class: 'table-wrap' }, [h('table', {}, [h('thead', {}, [head]), h('tbody', {}, body)])]);
   }
 
   function componentsView() {
-    return h('div', { class: 'card' }, [
-      h('div', { class: 'toolbar' }, [h('span', { class: 'muted' }, ['组件定义（升级对象）'])]),
-      simpleTable(['ID', '名称', '模式', '安装路径', '服务'], state.components,
-        function (x) { return [x.id, x.name, x.deploy_mode, x.install_path, x.service_name]; })
+    var editingComp = state.editingComp || null;
+    var nameEl, dispEl, modeEl, binEl, pathEl, serviceEl, svcMgrEl, osEl, archEl, enabledEl, advEl;
+    
+    var form = editingComp !== null ? h('div', { class: 'card' }, [
+      h('h3', {}, [editingComp.id ? '编辑组件' : '新建组件']),
+      state.err ? h('div', { class: 'err field' }, [state.err]) : null,
+      h('div', { class: 'field' }, [
+        h('label', {}, ['名称 (name)']),
+        (nameEl = h('input', { value: editingComp.name || '' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['显示名称 (display_name)']),
+        (dispEl = h('input', { value: editingComp.display_name || '' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['部署模式 (deploy_mode)']),
+        (modeEl = h('select', {}, [
+          h('option', { value: 'replace' }, ['replace']),
+          h('option', { value: 'exec' }, ['exec']),
+          h('option', { value: 'replace_exec' }, ['replace_exec'])
+        ]))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['二进制名称 (binary_name)']),
+        (binEl = h('input', { value: editingComp.binary_name || '' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['安装路径 (install_path)']),
+        (pathEl = h('input', { value: editingComp.install_path || '' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['服务名称 (service_name)']),
+        (serviceEl = h('input', { value: editingComp.service_name || '' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['服务管理器 (service_mgr)']),
+        (svcMgrEl = h('select', {}, [
+          h('option', { value: 'auto' }, ['auto']),
+          h('option', { value: 'systemd' }, ['systemd']),
+          h('option', { value: 'sysv' }, ['sysv'])
+        ]))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['OS 匹配 (os_match)']),
+        (osEl = h('input', { value: editingComp.os_match || '' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['架构匹配 (arch_match)']),
+        (archEl = h('input', { value: editingComp.arch_match || '' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, [
+          (enabledEl = h('input', { type: 'checkbox' }, [])),
+          ' 启用 (enabled)'
+        ])
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['高级配置 JSON (可选，exec_path/exec_args/pre_install 等)']),
+        (advEl = h('textarea', { rows: '8', style: 'width:100%; font-family:monospace; font-size:13px;' }, []))
+      ]),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn', onclick: function () {
+            var base = editingComp.id ? Object.assign({}, editingComp) : {
+              backup_dir: '/var/lib/upgrade-agent/backup',
+              service_mgr: 'auto',
+              deploy_mode: 'replace',
+              enabled: true
+            };
+            base.name = nameEl.value;
+            base.display_name = dispEl.value;
+            base.deploy_mode = modeEl.value;
+            base.binary_name = binEl.value;
+            base.install_path = pathEl.value;
+            base.service_name = serviceEl.value;
+            base.service_mgr = svcMgrEl.value;
+            base.os_match = osEl.value;
+            base.arch_match = archEl.value;
+            base.enabled = enabledEl.checked;
+            
+            if (advEl.value.trim()) {
+              try {
+                var adv = JSON.parse(advEl.value);
+                Object.assign(base, adv);
+              } catch (e) {
+                state.err = '高级配置 JSON 格式错误: ' + e.message;
+                render();
+                return;
+              }
+            }
+            
+            var method = base.id ? 'PUT' : 'POST';
+            var url = base.id ? '/api/components/' + base.id : '/api/components';
+            api(url, { method: method, body: JSON.stringify(base) })
+              .then(function () {
+                state.editingComp = null;
+                state.err = '';
+                loadComponents();
+              })
+              .catch(function (e) { state.err = e.message; render(); });
+          }
+        }, ['保存']),
+        h('button', {
+          class: 'btn', onclick: function () { state.editingComp = null; render(); }
+        }, ['取消'])
+      ])
+    ]) : null;
+    
+    // 设置选择框和复选框的初始值
+    if (editingComp && form) {
+      setTimeout(function() {
+        if (modeEl) modeEl.value = editingComp.deploy_mode || 'replace';
+        if (svcMgrEl) svcMgrEl.value = editingComp.service_mgr || 'auto';
+        if (enabledEl) enabledEl.checked = editingComp.enabled !== false;
+        if (nameEl && editingComp.id) nameEl.readOnly = true;
+        if (advEl && editingComp.id) {
+          var adv = {};
+          ['exec_path', 'exec_args', 'exec_as_user', 'exec_timeout', 'exec_env', 'work_dir',
+           'ignore_error', 'pre_install', 'post_install', 'stop_cmd', 'start_cmd', 'restart_cmd',
+           'version_cmd', 'version_regex', 'health_cmd', 'consul_maint', 'backup_dir'].forEach(function(k) {
+            if (editingComp[k] !== undefined && editingComp[k] !== null && editingComp[k] !== '') {
+              adv[k] = editingComp[k];
+            }
+          });
+          if (Object.keys(adv).length > 0) {
+            advEl.value = JSON.stringify(adv, null, 2);
+          }
+        }
+      }, 0);
+    }
+    
+    var toolbar = h('div', { class: 'toolbar' }, [
+      state.user && state.user.IsAdmin ? h('button', {
+        class: 'btn', onclick: function () {
+          state.editingComp = { enabled: true };
+          state.err = '';
+          render();
+        }
+      }, ['新建组件']) : null,
+      h('span', { class: 'muted' }, ['组件定义（升级对象）'])
     ]);
+    
+    var table = simpleTable(
+      ['ID', '名称', '显示名称', '模式', '安装路径', '服务', '操作'],
+      state.components,
+      function (x) {
+        var actions = state.user && state.user.IsAdmin ? h('div', { style: 'display:flex; gap:4px;' }, [
+          h('button', {
+            class: 'btn', style: 'padding:4px 8px; font-size:12px;',
+            onclick: function () {
+              state.editingComp = Object.assign({}, x);
+              state.err = '';
+              render();
+            }
+          }, ['编辑']),
+          h('button', {
+            class: 'btn', style: 'padding:4px 8px; font-size:12px; background:#d9776c;',
+            onclick: function () {
+              if (!confirm('确定删除组件 ' + x.name + ' 吗？')) return;
+              api('/api/components/' + x.id, { method: 'DELETE' })
+                .then(function () { loadComponents(); })
+                .catch(function (e) { alert('删除失败: ' + e.message); });
+            }
+          }, ['删除'])
+        ]) : '-';
+        return [x.id, x.name, x.display_name || '-', x.deploy_mode, x.install_path || '-', x.service_name || '-', actions];
+      }
+    );
+    
+    return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table])]);
   }
 
   function artifactsView() {
-    return h('div', { class: 'card' }, [
+    var compEl, verEl, archEl, osEl, innerEl, notesEl, fileEl;
+    
+    var uploadForm = state.user && state.user.IsAdmin ? h('div', { class: 'card' }, [
+      h('h3', {}, ['上传制品']),
+      state.err ? h('div', { class: 'err field' }, [state.err]) : null,
+      h('div', { class: 'field' }, [
+        h('label', {}, ['组件']),
+        (compEl = h('select', {}, [h('option', { value: '' }, ['请选择'])].concat(
+          state.components.map(function (c) {
+            return h('option', { value: c.id }, [c.name + ' (' + c.display_name + ')']);
+          })
+        )))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['版本']),
+        (verEl = h('input', { placeholder: '如 1.2.3' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['架构 (arch)']),
+        (archEl = h('select', {}, [
+          h('option', { value: 'amd64' }, ['amd64']),
+          h('option', { value: 'arm64' }, ['arm64']),
+          h('option', { value: 'arm' }, ['arm']),
+          h('option', { value: '386' }, ['386'])
+        ]))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['操作系统 (os_family，可选)']),
+        (osEl = h('input', { placeholder: '如 linux' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['内部路径 (inner_path，可选)']),
+        (innerEl = h('input', { placeholder: '如 bin/app' }, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['备注 (notes，可选)']),
+        (notesEl = h('input', {}, []))
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['文件']),
+        (fileEl = h('input', { type: 'file' }, []))
+      ]),
+      h('button', {
+        class: 'btn', onclick: function () {
+          if (!compEl.value || !verEl.value || !fileEl.files[0]) {
+            state.err = '组件、版本和文件为必填项';
+            render();
+            return;
+          }
+          var fd = new FormData();
+          fd.append('file', fileEl.files[0]);
+          fd.append('component_id', compEl.value);
+          fd.append('version', verEl.value);
+          fd.append('arch', archEl.value);
+          if (osEl.value) fd.append('os_family', osEl.value);
+          if (innerEl.value) fd.append('inner_path', innerEl.value);
+          if (notesEl.value) fd.append('notes', notesEl.value);
+          
+          fetch('/api/artifacts', { method: 'POST', body: fd })
+            .then(function (r) {
+              return r.json().then(function (j) {
+                if (!r.ok || (j && j.code && j.code !== 0)) {
+                  throw new Error((j && j.message) || ('HTTP ' + r.status));
+                }
+                return j.data;
+              });
+            })
+            .then(function () {
+              alert('上传成功');
+              state.err = '';
+              fileEl.value = '';
+              verEl.value = '';
+              notesEl.value = '';
+              loadArtifacts();
+            })
+            .catch(function (e) { state.err = e.message; render(); });
+        }
+      }, ['上传'])
+    ]) : null;
+    
+    var compMap = {};
+    state.components.forEach(function (c) { compMap[c.id] = c.name; });
+    
+    var table = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [h('span', { class: 'muted' }, ['制品（版本×架构，md5 校验）'])]),
-      simpleTable(['ID', '组件', '版本', 'ARCH', 'OS', '大小', 'MD5'], state.artifacts,
-        function (x) { return [x.id, x.component_id, x.version, x.arch, x.os_family, x.size, (x.md5 || '').slice(0, 12)]; })
+      simpleTable(['ID', '组件', '版本', 'ARCH', 'OS', '大小', 'MD5', '备注'], state.artifacts,
+        function (x) {
+          return [
+            x.id,
+            compMap[x.component_id] || x.component_id,
+            x.version,
+            x.arch,
+            x.os_family || '-',
+            x.size ? (x.size / 1024 / 1024).toFixed(2) + ' MB' : '-',
+            (x.md5 || '').slice(0, 12),
+            x.notes || '-'
+          ];
+        })
     ]);
+    
+    return h('div', {}, [uploadForm, table]);
   }
 
   function tasksView() {
@@ -208,6 +475,41 @@
     return h('div', {}, [form, list]);
   }
 
+  function passwordView() {
+    var oldEl, newEl, confirmEl;
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['修改密码']),
+      state.err ? h('div', { class: 'err field' }, [state.err]) : null,
+      h('div', { class: 'field' }, [h('label', {}, ['原密码']), (oldEl = h('input', { type: 'password' }, []))]),
+      h('div', { class: 'field' }, [h('label', {}, ['新密码']), (newEl = h('input', { type: 'password' }, []))]),
+      h('div', { class: 'field' }, [h('label', {}, ['确认新密码']), (confirmEl = h('input', { type: 'password' }, []))]),
+      h('button', {
+        class: 'btn', onclick: function () {
+          if (newEl.value !== confirmEl.value) {
+            state.err = '两次输入的新密码不一致';
+            render();
+            return;
+          }
+          if (newEl.value.length < 8) {
+            state.err = '新密码长度不能少于 8 字符';
+            render();
+            return;
+          }
+          api('/api/auth/password', {
+            method: 'PUT',
+            body: JSON.stringify({ old_password: oldEl.value, new_password: newEl.value })
+          })
+            .then(function () {
+              alert('密码修改成功');
+              state.err = '';
+              switchView('hosts');
+            })
+            .catch(function (e) { state.err = e.message; render(); });
+        }
+      }, ['提交'])
+    ]);
+  }
+
   function render() {
     app.innerHTML = '';
     if (!state.user) { app.appendChild(loginView()); return; }
@@ -218,6 +520,7 @@
       case 'components': body = componentsView(); break;
       case 'artifacts': body = artifactsView(); break;
       case 'tasks': body = tasksView(); break;
+      case 'password': body = passwordView(); break;
       default: body = hostsView();
     }
     app.appendChild(h('div', { class: 'container' }, [tabs(), body]));

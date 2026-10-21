@@ -65,10 +65,18 @@ func newSessionCodec(secret string, secure bool) *sessionCodec {
 // sign 生成 base64(payload).hmac 形式的会话 token。
 func (c *sessionCodec) sign(u *User) string {
 	now := time.Now()
+	return c.signAt(u, now)
+}
+
+// signAt 生成会话 token，使用指定的签发时间（用于密码修改后重签会话）。
+// iat 向上取整到毫秒，确保不早于 updated_at（避免因精度差异导致会话被拒）。
+func (c *sessionCodec) signAt(u *User, iat time.Time) string {
+	// 向上取整到毫秒边界，避免截断导致 iat < updated_at
+	iatMs := (iat.UnixNano() + 999999) / 1000000
 	pl := sessionPayload{
 		ID: u.ID, Username: u.Username, Display: u.DisplayName,
 		IsAdmin: u.IsAdmin, TenantID: u.TenantID, Roles: u.Roles,
-		Exp: now.Add(sessionMaxAge).Unix(), Iat: now.UnixMilli(),
+		Exp: time.Now().Add(sessionMaxAge).Unix(), Iat: iatMs,
 	}
 	raw, _ := json.Marshal(pl)
 	enc := base64.RawURLEncoding.EncodeToString(raw)

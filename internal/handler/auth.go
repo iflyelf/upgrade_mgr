@@ -88,3 +88,46 @@ func AuthCallback(s *svc.ServiceContext) http.HandlerFunc {
 		http.Redirect(w, r, "/", http.StatusFound)
 	}
 }
+
+// ChangePassword 修改当前用户密码（自助）。
+func ChangePassword(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 仅 builtin 支持密码修改
+		b, ok := s.Auth.(*auth.Builtin)
+		if !ok {
+			httpx.Fail(w, http.StatusBadRequest, "当前认证方式不支持密码修改")
+			return
+		}
+		
+		u, ok := auth.FromContext(r.Context())
+		if !ok || u == nil {
+			httpx.Fail(w, http.StatusUnauthorized, "未认证")
+			return
+		}
+		
+		var req struct {
+			OldPassword string `json:"old_password"`
+			NewPassword string `json:"new_password"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		
+		token, err := b.ChangePassword(r.Context(), u.ID, req.OldPassword, req.NewPassword)
+		if err != nil {
+			action := audit.ActionPasswordChange
+			auditOp(s, r, action, "auth", u.ID, u.Username, err)
+			if err == auth.ErrWrongPassword {
+				httpx.Fail(w, http.StatusBadRequest, "原密码错误")
+				return
+			}
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		
+		auditOp(s, r, audit.ActionPasswordChange, "auth", u.ID, u.Username, nil)
+		b.SetSession(w, token)
+		httpx.OK(w, map[string]any{"message": "密码修改成功"})
+	}
+}

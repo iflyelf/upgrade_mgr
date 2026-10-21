@@ -5,6 +5,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -81,3 +82,23 @@ func FromContext(ctx context.Context) (*User, bool) {
 	u, ok := ctx.Value(userKey).(*User)
 	return u, ok
 }
+
+// ValidatePassword 校验密码合法性。
+// 要求：长度 8-72 字节（bcrypt 限制），且新密码不能与旧密码相同。
+func ValidatePassword(oldPassword, newPassword string) error {
+	if len(newPassword) < 8 {
+		return fmt.Errorf("新密码长度不能少于 8 字符")
+	}
+	if len(newPassword) > 72 {
+		return fmt.Errorf("新密码长度不能超过 72 字节")
+	}
+	if oldPassword != "" && oldPassword == newPassword {
+		return fmt.Errorf("新密码不能与原密码相同")
+	}
+	return nil
+}
+
+var (
+	// ErrWrongPassword 原密码错误。
+	ErrWrongPassword = fmt.Errorf("原密码错误")
+)
