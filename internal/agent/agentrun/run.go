@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -56,11 +57,28 @@ func New(cfg Config) *Agent {
 func (a *Agent) Run(ctx context.Context) error {
 	// 1. 注册（如果还没有凭据）
 	if a.cfg.AgentID == "" {
+		if a.cfg.EnrollToken == "" {
+			return fmt.Errorf("缺少注册令牌：请用 install --enroll-token 安装，或删除 %s 后重新注册", a.cfg.StatePath)
+		}
 		if err := a.register(); err != nil {
+			if strings.Contains(err.Error(), "HTTP 401") {
+				return fmt.Errorf("注册失败: 注册令牌无效或已过期（HTTP 401），请在控制台重新生成令牌后再安装: %w", err)
+			}
+			if strings.Contains(err.Error(), "HTTP 429") {
+				return fmt.Errorf("注册失败: 注册请求过于频繁（HTTP 429），请稍后重试: %w", err)
+			}
 			return fmt.Errorf("注册失败: %w", err)
 		}
-		a.saveState()
+		// 注册令牌是一次性的，成功后不再落盘；state 只保留 Agent 凭据。
+		a.cfg.EnrollToken = ""
+		if err := a.saveState(); err != nil {
+			log.Printf("⚠️ 保存 Agent 凭据失败（进程重启后需重新注册）: %v", err)
+		}
 		log.Printf("注册成功: agent_id=%s", a.cfg.AgentID)
+	} else if a.cfg.Token == "" || a.cfg.Secret == "" {
+		// 凭据残缺时继续运行只会在心跳/取指令阶段反复 401，
+		// 直接给出可操作的错误，避免 systemd 无限重启。
+		return fmt.Errorf("Agent 状态文件缺少 token/secret，请删除 %s 后重新执行安装命令", a.cfg.StatePath)
 	}
 
 	// 2. 心跳 ticker
@@ -112,7 +130,9 @@ func (a *Agent) heartbeat() {
 	}
 	_ = a.postJSON("/api/agent/heartbeat", req, nil)
 	a.cfg.LastHeartbeat = time.Now()
-	a.saveState()
+	if err := a.saveState(); err != nil {
+		log.Printf("⚠️ 保存心跳状态失败: %v", err)
+	}
 }
 
 func (a *Agent) poll(ctx context.Context) {
@@ -250,15 +270,47 @@ func (a *Agent) getLocalIP() string {
 	return ""
 }
 
-func (a *Agent) saveState() {
+// saveState 原子写入 Agent 状态。
+//
+// 先写同目录临时文件并 fsync，再 rename 覆盖，避免进程在写入中途被杀死时
+// 留下 0 字节的 state.json（旧实现 os.WriteFile 会先截断目标文件）。
+func (a *Agent) saveState() error {
 	if a.cfg.StatePath == "" {
-		return
+		return nil
 	}
-	data, _ := json.Marshal(a.cfg)
-	_ = os.WriteFile(a.cfg.StatePath, data, 0600)
+	data, err := json.Marshal(a.cfg)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(a.cfg.StatePath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	// state 内含 token/secret，目录必须仅 root 可访问。
+	// 相对路径（dir="."）或根目录不做 chmod，避免误改当前目录/系统根目录。
+	if dir != "." && dir != string(filepath.Separator) {
+		_ = os.Chmod(dir, 0700)
+	}
+
+	tmp := a.cfg.StatePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	if f, err := os.OpenFile(tmp, os.O_RDWR, 0600); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
+	if err := os.Rename(tmp, a.cfg.StatePath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
-// LoadState 加载已保存的凭据
+// LoadState 加载已保存的凭据。
+//
+// 空文件视为「尚未注册」，不返回错误，便于安装器先写入 ServerURL 后由
+// run 补写凭据；内容损坏时仍返回错误，由调用方提示重新安装。
 func LoadState(path string) (Config, error) {
 	var cfg Config
 	if path == "" {
@@ -267,6 +319,9 @@ func LoadState(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return cfg, nil
 	}
 	err = json.Unmarshal(data, &cfg)
 	return cfg, err

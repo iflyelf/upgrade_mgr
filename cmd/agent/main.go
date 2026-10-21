@@ -54,7 +54,11 @@ func runCmd() {
 	statePath := fs.String("state", "/var/lib/upgrade-agent/state.json", "状态文件路径")
 	fs.Parse(os.Args[2:])
 
-	cfg, _ := agentrun.LoadState(*statePath)
+	cfg, err := agentrun.LoadState(*statePath)
+	if err != nil && !os.IsNotExist(err) {
+		// 文件缺失是首次安装的正常情况；内容损坏则提示运维重新安装。
+		log.Printf("⚠️ 读取状态文件失败（将按新节点处理）: %v", err)
+	}
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = *serverURL
 	}
@@ -131,7 +135,7 @@ func watchdogCmd() {
 	statePath := fs.String("state", "/var/lib/upgrade-agent/state.json", "状态文件路径")
 	binPath := fs.String("bin", "/usr/local/bin/upgrade-agent", "二进制路径")
 	threshold := fs.Duration("threshold", 3*time.Minute, "心跳超时阈值")
-	_ = fs.Bool("quiet", false, "静默模式（兼容 cron 调用）")  // 兼容性参数，实际未使用
+	_ = fs.Bool("quiet", false, "静默模式（兼容 cron 调用）") // 兼容性参数，实际未使用
 	fs.Parse(os.Args[2:])
 	if err := watchdog.Check(*statePath, *binPath, *threshold); err != nil {
 		log.Printf("watchdog: %v", err)

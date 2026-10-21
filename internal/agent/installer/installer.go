@@ -6,6 +6,7 @@ package installer
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,7 +50,14 @@ func Install(opts Options) error {
 			return fmt.Errorf("安装二进制失败: %w", err)
 		}
 	}
-	_ = os.MkdirAll(filepath.Dir(opts.StatePath), 0755)
+	// 服务启动时只带 --server/--state，不带 --enroll-token；必须先把注册信息
+	// 写入 0600 的 state，否则 Agent 每次启动都会用空令牌注册并返回 401。
+	if err := writeInitialState(opts.StatePath, opts.ServerURL, opts.EnrollToken); err != nil {
+		return fmt.Errorf("写入 Agent 注册状态失败: %w", err)
+	}
+	if opts.EnrollToken == "" {
+		fmt.Println("⚠️ 未提供 --enroll-token；Agent 启动后会提示缺少注册令牌")
+	}
 
 	// 2. 按 init 类型写服务
 	switch info.Init {
@@ -76,6 +84,70 @@ func Install(opts Options) error {
 	return nil
 }
 
+// persistedState 是 Agent state 文件的最小写入结构。
+//
+// 字段名必须与 agentrun.Config 的 JSON 键一致（Go 默认使用导出字段名），
+// Agent 启动时由 agentrun.LoadState 读取。
+type persistedState struct {
+	ServerURL   string
+	EnrollToken string
+	AgentID     string
+	Token       string
+	Secret      string
+	StatePath   string
+}
+
+// writeInitialState 在服务启动前写入 ServerURL/EnrollToken。
+//
+// 已注册且凭据完整的 state 不会被覆盖，避免重装二进制时丢失 Agent 身份；
+// 需要重新注册时请先删除 state.json，或换一台新机器执行安装命令。
+func writeInitialState(path, serverURL, enrollToken string) error {
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	// state 内含 token/secret，目录必须仅 root 可访问。
+	// 相对路径（dir="."）或根目录不做 chmod，避免误改当前目录/系统根目录。
+	if dir != "." && dir != string(filepath.Separator) {
+		_ = os.Chmod(dir, 0700)
+	}
+
+	if b, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(b)) > 0 {
+		var existing persistedState
+		if json.Unmarshal(b, &existing) == nil &&
+			existing.AgentID != "" && existing.Token != "" && existing.Secret != "" {
+			return nil
+		}
+	}
+	return writeStateAtomic(path, persistedState{
+		ServerURL: serverURL, EnrollToken: enrollToken, StatePath: path,
+	})
+}
+
+// writeStateAtomic 先写临时文件再 rename，避免进程中断留下空 state 文件。
+func writeStateAtomic(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0600); err != nil {
+		return err
+	}
+	if f, err := os.OpenFile(tmp, os.O_RDWR, 0600); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func installSystemd(opts Options) error {
 	content, err := render("upgrade-agent.service.tmpl", opts)
 	if err != nil {
@@ -85,8 +157,14 @@ func installSystemd(opts Options) error {
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		return err
 	}
-	run("systemctl", "daemon-reload")
-	return run("systemctl", "enable", "--now", "upgrade-agent")
+	if err := run("systemctl", "daemon-reload"); err != nil {
+		return err
+	}
+	if err := run("systemctl", "enable", "upgrade-agent"); err != nil {
+		return err
+	}
+	// 服务可能已在运行（例如重装/修复），必须显式 restart 才会加载新二进制和新 state。
+	return run("systemctl", "restart", "upgrade-agent")
 }
 
 func installUpstart(opts Options) error {
@@ -98,6 +176,8 @@ func installUpstart(opts Options) error {
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		return err
 	}
+	// upstart 的 start 对已运行实例是空操作，先 stop 确保加载新二进制和新 state。
+	_ = run("stop", "upgrade-agent")
 	return run("start", "upgrade-agent")
 }
 

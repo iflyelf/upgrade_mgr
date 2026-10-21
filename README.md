@@ -446,6 +446,13 @@ status upgrade-agent            # upstart
 > `/opt/upgrade-mgr/dist/`（服务的 `WorkingDirectory`），Docker 镜像已内置对应架构的 Agent。
 > 若自定义目录，请设置环境变量 `AGENT_BINARY_DIR`。
 
+> **注册状态说明**：`install` 会在启动服务前把 `--server` / `--enroll-token` 写入
+> `/var/lib/upgrade-agent/state.json`（0600），因此 systemd/upstart 启动 `run` 时无需再带令牌。
+> 已注册且凭据完整的 state 不会被重装覆盖；如需换服务器或重新注册，先执行
+> `systemctl stop upgrade-agent && rm -f /var/lib/upgrade-agent/state.json`，
+> 再在控制台生成新令牌（一次性，默认 15 分钟有效）并重新执行安装命令。
+> 若日志出现 `HTTP 401`，通常是令牌已过期或已被使用；`HTTP 429` 是连续失败触发的限流。
+
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
 
 控制台「组件」页点「填入示例：node_exporter（脚本安装）」会自动填好组件；
@@ -1027,6 +1034,15 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
 
+### 2026-10-21 修复：Agent 注册 401 与空 state
+
+- `install` 在启动服务前把 `ServerURL` / `EnrollToken` 原子写入 `state.json`（0600），
+  解决 systemd/upstart 的 `run` 不带 `--enroll-token` 导致每次启动都用空令牌注册（HTTP 401）的问题。
+- Agent 注册成功后清空一次性 `EnrollToken`；`saveState` 改为 tmp + fsync + rename，避免进程中断留下 0 字节文件。
+- 缺少令牌或凭据残缺时直接返回可操作的错误，不再向服务端反复发起注定失败的注册（避免触发 HTTP 429）。
+- watchdog 遇到空/损坏/未注册的 state 时直接报错，不再误判为崩溃并触发二进制回滚。
+- 已注册且 `AgentID` / `Token` / `Secret` 完整的 state 在重装时保留，避免丢失 Agent 身份。
+
 ### 本轮修复（2026-10-19）
 
 **✅ 已修复（34 项）**：
@@ -1079,7 +1095,6 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - 心跳被长时间升级阻塞，watchdog 误判拉起第二个实例 → 需独立 goroutine + 单实例 flock
 - 指令重放攻击 → 需持久化 nonce 去重
 - 跨文件系统 rename 报 EXDEV（下载、备份、自升级）→ 临时文件需放目标同目录
-- state.json 非原子写入，与 watchdog 竞态 → 需 tmp+fsync+rename，watchdog 用独立文件
 - 进程组清理缺失（超时 kill 只杀父进程）→ 需 `Setpgid` + kill(-pgid)
 - 健康检查失败时回滚语义不清（`IgnoreError` 被忽略）→ 需修正
 - 备份无上限堆积 → 只保留最近 N 个

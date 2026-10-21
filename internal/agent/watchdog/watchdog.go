@@ -4,6 +4,7 @@
 package watchdog
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,33 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/agent/selfupdate"
 )
+
+// stateFile 是 watchdog 关心的 state 字段。
+type stateFile struct {
+	ServerURL     string
+	AgentID       string
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	CrashCount    int       `json:"crash_count"`
+}
+
+// readState 严格读取 state：空文件/损坏文件必须报错，不能当作「心跳超时」。
+//
+// 否则 watchdog 会在 3 分钟后把正常但尚未注册的 Agent 判定为连续崩溃，
+// 并触发 selfupdate.Rollback，造成误回滚。
+func readState(path string) (stateFile, error) {
+	var state stateFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return state, fmt.Errorf("state 文件不存在或无法读取，请先 install: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return state, fmt.Errorf("state 文件为空，请删除 %s 后重新执行 install --enroll-token", path)
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return state, fmt.Errorf("state 文件格式错误: %w", err)
+	}
+	return state, nil
+}
 
 // Check 检查 Agent 存活性，必要时拉起；连续崩溃触发回滚。
 func Check(statePath, binPath string, threshold time.Duration) error {
@@ -40,28 +68,27 @@ func Check(statePath, binPath string, threshold time.Duration) error {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 
 	// 读 state 心跳
-	data, err := os.ReadFile(statePath)
+	state, err := readState(statePath)
 	if err != nil {
-		return fmt.Errorf("state 文件不存在或无法读取，请先 install")
+		return err
 	}
-	var state struct {
-		LastHeartbeat time.Time `json:"last_heartbeat"`
-		CrashCount    int       `json:"crash_count"`
+	// 尚未注册时没有心跳是正常的；不能计入崩溃，更不能触发回滚。
+	if state.AgentID == "" {
+		return fmt.Errorf("Agent 尚未注册，跳过看门狗（state 缺少 AgentID）")
 	}
-	_ = json.Unmarshal(data, &state)
 
 	// 心跳新鲜 → 存活，重置崩溃计数
 	if time.Since(state.LastHeartbeat) < threshold {
 		if state.CrashCount > 0 {
 			state.CrashCount = 0
-			updateState(statePath, state)
+			updateState(statePath, state.CrashCount, state.LastHeartbeat)
 		}
 		return nil
 	}
 
 	// 超时 → 崩溃
 	state.CrashCount++
-	updateState(statePath, state)
+	updateState(statePath, state.CrashCount, state.LastHeartbeat)
 
 	// 连续崩溃 ≥3 次 → 回滚（防自升级后新版本持续崩溃）
 	if state.CrashCount >= 3 {
@@ -71,13 +98,17 @@ func Check(statePath, binPath string, threshold time.Duration) error {
 			return fmt.Errorf("回滚失败: %w", err)
 		}
 		state.CrashCount = 0
-		updateState(statePath, state)
+		updateState(statePath, state.CrashCount, state.LastHeartbeat)
 		fmt.Println("✅ 已回滚到旧版本")
 	}
 
 	// 拉起
 	fmt.Printf("Agent 心跳超时（上次 %s），拉起...\n", state.LastHeartbeat.Format(time.RFC3339))
-	cmd := exec.Command(binPath, "run", "--state", statePath)
+	args := []string{"run", "--state", statePath}
+	if state.ServerURL != "" {
+		args = append(args, "--server", state.ServerURL)
+	}
+	cmd := exec.Command(binPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("拉起失败: %w", err)
@@ -85,9 +116,8 @@ func Check(statePath, binPath string, threshold time.Duration) error {
 	return cmd.Process.Release()
 }
 
-func updateState(path string, data any) {
-	// 只更新崩溃计数，不覆盖完整 state 文件（避免丢失 AgentID/Token/Secret）
-	// 读取完整 state
+// updateState 只修改 crash_count / last_heartbeat，保留完整凭据字段。
+func updateState(path string, crashCount int, lastHeartbeat time.Time) {
 	existing, err := os.ReadFile(path)
 	if err != nil {
 		return // state 文件不存在，跳过
@@ -96,16 +126,9 @@ func updateState(path string, data any) {
 	if err := json.Unmarshal(existing, &fullState); err != nil {
 		return
 	}
-	
-	// 只更新 crash_count 和 last_heartbeat 字段
-	if partial, ok := data.(struct {
-		LastHeartbeat time.Time `json:"last_heartbeat"`
-		CrashCount    int       `json:"crash_count"`
-	}); ok {
-		fullState["crash_count"] = partial.CrashCount
-		fullState["last_heartbeat"] = partial.LastHeartbeat
-	}
-	
+	fullState["crash_count"] = crashCount
+	fullState["last_heartbeat"] = lastHeartbeat
+
 	// 原子写回：tmp + fsync + rename
 	b, _ := json.MarshalIndent(fullState, "", "  ")
 	tmp := path + ".tmp"
@@ -113,8 +136,8 @@ func updateState(path string, data any) {
 		return
 	}
 	if f, err := os.OpenFile(tmp, os.O_RDWR, 0600); err == nil {
-		f.Sync()
-		f.Close()
+		_ = f.Sync()
+		_ = f.Close()
 	}
 	_ = os.Rename(tmp, path)
 }
