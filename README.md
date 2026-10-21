@@ -449,36 +449,70 @@ status upgrade-agent            # upstart
 ### 5. node_exporter 安装示例（可选）
 
 控制台「组件」页点「填入示例：node_exporter」会自动填好组件；也可以参考
-`examples/node_exporter/` 下的 systemd unit 和安装脚本。
+`examples/node_exporter/` 下的 systemd unit、SysV init 脚本和安装脚本。
+
+示例二进制为静态编译（iflyelf/node_exporter latest），不依赖目标机的 Go 或 glibc，
+CentOS 6 等较老内核也可以直接运行。安装脚本和页面 `post_install` 会根据目标机
+init 系统自动选择服务文件：
+
+| 发行版 | 适用版本 | init | 服务文件 |
+| --- | --- | --- | --- |
+| CentOS / RHEL | 6.x | upstart + SysV | `/etc/init.d/node_exporter` |
+| CentOS / RHEL | 7.x 及以上（含 CentOS Stream） | systemd | `/etc/systemd/system/node_exporter.service` |
+| Rocky Linux | 8.x 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
+| openEuler | 20.03 LTS 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
+| Ubuntu | 14.04 | upstart + SysV | `/etc/init.d/node_exporter` |
+| Ubuntu | 16.04 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
+| Debian | 7.x | SysV | `/etc/init.d/node_exporter` |
+| Debian | 8.x 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
+| SUSE Linux Enterprise | 11 SP1-SP4 | SysV | `/etc/init.d/node_exporter` |
+| SUSE Linux Enterprise / openSUSE | 12.x / 15.x / Leap / Tumbleweed | systemd | `/etc/systemd/system/node_exporter.service` |
+
+> 上表是常见版本；实际以目标机的 `/run/systemd/system`、`systemctl`、`/etc/init.d`
+> 检测结果为准。没有 systemd 时统一使用 SysV init 脚本，Agent 的 upstart/sysv
+> 管理器会通过 `service` 命令启停。
 
 ```bash
-# 下载（proxy 加速，amd64 换成 arm64 即为 ARM 版本）
+# 下载 latest 静态二进制（proxy 加速）
+# amd64（x86_64）
 wget -q -c --no-check-certificate -O /tmp/node_exporter \
   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64"
+# arm64（aarch64）：把最后面的 amd64 换成 arm64
 
-# 单机手动安装（不走平台）
-sudo bash examples/node_exporter/install.sh amd64
+# 单机手动安装（自动识别架构、systemd/SysV，并完成注册和启动）
+sudo bash examples/node_exporter/install.sh
 ```
 
-平台流程：组件填入示例并保存 → 制品页上传 `/tmp/node_exporter`（版本如 `latest`，
+> 当前 iflyelf latest release 提供 `amd64` / `arm64` 资产；`arm` / `386`
+> 请自行静态编译后通过平台上传（平台制品支持这四种架构）。
+
+平台流程：组件填入示例并保存 → 制品页上传 `/tmp/node_exporter`（版本 `latest`，
 架构必须和主机一致）→ 任务页选组件/版本/IP 段 → 预览 → 创建 → 启动。
 
 首次安装时服务尚不存在，Agent 会跳过停服；替换二进制后由 `post_install` 写入
-`/etc/systemd/system/node_exporter.service` 并 `enable`，随后启动服务。
+systemd unit 或 SysV init 脚本并注册开机自启，随后启动服务。
+
+- systemd：`systemctl status node_exporter`，日志在 `journalctl -u node_exporter`。
+- SysV/upstart：`service node_exporter status` 或 `/etc/init.d/node_exporter status`，
+  日志在 `/var/log/node_exporter.log`，PID 文件 `/var/run/node_exporter.pid`。
+- 指标验证：`wget -qO- http://127.0.0.1:16666/metrics | head`。
 
 注意：
 
-- `ExecStart` 固定为 `/opt/monitor/exporter/node_exporter`，下载后不要放到
+- `ExecStart` / init 脚本都固定使用 `/opt/monitor/exporter/node_exporter`，下载后不要放到
   `/opt/monitor/node_exporter`，否则服务找不到可执行文件。
 - `--web.listen-address=:16666` 必须和前面的参数在同一行，不能按 `--` 断行。
-- 示例使用 `TimeoutStartSec=10` + `TimeoutStopSec=30`，避免 `TimeoutSec` 覆盖停止超时。
-- `MemoryMin=2G` / `MemoryMax=4G` 对 node_exporter 偏大，且 `MemoryMin` 需要 cgroup v2；
-  可按机器规格调整或删除。
-- 目标机需要 systemd；CentOS 6 等老系统不能直接使用该 unit。
-- 较老的 node_exporter 可能不支持 `--collector.processes` / `--collector.tcpstat`，
-  启动报 `unknown collector` 时从 unit 中删除这两个参数。
-- 若目标机已有同名 unit，`post_install` 不会覆盖；需要更新时手动替换后执行
-  `systemctl daemon-reload`。
+- systemd unit 使用 `TimeoutStartSec=10` + `TimeoutStopSec=30`，避免 `TimeoutSec` 覆盖停止超时。
+- systemd unit 的 `MemoryMin=2G` / `MemoryMax=4G` 对 node_exporter 偏大，且 `MemoryMin`
+  需要 cgroup v2；可按机器规格调整或删除，老 systemd 会忽略不支持的资源限制项。
+- 默认参数包含 `--collector.processes` / `--collector.tcpstat`；若替换成不支持这两个
+  参数的更老版本，启动报 `unknown collector` 时删除这两个参数。
+- SysV 日志写入 `/var/log/node_exporter.log`，建议按需配置 logrotate。
+- 若目标机已有同名 unit / init 脚本，`post_install` 不会覆盖；需要更新时手动替换后
+  `systemctl daemon-reload` 或直接重启服务。
+- 远程抓取需放行 `16666/tcp`：firewalld 用
+  `firewall-cmd --add-port=16666/tcp --permanent && firewall-cmd --reload`；
+  Ubuntu 可用 `ufw allow 16666/tcp`；SUSE 可用 YaST 防火墙或 firewalld 放行。
 
 ---
 
@@ -925,7 +959,7 @@ internal/
   maintenance/   自动维护
 web/dist/     内嵌前端
 deploy/config/ 配置示例
-examples/     安装示例（node_exporter，含 systemd unit）
+examples/     安装示例（node_exporter，含 systemd unit 与 SysV init）
 scripts/      工具脚本
 ```
 

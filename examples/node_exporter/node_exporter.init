@@ -1,0 +1,138 @@
+#!/bin/sh
+#
+# node_exporter    Prometheus Node Exporter
+#
+# chkconfig: 2345 90 10
+# description: Prometheus node_exporter
+#
+### BEGIN INIT INFO
+# Provides:          node_exporter
+# Required-Start:    $network $local_fs
+# Required-Stop:     $network $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Prometheus Node Exporter
+# Description:       Exposes machine metrics for Prometheus
+### END INIT INFO
+#
+# 适用于无 systemd 的系统：
+#   - CentOS/RHEL 6（upstart + SysV）
+#   - Ubuntu 14.04（upstart）
+#   - Debian 7（SysV）
+#   - SUSE Linux Enterprise 11（SysV）
+# 安装路径、监听端口、collector 参数与 node_exporter.service 保持一致。
+# 日志文件默认 /var/log/node_exporter.log，如需轮转请自行配置 logrotate。
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+NAME=node_exporter
+BIN=/opt/monitor/exporter/node_exporter
+PIDFILE=/var/run/node_exporter.pid
+LOGFILE=/var/log/node_exporter.log
+METRICS_DIR=/opt/monitor/exporter/metrics
+ARGS="--collector.processes --collector.tcpstat --log.level=error --collector.textfile.directory=/opt/monitor/exporter/metrics --web.listen-address=:16666"
+
+is_running() {
+    [ -f "$PIDFILE" ] || return 1
+    PID=$(cat "$PIDFILE" 2>/dev/null)
+    [ -n "$PID" ] || return 1
+    kill -0 "$PID" 2>/dev/null
+}
+
+start() {
+    if [ ! -x "$BIN" ]; then
+        echo "$BIN is not executable" >&2
+        return 1
+    fi
+
+    if is_running; then
+        echo "$NAME is already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+
+    # PID 文件丢失但进程还在（例如被手工启动）时，接管已有进程。
+    if command -v pgrep >/dev/null 2>&1; then
+        OTHER_PID=$(pgrep -f "^${BIN}([[:space:]]|\$)" 2>/dev/null | head -n 1)
+        if [ -n "$OTHER_PID" ]; then
+            echo "$OTHER_PID" >"$PIDFILE"
+            echo "$NAME is already running (pid $OTHER_PID)"
+            return 0
+        fi
+    fi
+
+    rm -f "$PIDFILE"
+    mkdir -p "$METRICS_DIR"
+    nohup "$BIN" $ARGS >>"$LOGFILE" 2>&1 &
+    PID=$!
+    echo "$PID" >"$PIDFILE"
+    sleep 1
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "$NAME started (pid $PID)"
+        return 0
+    fi
+
+    echo "$NAME failed to start; see $LOGFILE" >&2
+    rm -f "$PIDFILE"
+    return 1
+}
+
+stop() {
+    if is_running; then
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        kill "$PID" 2>/dev/null || true
+        i=0
+        while [ $i -lt 10 ]; do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -9 "$PID" 2>/dev/null || true
+        fi
+        echo "$NAME stopped"
+    elif command -v pgrep >/dev/null 2>&1; then
+        PIDS=$(pgrep -f "^${BIN}([[:space:]]|\$)" 2>/dev/null || true)
+        if [ -n "$PIDS" ]; then
+            kill $PIDS 2>/dev/null || true
+            echo "$NAME stopped"
+        else
+            echo "$NAME is not running"
+        fi
+    else
+        echo "$NAME is not running"
+    fi
+    rm -f "$PIDFILE"
+    return 0
+}
+
+status() {
+    if is_running; then
+        echo "$NAME is running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "$NAME is stopped"
+    return 3
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 2
+        ;;
+esac
+
+exit $?
