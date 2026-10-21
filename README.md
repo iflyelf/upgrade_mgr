@@ -291,7 +291,18 @@ consul:  # 可选：同步主机清单；编排器不依赖 Consul
 
 **`server.external_url` 怎么填**：
 
-填写 **Agent/浏览器实际访问本服务的地址**，不是监听地址（`host`/`port`）。它会影响：
+填写 **Agent/浏览器实际访问本服务的地址**，不是监听地址（`host`/`port`）。
+
+> **页面可直接修改**：登录控制台 → 设置 → 服务器 → “对外访问地址 external_url”，保存后写入
+> `app_settings`（优先级高于配置文件和环境变量）。新生成的 Agent 安装命令**立即**使用新地址，
+> 无需重启；接入卡片会显示当前命令使用的地址，留空时回退为当前请求的 Host。
+>
+> 注意：Casdoor 回调地址和 `cookie_secure: auto` 在服务启动时计算，修改 `external_url` 后
+> 如需同步这两项，请重启服务。
+>
+> Nginx/HTTPS 域名场景示例：`https://upgrade.example.com`（不要带结尾斜杠和路径）。
+
+它会影响：
 
 - 控制台生成的一键安装命令（下载 Agent、`--server` 参数）
 - Casdoor OAuth 回调地址推导
@@ -1052,6 +1063,8 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - watchdog 遇到空/损坏/未注册的 state 时直接报错，不再误判为崩溃并触发二进制回滚。
 - 已注册且 `AgentID` / `Token` / `Secret` 完整的 state 在重装时保留，避免丢失 Agent 身份。
 - 新增 `install --force` 与页面“强制重新注册”选项：显式覆盖旧 state 并重新注册，需同时提供新令牌。
+- `server.external_url` 可在设置页修改，新生成的 Agent 安装命令立即使用新地址；接入页面显示当前命令使用的地址，支持 Nginx 域名场景。
+- 保存 `server.external_url` 时校验协议/主机名，禁止路径、查询参数、片段、用户信息和引号；非法值整批设置不落库。
 
 ### 本轮修复（2026-10-19）
 

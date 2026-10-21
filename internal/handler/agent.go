@@ -250,10 +250,9 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", nil)
 
-		serverURL := strings.TrimRight(s.Config.Server.ExternalURL, "/")
-		if serverURL == "" {
-			serverURL = "http://" + r.Host
-		}
+		// 使用设置页热更新后的快照，避免直接读共享 Config 产生数据竞争。
+		snap := s.Settings.Snapshot()
+		serverURL := installBaseURL(snap.Server.ExternalURL, r, snap.Server.TrustProxy)
 		// 校验与转义 serverURL（防注入）
 		safeURL, err := validateAndEscapeURL(serverURL)
 		if err != nil {
@@ -266,8 +265,29 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 			"enroll_token":    token,
 			"expires_in":      int(ttl.Seconds()),
 			"install_command": installCmd,
+			"base_url":        serverURL,
 		})
 	}
+}
+
+// installBaseURL 决定安装命令里的服务端地址。
+//
+// 优先使用设置页/配置文件里的 server.external_url；留空时回退到当前请求
+// 的 Host（反向代理场景按 trust_proxy 决定是否采信 X-Forwarded-Proto）。
+func installBaseURL(externalURL string, r *http.Request, trustProxy bool) string {
+	if v := strings.TrimRight(strings.TrimSpace(externalURL), "/"); v != "" {
+		return v
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if trustProxy {
+		if p := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))); p == "http" || p == "https" {
+			scheme = p
+		}
+	}
+	return scheme + "://" + r.Host
 }
 
 // buildInstallCommand 生成一键安装命令。
@@ -333,12 +353,18 @@ func isValidArch(arch string) bool {
 
 // validateAndEscapeURL 校验 URL 合法性（http/https）并转义单引号（防 shell 注入）。
 func validateAndEscapeURL(rawURL string) (string, error) {
+	if strings.ContainsAny(rawURL, "\r\n") {
+		return "", fmt.Errorf("地址包含非法字符")
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", err
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("不支持的协议: %s", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("缺少主机名")
 	}
 	// 转义单引号为 '\''（shell 单引号内的转义方式）
 	return strings.ReplaceAll(rawURL, "'", "'\\''"), nil

@@ -553,13 +553,14 @@
             var arch = archEl.value;
             var force = forceEl.checked;
             api('/api/agent/enroll-token?arch=' + encodeURIComponent(arch) + (force ? '&force=1' : ''))
-              .then(function (d) { state.enroll = { arch: arch, force: force, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
+              .then(function (d) { state.enroll = { arch: arch, force: force, base: d.base_url, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
               .catch(function (err) { state.enroll = { arch: arch, force: force, err: err.message }; render(); });
           }
         }, ['生成接入命令'])
       ]),
       e && e.err ? h('div', { class: 'err field', role: 'alert' }, [e.err]) : null,
       e && e.cmd ? h('div', {}, [
+        e.base ? hint('安装命令使用地址：' + e.base + '。可在“设置”页修改 server.external_url，保存后立即生效；Nginx 域名场景填 https://your-domain。') : null,
         hint('在目标机器用 root 执行（令牌一次性使用，' + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）：'),
         codeBlock(e.cmd),
         e.force ? hint('当前为强制重新注册命令（含 --force）：会覆盖目标机现有 Agent 身份，旧 Agent 记录将不再被该主机使用。') : null,

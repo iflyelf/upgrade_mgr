@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,17 +18,24 @@ import (
 
 // Item 可配置项定义。
 type Item struct {
-	Key    string
-	Group  string
-	Label  string
-	Type   string // string / int / bool / list / secret
-	Secret bool
-	Get    func(*config.Config) string
-	Set    func(*config.Config, string)
+	Key      string
+	Group    string
+	Label    string
+	Type     string // string / int / bool / list / secret
+	Secret   bool
+	Get      func(*config.Config) string
+	Set      func(*config.Config, string)
+	Validate func(string) error // 可选：保存前校验，失败则整批设置不落库
 }
 
 // Registry 全部可页面配置项。
 var Registry = []Item{
+	// 服务器
+	{Key: "server.external_url", Group: "服务器", Label: "对外访问地址 external_url（生成 Agent 安装命令，如 https://upgrade.example.com）", Type: "string",
+		Get:      func(c *config.Config) string { return c.Server.ExternalURL },
+		Set:      func(c *config.Config, v string) { c.Server.ExternalURL = normalizeExternalURL(v) },
+		Validate: validateExternalURL},
+
 	// Consul（可选数据源）
 	{Key: "consul.enabled", Group: "Consul", Label: "启用 Consul 同步", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Consul.Enabled) },
@@ -142,13 +150,32 @@ func (s *Service) Load(ctx context.Context) error {
 func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	applied := make([]string, 0, len(kv))
+
+	// 先整体校验，再落库：避免某一项非法时，其他项已经部分生效。
 	for k, v := range kv {
 		it, ok := s.items[k]
 		if !ok {
 			continue
 		}
 		// secret 占位符表示不修改
+		if it.Secret && IsMasked(v) {
+			continue
+		}
+		// 只校验本次修改的值：避免历史配置里已有不规范值（例如带路径的
+		// external_url）阻塞用户保存其他设置；用户一旦修改该项仍会严格校验。
+		if it.Validate != nil && v != it.Get(s.cfg) {
+			if err := it.Validate(v); err != nil {
+				return nil, fmt.Errorf("设置 %s 无效: %w", k, err)
+			}
+		}
+	}
+
+	applied := make([]string, 0, len(kv))
+	for k, v := range kv {
+		it, ok := s.items[k]
+		if !ok {
+			continue
+		}
 		if it.Secret && IsMasked(v) {
 			continue
 		}
@@ -162,6 +189,53 @@ func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, er
 		applied = append(applied, k)
 	}
 	return applied, nil
+}
+
+// normalizeExternalURL 去除首尾空白和结尾斜杠，避免拼接出 //api/...。
+func normalizeExternalURL(raw string) string {
+	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
+// validateExternalURL 校验对外访问地址。
+//
+// 只允许绝对 http/https 地址，且不允许路径、查询参数、片段、用户信息；
+// 留空表示回退到当前请求 Host。校验通过后仍会在生成命令时做 shell 转义。
+func validateExternalURL(raw string) error {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil
+	}
+	if len(s) > 2048 {
+		return fmt.Errorf("地址过长（最多 2048 字符）")
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("地址包含控制字符")
+		}
+	}
+	if strings.ContainsAny(s, "'\"") {
+		return fmt.Errorf("地址不能包含引号")
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return fmt.Errorf("地址格式错误: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("必须以 http:// 或 https:// 开头")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("缺少主机名")
+	}
+	if u.User != nil {
+		return fmt.Errorf("不允许包含用户名或密码")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("不允许包含查询参数或片段")
+	}
+	if p := strings.TrimSuffix(u.Path, "/"); p != "" {
+		return fmt.Errorf("不允许包含路径")
+	}
+	return nil
 }
 
 // View 返回全部可配置项（secret 以占位符返回）。

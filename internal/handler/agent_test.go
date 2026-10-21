@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,38 @@ func TestBuildInstallCommandRemovesStaleBinary(t *testing.T) {
 	}
 	if strings.Contains(cmd, "--force") {
 		t.Fatalf("普通安装不应带 --force:\n%s", cmd)
+	}
+}
+
+func TestInstallBaseURLPrefersExternalURL(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://internal:8090/api/agent/enroll-token", nil)
+	r.Host = "10.1.230.50:8090"
+
+	if got := installBaseURL(" https://upgrade.example.com/ ", r, false); got != "https://upgrade.example.com" {
+		t.Fatalf("external_url 应优先且去掉结尾斜杠，got %q", got)
+	}
+	if got := installBaseURL("", r, false); got != "http://10.1.230.50:8090" {
+		t.Fatalf("留空应回退请求 Host，got %q", got)
+	}
+}
+
+func TestInstallBaseURLForwardedProtoOnlyWhenTrusted(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://internal:8090/api/agent/enroll-token", nil)
+	r.Host = "upgrade.example.com"
+	r.Header.Set("X-Forwarded-Proto", "https")
+
+	if got := installBaseURL("", r, false); got != "http://upgrade.example.com" {
+		t.Fatalf("trust_proxy=false 不应采信 X-Forwarded-Proto，got %q", got)
+	}
+	if got := installBaseURL("", r, true); got != "https://upgrade.example.com" {
+		t.Fatalf("trust_proxy=true 应采信 X-Forwarded-Proto，got %q", got)
+	}
+}
+
+func TestInstallBaseURLTLS(t *testing.T) {
+	r := httptest.NewRequest("GET", "https://upgrade.example.com/api/agent/enroll-token", nil)
+	if got := installBaseURL("", r, false); got != "https://upgrade.example.com" {
+		t.Fatalf("TLS 请求应生成 https，got %q", got)
 	}
 }
 
