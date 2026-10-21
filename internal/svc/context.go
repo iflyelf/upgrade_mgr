@@ -82,7 +82,7 @@ func New(c *config.Config) *ServiceContext {
 		Syncer:     synclogic.NewSyncer(db),
 		Component:  compRepo,
 		Artifact:   artRepo,
-		Task:       task.NewService(db, compRepo, artRepo, c.Agent.AllowExecMode),
+		Task:       task.NewService(db, compRepo, artRepo, func() bool { return c.Agent.AllowExecMode }),
 		AgentGW:    agentgw.New(db),
 		Metrics:    metrics.NewCollector(db),
 		Maintainer: maintenance.New(db),

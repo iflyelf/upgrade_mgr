@@ -73,7 +73,7 @@ func TestBatchAndDispatchAtomic(t *testing.T) {
 		t.Fatalf("建 task_host 失败: %v", err)
 	}
 
-	o := NewOrchestrator(NewService(db, nil, nil, false))
+	o := NewOrchestrator(NewService(db, nil, nil, nil))
 
 	// 失败批次 + 自动回滚 + 暂停任务：三者应同时落库。
 	if err := o.completeBatch(ctx, taskID, 0, "failed", true, true); err != nil {
@@ -88,7 +88,7 @@ func TestBatchAndDispatchAtomic(t *testing.T) {
 	}
 
 	// Promote 应跳过 failed 批次并恢复 running；失败主机记录保留。
-	if err := NewService(db, nil, nil, false).Promote(ctx, scope.New(1, false), taskID); err != nil {
+	if err := NewService(db, nil, nil, nil).Promote(ctx, scope.New(1, false), taskID); err != nil {
 		t.Fatalf("Promote 失败: %v", err)
 	}
 	db.QueryRowContext(ctx, `SELECT status FROM task_batches WHERE task_id=$1 AND batch_index=0`, taskID).Scan(&batchStatus)

@@ -82,23 +82,38 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		}
 	}
 
-	// 4. 停服（如果有服务名）
+	// svcExists 服务名已填且本机已注册该服务。首次安装时服务尚不存在，
+	// 停服/回滚启服均应跳过而不是报错。
+	svcExists := func() bool {
+		return comp.ServiceName != "" && svcMgr.Exists(comp.ServiceName)
+	}
+
+	// 4. 停服（如果有服务名且服务已存在）
 	if comp.ServiceName != "" {
-		logf(protocol.StageStopping, "停止服务 %s", comp.ServiceName)
-		if err := svcMgr.Stop(comp.ServiceName); err != nil && !comp.IgnoreError {
-			logf(protocol.StageDone, "停服失败: %v", err)
-			return res, err
+		if !svcExists() {
+			logf(protocol.StageStopping, "服务 %s 尚未安装，跳过停服（首次安装）", comp.ServiceName)
+		} else {
+			logf(protocol.StageStopping, "停止服务 %s", comp.ServiceName)
+			if err := svcMgr.Stop(comp.ServiceName); err != nil && !comp.IgnoreError {
+				logf(protocol.StageDone, "停服失败: %v", err)
+				return res, err
+			}
 		}
 	}
 
 	// 5. 替换 / exec
 	if comp.DeployMode == protocol.DeployReplace || comp.DeployMode == protocol.DeployReplaceExec {
 		logf(protocol.StageReplacing, "替换二进制到 %s", comp.InstallPath)
+		// 首次安装时目标目录可能不存在，rename 会直接失败，先创建父目录。
+		if err := os.MkdirAll(filepath.Dir(comp.InstallPath), 0755); err != nil {
+			logf(protocol.StageDone, "创建安装目录失败: %v", err)
+			return res, err
+		}
 		if err := binswap.Replace(dlPath, comp.InstallPath); err != nil {
 			logf(protocol.StageRollback, "替换失败，执行回滚: %v", err)
 			if res.BackupPath != "" {
 				binswap.Rollback(res.BackupPath, comp.InstallPath)
-				if comp.ServiceName != "" {
+				if svcExists() {
 					svcMgr.Start(comp.ServiceName) // 尝试启动旧版本
 				}
 			}
@@ -111,7 +126,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 			logf(protocol.StageRollback, "exec 失败，执行回滚: %v", err)
 			if res.BackupPath != "" {
 				binswap.Rollback(res.BackupPath, comp.InstallPath)
-				if comp.ServiceName != "" {
+				if svcExists() {
 					svcMgr.Start(comp.ServiceName)
 				}
 			}
@@ -119,8 +134,8 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		}
 	}
 
-	// 6. 启服
-	if comp.ServiceName != "" {
+	// startService 启动服务；失败时回滚并返回错误。
+	startService := func() error {
 		logf(protocol.StageStarting, "启动服务 %s", comp.ServiceName)
 		if err := svcMgr.Start(comp.ServiceName); err != nil && !comp.IgnoreError {
 			logf(protocol.StageRollback, "启服失败，执行回滚: %v", err)
@@ -128,9 +143,24 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 				binswap.Rollback(res.BackupPath, comp.InstallPath)
 				svcMgr.Start(comp.ServiceName) // 再次尝试启动（用旧版本）
 			}
-			return res, err
+			return err
 		}
 		time.Sleep(2 * time.Second) // 等待服务启动
+		return nil
+	}
+
+	// 6. 启服：exec 安装脚本可能刚注册了服务，此处重新探测。
+	// 仍不存在时推迟到 post_install 之后再尝试（服务可能由 post_install 注册）。
+	pendingStart := false
+	if comp.ServiceName != "" {
+		if svcExists() {
+			if err := startService(); err != nil {
+				return res, err
+			}
+		} else {
+			pendingStart = true
+			logf(protocol.StageStarting, "服务 %s 尚未注册，推迟到 post_install 之后启动", comp.ServiceName)
+		}
 	}
 
 	// 7. post_install 钩子
@@ -140,11 +170,21 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 			logf(protocol.StageRollback, "post_install 失败，执行回滚: %v", err)
 			if res.BackupPath != "" {
 				binswap.Rollback(res.BackupPath, comp.InstallPath)
-				if comp.ServiceName != "" {
+				if svcExists() {
 					svcMgr.Restart(comp.ServiceName)
 				}
 			}
 			return res, err
+		}
+	}
+
+	if pendingStart {
+		if svcExists() {
+			if err := startService(); err != nil {
+				return res, err
+			}
+		} else {
+			logf(protocol.StageStarting, "警告：服务 %s 安装后仍未注册，跳过启服（请检查安装脚本或服务名称）", comp.ServiceName)
 		}
 	}
 
@@ -155,7 +195,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 			logf(protocol.StageRollback, "健康检查失败，执行回滚")
 			if res.BackupPath != "" {
 				binswap.Rollback(res.BackupPath, comp.InstallPath)
-				if comp.ServiceName != "" {
+				if svcExists() {
 					svcMgr.Restart(comp.ServiceName)
 				}
 			}

@@ -1,6 +1,6 @@
 # upgrade_mgr — 升级控制平台
 
-用于 zabbix 客户端、采集器、各类插件（均为 `CGO_ENABLED=0` 交叉编译的 Go 静态二进制）的**灰度升级控制平台**。控制台 `upgrade-mgr` + 被控端 `upgrade-agent`，支持按 IP 段灰度、维护窗口、自动回滚。
+用于各类 Agent、采集器、插件（均为 `CGO_ENABLED=0` 交叉编译的 Go 静态二进制）的**灰度升级控制平台**。控制台 `upgrade-mgr` + 被控端 `upgrade-agent`，支持按 IP 段灰度、维护窗口、自动回滚。
 
 > 独立运行：**没有 consul_mgr 也能启动**；联合使用时共享同一 Consul 与 FlyIAM。数据库为独立库 `upgrade_mgr`。
 
@@ -445,6 +445,40 @@ status upgrade-agent            # upstart
 > `upgrade-agent-linux-<arch>`。systemd 部署请按上面步骤把 Agent 二进制放到
 > `/opt/upgrade-mgr/dist/`（服务的 `WorkingDirectory`），Docker 镜像已内置对应架构的 Agent。
 > 若自定义目录，请设置环境变量 `AGENT_BINARY_DIR`。
+
+### 5. node_exporter 安装示例（可选）
+
+控制台「组件」页点「填入示例：node_exporter」会自动填好组件；也可以参考
+`examples/node_exporter/` 下的 systemd unit 和安装脚本。
+
+```bash
+# 下载（proxy 加速，amd64 换成 arm64 即为 ARM 版本）
+wget -q -c --no-check-certificate -O /tmp/node_exporter \
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64"
+
+# 单机手动安装（不走平台）
+sudo bash examples/node_exporter/install.sh amd64
+```
+
+平台流程：组件填入示例并保存 → 制品页上传 `/tmp/node_exporter`（版本如 `latest`，
+架构必须和主机一致）→ 任务页选组件/版本/IP 段 → 预览 → 创建 → 启动。
+
+首次安装时服务尚不存在，Agent 会跳过停服；替换二进制后由 `post_install` 写入
+`/etc/systemd/system/node_exporter.service` 并 `enable`，随后启动服务。
+
+注意：
+
+- `ExecStart` 固定为 `/opt/monitor/exporter/node_exporter`，下载后不要放到
+  `/opt/monitor/node_exporter`，否则服务找不到可执行文件。
+- `--web.listen-address=:16666` 必须和前面的参数在同一行，不能按 `--` 断行。
+- 示例使用 `TimeoutStartSec=10` + `TimeoutStopSec=30`，避免 `TimeoutSec` 覆盖停止超时。
+- `MemoryMin=2G` / `MemoryMax=4G` 对 node_exporter 偏大，且 `MemoryMin` 需要 cgroup v2；
+  可按机器规格调整或删除。
+- 目标机需要 systemd；CentOS 6 等老系统不能直接使用该 unit。
+- 较老的 node_exporter 可能不支持 `--collector.processes` / `--collector.tcpstat`，
+  启动报 `unknown collector` 时从 unit 中删除这两个参数。
+- 若目标机已有同名 unit，`post_install` 不会覆盖；需要更新时手动替换后执行
+  `systemctl daemon-reload`。
 
 ---
 
@@ -891,6 +925,7 @@ internal/
   maintenance/   自动维护
 web/dist/     内嵌前端
 deploy/config/ 配置示例
+examples/     安装示例（node_exporter，含 systemd unit）
 scripts/      工具脚本
 ```
 

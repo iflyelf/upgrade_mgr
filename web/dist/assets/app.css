@@ -95,28 +95,75 @@ th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--bo
 th { color: var(--text-secondary); font-weight: 600; }
 .table-wrap { overflow-x: auto; border-radius: var(--radius); }
 
-input, select {
+input, select, textarea {
   padding: 8px 12px; border-radius: var(--radius-sm);
   border: 1px solid var(--border-color); background: var(--panel-bg);
   color: var(--text-color); font-size: 14px;
 }
+textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.5; }
 button.btn {
   padding: 8px 16px; border-radius: var(--radius-sm); border: none;
   background: var(--primary-color); color: #fff; cursor: pointer; font-size: 14px;
   transition: transform .15s, box-shadow .2s;
 }
 button.btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px color-mix(in srgb, var(--primary-color) 24%, transparent); }
+button.btn.ghost {
+  background: transparent; color: var(--primary-color);
+  border: 1px solid var(--border-color);
+}
+button.btn.ghost:hover { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
+button.btn.danger {
+  background: transparent; color: var(--err-color);
+  border: 1px solid color-mix(in srgb, var(--err-color) 40%, var(--border-color));
+}
+button.btn.danger:hover { background: color-mix(in srgb, var(--err-color) 10%, transparent); }
+button.btn.small { padding: 4px 8px; font-size: 12px; }
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.row-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
 .login-card { width: 360px; max-width: 92vw; }
 .login-card h2 { margin-top: 0; }
-.field { margin-bottom: 14px; }
+.field { margin-bottom: 14px; min-width: 0; }
 .field label { display: block; margin-bottom: 6px; color: var(--text-secondary); font-size: 13px; }
-.field input { width: 100%; }
+.field input:not([type="checkbox"]), .field select, .field textarea { width: 100%; }
+.field label.check {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text-color); font-size: 14px;
+}
+.field label.check input { width: auto; margin: 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.hint { margin-top: 6px; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
 .tag { padding: 2px 8px; border-radius: 6px; font-size: 12px; background: color-mix(in srgb, var(--primary-color) 14%, transparent); }
 .muted { color: var(--text-secondary); }
 .err { color: var(--err-color); }
+.empty { padding: 26px 12px; text-align: center; }
+
+details.help { padding: 16px 20px; }
+details.help summary { cursor: pointer; font-weight: 600; }
+.guide-step { margin-top: 14px; }
+.guide-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; }
+.guide-no {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 999px; font-size: 12px;
+  background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+  color: var(--primary-color);
+}
+.guide-step ul { margin: 8px 0 0 30px; padding: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+.code-wrap { position: relative; margin-top: 10px; }
+pre.code {
+  margin: 0; padding: 14px; padding-right: 68px; overflow: auto;
+  background: var(--panel-bg); border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.7;
+}
+.copy-btn { position: absolute; right: 8px; top: 8px; z-index: 1; }
+.preview {
+  margin: 6px 0 14px; padding: 12px 14px;
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm);
+  background: var(--panel-bg); font-size: 13px;
+}
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 999px; }
@@ -126,4 +173,6 @@ button.btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px color-mix
   .card { padding: 14px; }
   th, td { padding: 8px; font-size: 13px; }
   .brand { font-size: 16px; }
+  .grid2 { grid-template-columns: 1fr; }
+  pre.code { font-size: 11px; }
 }

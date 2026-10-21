@@ -1,0 +1,72 @@
+# node_exporter systemd unit 示例
+# 安装路径：/opt/monitor/exporter/node_exporter
+# 指标目录：/opt/monitor/exporter/metrics（textfile collector）
+# 监听端口：16666
+#
+# 注意：
+# - ExecStart 中的 --web.listen-address 必须和前面的参数在同一行；按 -- 断行会变成两个参数。
+# - MemoryMin / MemoryMax / OOMScoreAdjust 为可选项：node_exporter 常驻内存通常只有几十 MB，
+#   2G/4G 属于过度配置；MemoryMin 需要 cgroup v2（systemd 243+），老系统会告警。
+# - TimeoutStartSec / TimeoutStopSec 分开写，避免 TimeoutSec 同时覆盖停止超时。
+# - 本示例要求目标机使用 systemd；CentOS 6 等无 systemd 的系统不能直接使用。
+
+[Unit]
+# 描述服务
+Description=Node Exporter
+# 描述服务类别
+After=network.target
+# 禁用启动频率限制的时间窗口
+StartLimitIntervalSec=0
+# 禁用启动尝试的次数限制
+StartLimitBurst=0
+
+[Service]
+# 启动类型：启动主进程
+Type=simple
+# 启动当前服务的命令（web.listen-address 必须在同一行）
+ExecStart=/opt/monitor/exporter/node_exporter --collector.processes --collector.tcpstat --log.level=error --collector.textfile.directory=/opt/monitor/exporter/metrics --web.listen-address=:16666
+# 重启当前服务时执行的命令
+ExecReload=/bin/kill -s HUP $MAINPID
+# 停止当前服务时执行的命令
+ExecStop=/bin/kill -SIGTERM $MAINPID
+# 启动服务用户
+User=root
+# 启动服务用户组
+Group=root
+# 只终止主进程
+KillMode=process
+# 终止信号
+KillSignal=SIGTERM
+# 启动超时 10 秒
+TimeoutStartSec=10
+# 等待 30 秒后强制终止
+TimeoutStopSec=30
+# 重启方式：不管是什么退出原因，总是重启
+Restart=always
+# 重启需要等待的秒数
+RestartSec=5
+# 文件目录权限
+UMask=0022
+# CPU 限制
+CPUQuota=50%
+# 内存限制（可选，按需调整）
+MemoryMin=2G
+MemoryMax=4G
+# 进程因内存不足而被杀死的优先级（可选）
+OOMScoreAdjust=-1000
+# 指定服务在系统日志中记录信息时使用的标识符
+SyslogIdentifier=node_exporter
+# 进程标准输出
+StandardOutput=journal
+# 进程标准错误
+StandardError=journal+console
+# 系统文件数限制
+TasksMax=infinity
+LimitSTACK=infinity
+LimitCORE=infinity
+LimitNOFILE=infinity
+LimitNPROC=infinity
+
+[Install]
+# 表示该服务所在的 Target
+WantedBy=multi-user.target

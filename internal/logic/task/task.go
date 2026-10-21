@@ -58,14 +58,19 @@ type Task struct {
 
 // Service 任务服务。
 type Service struct {
-	db            *sql.DB
-	compRepo      *component.Repo
-	artRepo       *artifact.Repo
-	allowExecMode bool // 是否允许下发 exec/replace_exec 模式（默认 false，安全）
+	db       *sql.DB
+	compRepo *component.Repo
+	artRepo  *artifact.Repo
+	// allowExecMode 是否允许下发 exec/replace_exec 模式（默认 false，安全）。
+	// 用函数在下发时读取，页面修改设置后无需重启即可生效。
+	allowExecMode func() bool
 }
 
-// NewService 创建任务服务。
-func NewService(db *sql.DB, compRepo *component.Repo, artRepo *artifact.Repo, allowExecMode bool) *Service {
+// NewService 创建任务服务。allowExecMode 为 nil 时视为禁止。
+func NewService(db *sql.DB, compRepo *component.Repo, artRepo *artifact.Repo, allowExecMode func() bool) *Service {
+	if allowExecMode == nil {
+		allowExecMode = func() bool { return false }
+	}
 	return &Service{db: db, compRepo: compRepo, artRepo: artRepo, allowExecMode: allowExecMode}
 }
 
