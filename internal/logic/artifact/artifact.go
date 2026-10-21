@@ -214,18 +214,21 @@ func (r *Repo) Get(ctx context.Context, sc scope.Scope, id int64) (*Artifact, er
 }
 
 // Find 按 组件+版本+arch 查找匹配制品（os_family 空表示通用）。
+// arch=all 表示与架构无关的制品（如 Shell 安装脚本），可匹配任意主机；
+// 同时存在精确架构和 all 时优先精确架构。
 func (r *Repo) Find(ctx context.Context, sc scope.Scope, componentID int64, version, arch, osFamily string) (*Artifact, error) {
 	var a Artifact
 	cond, targs := sc.Where("", 5)
 	err := r.db.QueryRowContext(ctx, `SELECT id, tenant_id, component_id, version, os_family, arch, filename,
 		size, md5, sha256, storage, path, inner_path, notes, status FROM artifacts
-		WHERE component_id=$1 AND version=$2 AND arch=$3 AND (os_family=$4 OR os_family='') AND `+cond+`
-		ORDER BY os_family DESC LIMIT 1`,
+		WHERE component_id=$1 AND version=$2 AND (arch=$3 OR arch='all') AND (os_family=$4 OR os_family='') AND `+cond+`
+		ORDER BY CASE WHEN arch=$3 THEN 0 ELSE 1 END,
+		         CASE WHEN os_family=$4 THEN 0 ELSE 1 END LIMIT 1`,
 		append([]any{componentID, version, arch, osFamily}, targs...)...).
 		Scan(&a.ID, &a.TenantID, &a.ComponentID, &a.Version, &a.OSFamily, &a.Arch, &a.Filename,
 			&a.Size, &a.MD5, &a.SHA256, &a.Storage, &a.Path, &a.InnerPath, &a.Notes, &a.Status)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("未找到匹配制品(组件=%d 版本=%s arch=%s)", componentID, version, arch)
+		return nil, fmt.Errorf("未找到匹配制品(组件=%d 版本=%s arch=%s 或 all)", componentID, version, arch)
 	}
 	return &a, err
 }

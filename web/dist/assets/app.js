@@ -362,9 +362,20 @@
   // 组件模板：顶层字段对应表单，其余字段回填到“高级配置 JSON”。
   var COMP_TEMPLATES = [
     {
-      key: 'node_exporter',
-      label: 'node_exporter（二进制替换 + 自动注册 systemd/SysV）',
-      desc: '把从 proxy 下载的 node_exporter 静态二进制作为制品上传。Agent 替换到安装路径后，post_install 会自动判断目标机 init：systemd 写 /etc/systemd/system/node_exporter.service 并 enable；CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11 等无 systemd 系统写 /etc/init.d/node_exporter，并用 chkconfig/update-rc.d/insserv 注册。服务名可以提前填；若机器上已有同名 unit/init 脚本则不会覆盖。',
+      key: 'node_exporter_script',
+      label: 'node_exporter（上传安装脚本，Agent 下载后执行）',
+      desc: '把 examples/node_exporter/install.sh 作为制品上传（版本 latest，架构选 all）。Agent 下载后用 Shell 执行；脚本会自行下载 iflyelf/node_exporter latest 静态二进制，并按目标机 init 写 systemd unit 或 SysV init。script 模式需要在“设置”里打开 agent.allow_exec_mode；高级配置 JSON 留空即可。',
+      comp: {
+        name: 'node_exporter', display_name: 'Node Exporter', deploy_mode: 'script',
+        binary_name: 'node_exporter',
+        install_path: '/opt/monitor/exporter',
+        service_name: 'node_exporter', service_mgr: 'auto', enabled: true
+      }
+    },
+    {
+      key: 'node_exporter_binary',
+      label: 'node_exporter（高级：二进制替换 + post_install 注册服务）',
+      desc: '把对应架构的 node_exporter 静态二进制作为制品上传。Agent 替换到安装路径后，post_install 判断目标机 init 并写 unit/init。该示例高级 JSON 较长，通常优先使用上面的脚本安装示例。',
       comp: {
         name: 'node_exporter', display_name: 'Node Exporter', deploy_mode: 'replace',
         binary_name: 'node_exporter',
@@ -402,26 +413,27 @@
         '“同步 Consul”也能导入主机，但没装 Agent 的主机在任务下发时会被跳过。'
       ]),
       step('2', '组件 定义装什么、装到哪', 'components', [
-        '点“新建组件”，再点“填入示例”，各字段和高级 JSON 会自动填好：安装路径 /opt/monitor/exporter/node_exporter，服务名 node_exporter。',
-        '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，写 node_exporter.service。',
-        'CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11：无 systemd，写 /etc/init.d/node_exporter。',
-        'service_name 首次安装也可以填：服务还不存在时 Agent 会跳过停服，等 post_install 写好 unit 或 init 脚本后再启动。',
-        '部署模式 replace 不需要打开 allow_exec_mode；如果改成 exec/replace_exec，需要管理员在“设置”里打开 agent.allow_exec_mode。',
-        '命令不经过 shell，按 [["命令","参数1"],["命令2"]] 的二维数组填写；要用管道等语法请写成 ["/bin/sh","-c","..."]。'
+        '点“新建组件”，再点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 留空。',
+        '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',
+        'CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11：无 systemd，脚本自动写 /etc/init.d/node_exporter。',
+        'script 模式需要管理员在“设置”里打开 agent.allow_exec_mode：Agent 会下载上传的安装脚本并以 Shell 执行（优先 bash，缺失时 sh）。',
+        '安装脚本会自行下载 node_exporter 二进制、注册服务并启动，不需要在 post_install 里写大段 shell。',
+        '脚本输出会记录在任务日志；登录目标机后也可以用 systemctl/service 查看服务状态。'
       ]),
-      step('3', '制品 上传某个版本的文件', 'artifacts', [
-        '在能访问 GitHub 的机器上先下载静态编译的 node_exporter 二进制（走 proxy 加速），再到制品页上传。静态二进制不依赖目标机 Go/glibc，CentOS 6 等老内核也可直接运行。',
-        '组件选 node_exporter，版本填 latest（创建任务时要选同一个版本），架构必须和主机完全一致：x86_64 选 amd64，aarch64 选 arm64。',
-        '当前 iflyelf latest 提供 amd64/arm64 资产；arm/386 请自行静态编译后上传（平台制品支持这四种架构）。',
-        '平台不会解压 tar.gz，请上传下载好的可执行文件本身；文件名不影响安装，安装后统一叫 node_exporter。'
+      step('3', '制品 上传安装脚本', 'artifacts', [
+        '脚本安装只需上传 examples/node_exporter/install.sh 一个文件，不需要另外上传 node_exporter 二进制：脚本会自动从 proxy 下载 iflyelf latest 静态二进制。',
+        '组件选 node_exporter，版本填 latest（创建任务时选同一个版本），架构选 all（通用脚本）；脚本会用 uname -m 自动识别目标机架构。',
+        '如果要固定架构，也可以在组件 exec_args 里传 amd64 / arm64 / arm / 386；默认不传即自动识别。',
+        '安装脚本是纯文本文件，直接上传即可；平台不会解压文件，也不需要 tar.gz。'
       ], codeBlock([
-        '# amd64（x86_64）',
-        'wget -q -c --no-check-certificate -O /tmp/node_exporter \\',
-        '  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64"',
+        '# 仓库里已经自带单文件安装脚本（内嵌 systemd unit 与 SysV init）',
+        'ls -l examples/node_exporter/install.sh',
         '',
-        '# arm64（aarch64）：把最后面的 amd64 换成 arm64',
-        '# 下载完成后，在“制品”页上传 /tmp/node_exporter',
-        '# 服务注册由 post_install 自动完成：systemd 写 unit，无 systemd 写 /etc/init.d/node_exporter'
+        '# 可选：先在目标机手动试跑（需要 root，会自动下载并安装）',
+        'sudo bash examples/node_exporter/install.sh',
+        '',
+        '# 平台流程：制品页上传 examples/node_exporter/install.sh',
+        '# 版本选 latest，架构选 all（通用脚本）'
       ].join('\n'))),
       step('4', '任务 选择主机并执行', 'tasks', [
         '组件选 node_exporter，版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
@@ -585,8 +597,8 @@
     var c = state.editingComp || null;
     var tpl = c && c._tpl ? COMP_TEMPLATES.filter(function (t) { return t.key === c._tpl; })[0] : null;
 
-    function fillTemplate() {
-      var t = COMP_TEMPLATES[0];
+    function fillTemplate(key) {
+      var t = COMP_TEMPLATES.filter(function (x) { return x.key === key; })[0] || COMP_TEMPLATES[0];
       state.editingComp = Object.assign({ _tpl: t.key, enabled: true }, JSON.parse(JSON.stringify(t.comp)));
       state.err = '';
       render();
@@ -599,6 +611,7 @@
       var dispEl = h('input', { value: c.display_name || '', placeholder: '如 Node Exporter' }, []);
       var modeEl = h('select', { value: c.deploy_mode || 'replace' }, [
         h('option', { value: 'replace' }, ['replace（替换二进制）']),
+        h('option', { value: 'script' }, ['script（下载并执行 Shell 脚本）']),
         h('option', { value: 'exec' }, ['exec（只执行命令）']),
         h('option', { value: 'replace_exec' }, ['replace_exec（替换后执行命令）'])
       ]);
@@ -669,12 +682,12 @@
           field('显示名称 (display_name)', dispEl, '页面上展示的名字。')
         ]),
         h('div', { class: 'grid2' }, [
-          field('部署模式 (deploy_mode)', modeEl, 'exec / replace_exec 需要在“设置”里打开 agent.allow_exec_mode。'),
+          field('部署模式 (deploy_mode)', modeEl, 'script / exec / replace_exec 需要在“设置”里打开 agent.allow_exec_mode。'),
           field('服务名称 (service_name)', svcEl, 'systemd/sysv 服务名。首次安装时服务尚不存在，Agent 会跳过停服，安装后再启动。')
         ]),
         h('div', { class: 'grid2' }, [
           field('二进制名称 (binary_name)', binEl, '仅记录，当前版本不参与执行。'),
-          field('安装路径 (install_path)', pathEl, '必须是绝对路径，且位于 /opt /usr/local /var/lib /tmp 等白名单目录；父目录不存在会自动创建。')
+          field('安装路径 (install_path)', pathEl, 'replace 模式会替换到该路径，必须是白名单目录内的绝对路径；script 模式不使用该路径，仅作安装目录说明。')
         ]),
         h('div', { class: 'grid2' }, [
           field('服务管理器 (service_mgr)', mgrEl, '仅记录；Agent 按本机 init 系统自动选择。'),
@@ -687,11 +700,12 @@
           field('OS 匹配 (os_match)', osEl, '仅记录，当前版本不参与匹配。'),
           field('架构匹配 (arch_match)', archEl, '仅记录，当前版本不参与匹配。')
         ]),
-        field('高级配置 JSON（可选）', advEl, '支持 ' + ADV_KEYS.join('、') + '。命令是二维数组，例如 [["/bin/sh","-c","echo hi"]]。'),
+        field('高级配置 JSON（可选）', advEl, '脚本安装示例留空即可。支持 ' + ADV_KEYS.join('、') + '；命令是二维数组，例如 [["/bin/sh","-c","echo hi"]]。'),
         h('div', { class: 'toolbar' }, [
           h('button', { class: 'btn', onclick: saveComp }, ['保存']),
           h('button', { class: 'btn ghost', onclick: function () { state.editingComp = null; state.err = ''; render(); } }, ['取消']),
-          !c.id ? h('button', { class: 'btn ghost', onclick: fillTemplate }, ['填入示例：node_exporter']) : null
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入脚本安装示例']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['填入二进制替换示例']) : null
         ])
       ]);
     }
@@ -704,7 +718,8 @@
           render();
         }
       }, ['新建组件']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: fillTemplate }, ['填入示例：node_exporter']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入示例：node_exporter（脚本安装）']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['二进制替换示例']) : null,
       h('span', { class: 'muted' }, ['共 ' + state.components.length + ' 个组件'])
     ]);
 
@@ -734,7 +749,7 @@
     );
 
     var empty = state.components.length === 0
-      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：node_exporter”。'])
+      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：node_exporter（脚本安装）”。'])
       : null;
 
     return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table, empty])]);
@@ -744,7 +759,8 @@
     ['amd64', 'amd64（x86_64）'],
     ['arm64', 'arm64（aarch64）'],
     ['arm', 'arm（32 位）'],
-    ['386', '386（32 位 x86）']
+    ['386', '386（32 位 x86）'],
+    ['all', 'all（通用脚本）']
   ];
 
   function artifactsView() {
@@ -755,7 +771,12 @@
     if (isAdmin()) {
       var compEl = h('select', {
         value: state.uploadComponent || '',
-        onchange: function () { state.uploadComponent = compEl.value; }
+        onchange: function () {
+          state.uploadComponent = compEl.value;
+          var selected = state.components.filter(function (c) { return String(c.id) === String(compEl.value); })[0];
+          if (selected && selected.deploy_mode === 'script') archEl.value = 'all';
+          else if (archEl.value === 'all') archEl.value = 'amd64';
+        }
       }, [h('option', { value: '' }, ['请选择组件'])].concat(
         state.components.map(function (c) {
           return h('option', { value: c.id }, [c.name + (c.display_name ? '（' + c.display_name + '）' : '')]);
@@ -765,6 +786,10 @@
       var archEl = h('select', { value: 'amd64' }, ARTIFACT_ARCHES.map(function (a) {
         return h('option', { value: a[0] }, [a[1]]);
       }));
+      var selectedComp = state.components.filter(function (c) {
+        return String(c.id) === String(state.uploadComponent || '');
+      })[0];
+      if (selectedComp && selectedComp.deploy_mode === 'script') archEl.value = 'all';
       var osEl = h('select', { value: '' }, [
         h('option', { value: '' }, ['通用（留空，匹配所有 OS）']),
         h('option', { value: 'rhel' }, ['rhel（CentOS/RHEL/麒麟/openEuler 等）']),
@@ -821,10 +846,10 @@
           field('版本', verEl, '创建任务时要选同一个版本；建议与下载的 release 对应，如 latest。')
         ]),
         h('div', { class: 'grid2' }, [
-          field('架构 (arch)', archEl, '必须和目标主机完全一致：x86_64 主机用 amd64，aarch64 主机用 arm64。'),
+          field('架构 (arch)', archEl, '二进制必须和目标主机完全一致；Shell 脚本等与架构无关的制品选 all，可匹配所有主机。'),
           field('操作系统 (os_family)', osEl, '留空表示通用；填了以后只匹配同族主机。')
         ]),
-        field('文件', fileEl, '上传解压后的可执行文件（如 /tmp/node_exporter）。平台不解压 tar.gz。'),
+        field('文件', fileEl, '脚本安装上传 examples/node_exporter/install.sh；二进制安装上传解压后的可执行文件。平台不解压 tar.gz。'),
         h('div', { class: 'grid2' }, [
           field('内部路径 (inner_path)', innerEl, '预留字段：当前版本不会解压或从包内取文件。'),
           field('备注 (notes)', notesEl, '可选，例如下载来源或变更说明。')
@@ -838,7 +863,7 @@
     var table = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, ['共 ' + state.artifacts.length + ' 个制品（版本 × 架构，md5 校验）']),
-        h('span', { class: 'muted' }, ['任务只匹配 arch 完全相同、os_family 相同或为空的制品'])
+        h('span', { class: 'muted' }, ['任务匹配 arch 相同或 all、os_family 相同或为空的制品'])
       ]),
       simpleTable(['ID', '组件', '版本', 'ARCH', 'OS', '文件名', '大小', 'MD5', '备注'], state.artifacts,
         function (x) {
@@ -982,7 +1007,7 @@
     function fillSample() {
       var comp = state.components.filter(function (x) { return x.name === 'node_exporter'; })[0];
       if (!comp) {
-        alert('请先到“组件”页点“填入示例：node_exporter”并保存');
+        alert('请先到“组件”页点“填入示例：node_exporter（脚本安装）”并保存');
         return;
       }
       var vers = versionsFor(comp.id);

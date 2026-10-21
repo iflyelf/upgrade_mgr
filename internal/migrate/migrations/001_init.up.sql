@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS components (
     id             BIGSERIAL PRIMARY KEY,
     name           VARCHAR(128) NOT NULL UNIQUE,
     display_name   VARCHAR(200) DEFAULT '',
-    deploy_mode    VARCHAR(24) NOT NULL DEFAULT 'replace', -- replace/exec/replace_exec
+    deploy_mode    VARCHAR(24) NOT NULL DEFAULT 'replace', -- replace/exec/replace_exec/script
     binary_name    VARCHAR(128) DEFAULT '',
     install_path   VARCHAR(512) DEFAULT '',
     backup_dir     VARCHAR(512) DEFAULT '/var/lib/upgrade-agent/backup',

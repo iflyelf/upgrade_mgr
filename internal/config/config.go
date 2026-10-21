@@ -145,7 +145,7 @@ type AgentConfig struct {
 	EnrollTokenTTL string `yaml:"enroll_token_ttl"`
 	// RequireEnrollToken 注册是否强制要求 enroll token（默认 true，内网可信可改 false）。
 	RequireEnrollToken bool `yaml:"require_enroll_token"`
-	// AllowExecMode 是否允许下发 exec/replace_exec 模式（默认 false，安全）。
+	// AllowExecMode 是否允许下发 exec/replace_exec/script 模式（默认 false，安全）。
 	AllowExecMode bool `yaml:"allow_exec_mode"`
 }
 

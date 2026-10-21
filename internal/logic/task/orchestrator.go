@@ -207,11 +207,11 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 		return err
 	}
 
-	// 安全：强制校验 AllowExecMode（exec/replace_exec 可执行任意命令，默认禁用）
+	// 安全：强制校验 AllowExecMode（exec/replace_exec/script 可执行任意命令，默认禁用）
 	if !o.svc.allowExecMode() {
-		if comp.DeployMode == protocol.DeployExec || comp.DeployMode == protocol.DeployReplaceExec {
+		if comp.DeployMode == protocol.DeployExec || comp.DeployMode == protocol.DeployReplaceExec || comp.DeployMode == protocol.DeployScript {
 			log.Printf("⚠️ 任务 %d 组件 %s 使用 %s 模式但 AllowExecMode=false，拒绝下发", taskID, comp.Name, comp.DeployMode)
-			return fmt.Errorf("组件 %s 使用 exec 模式但服务端配置禁止（AllowExecMode=false）", comp.Name)
+			return fmt.Errorf("组件 %s 使用 %s 模式但服务端配置禁止（AllowExecMode=false）", comp.Name, comp.DeployMode)
 		}
 	}
 

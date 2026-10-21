@@ -277,7 +277,7 @@ artifact:
 agent:
   poll_hold: 20
   require_enroll_token: true  # 生产环境强烈建议开启
-  allow_exec_mode: false
+  allow_exec_mode: false      # 使用 script/exec/replace_exec 模式时改为 true（安全开关）
 
 consul:  # 可选：同步主机清单；编排器不依赖 Consul
   enabled: true
@@ -446,73 +446,134 @@ status upgrade-agent            # upstart
 > `/opt/upgrade-mgr/dist/`（服务的 `WorkingDirectory`），Docker 镜像已内置对应架构的 Agent。
 > 若自定义目录，请设置环境变量 `AGENT_BINARY_DIR`。
 
-### 5. node_exporter 安装示例（可选）
+### 5. node_exporter 安装示例（可选，推荐脚本安装）
 
-控制台「组件」页点「填入示例：node_exporter」会自动填好组件；也可以参考
-`examples/node_exporter/` 下的 systemd unit、SysV init 脚本和安装脚本。
+控制台「组件」页点「填入示例：node_exporter（脚本安装）」会自动填好组件；
+`examples/node_exporter/install.sh` 是**单文件自包含**安装脚本，已内嵌
+systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 
-示例二进制为静态编译（iflyelf/node_exporter latest），不依赖目标机的 Go 或 glibc，
-CentOS 6 等较老内核也可以直接运行。安装脚本和页面 `post_install` 会根据目标机
-init 系统自动选择服务文件：
+#### 5.1 先打开脚本执行开关
+
+`script` 模式会下载并执行上传的脚本，属于任意命令执行，默认关闭。管理员到
+「设置 → Agent」把 `agent.allow_exec_mode` 设为 `true` 并保存。单实例保存后即时生效；
+多副本环境需让各副本重新加载设置（滚动重启或刷新）。
+
+> 这是安全开关，不要在生产环境长期无条件开放；只给可信管理员上传/创建任务的权限。
+
+#### 5.2 组件：填入脚本安装示例
+
+点「新建组件」→「填入示例：node_exporter（脚本安装）」→ 保存。自动填好的关键字段：
+
+| 字段 | 值 |
+| --- | --- |
+| 部署模式 | `script` |
+| 安装路径 | `/opt/monitor/exporter`（仅说明；实际路径固定在脚本内） |
+| 服务名 | `node_exporter` |
+| 服务管理器 | `auto` |
+| 高级配置 JSON | 留空 |
+
+`script` 模式不会替换 `install_path`，也不会做平台侧二进制备份；安装、升级、
+服务注册全部由脚本完成。首次安装时服务还不存在，Agent 会跳过停服，脚本执行完
+后再检查并启动服务。
+
+脚本模板默认不填 `health_cmd`。需要平台层健康检查时，可在高级配置 JSON 里加：
+
+```json
+{
+  "health_cmd": [["pgrep", "-x", "node_exporter"]]
+}
+```
+
+#### 5.3 制品：上传安装脚本
+
+进入「制品」页：
+
+1. 组件选 `node_exporter`。
+2. 版本填 `latest`（创建任务时必须选同一个版本）。
+3. 架构选 `all（通用脚本）`。脚本会在目标机执行 `uname -m` 自动识别架构。
+4. 上传仓库里的 `examples/node_exporter/install.sh`。
+5. `os_family` 留空即可。
+
+> 不需要另外上传 node_exporter 二进制。脚本会自己从
+> `proxy.xiaonuo.live` 代理下载 iflyelf/node_exporter latest 静态编译二进制。
+
+#### 5.4 任务：安装到目标机
+
+1. 「任务」页选组件 `node_exporter`、版本 `latest`。
+2. 填 IP 段，例如 `10.1.255.24-26` 或 `10.1.255.0/24`。
+3. 先点「预览」确认命中主机和分批，再「创建任务」→「启动」。
+4. 想先装一台：策略选「金丝雀」、首批 1 台、取消「自动推进」；首批成功后点「推进」。
+
+Agent 执行顺序：下载安装脚本 → 跳过平台备份 → `pre_install` → 停旧服务
+（存在时）→ 用 Shell 执行脚本（优先 bash，缺失时 sh）→ 检查/启动服务 → `post_install` →
+健康检查（如配置了 `health_cmd`）→ 版本确认（如配置了 `version_cmd`）。脚本输出会记录在任务日志里。
+
+#### 5.5 脚本做了什么
+
+`install.sh` 会：
+
+- 按 `uname -m` 识别 `amd64` / `arm64` / `arm` / `386`（也可用
+  `NODE_EXPORTER_ARCH` 或第一个参数覆盖）。
+- 从 `https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/node_exporter/releases/download/latest/...`
+  下载静态二进制，安装到 `/opt/monitor/exporter/node_exporter`。
+- 创建 metrics 目录 `/opt/monitor/exporter/metrics`。
+- 检测目标机 init：
+  - systemd：写 `/etc/systemd/system/node_exporter.service`，
+    `daemon-reload`、`enable`、`restart`。
+  - SysV/upstart：写 `/etc/init.d/node_exporter`，用
+    `chkconfig` / `update-rc.d` / `insserv` 注册，再启动。
+- 输出服务状态并请求 `http://127.0.0.1:16666/metrics` 做初步验证。
+
+支持的发行版（实际以目标机 init 检测结果为准）：
 
 | 发行版 | 适用版本 | init | 服务文件 |
 | --- | --- | --- | --- |
 | CentOS / RHEL | 6.x | upstart + SysV | `/etc/init.d/node_exporter` |
-| CentOS / RHEL | 7.x 及以上（含 CentOS Stream） | systemd | `/etc/systemd/system/node_exporter.service` |
-| Rocky Linux | 8.x 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
-| openEuler | 20.03 LTS 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
+| CentOS / RHEL / Rocky / openEuler | 7.x+ / 8.x+ / 20.03+ | systemd | `/etc/systemd/system/node_exporter.service` |
 | Ubuntu | 14.04 | upstart + SysV | `/etc/init.d/node_exporter` |
-| Ubuntu | 16.04 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
+| Ubuntu | 16.04+ | systemd | `/etc/systemd/system/node_exporter.service` |
 | Debian | 7.x | SysV | `/etc/init.d/node_exporter` |
-| Debian | 8.x 及以上 | systemd | `/etc/systemd/system/node_exporter.service` |
-| SUSE Linux Enterprise | 11 SP1-SP4 | SysV | `/etc/init.d/node_exporter` |
-| SUSE Linux Enterprise / openSUSE | 12.x / 15.x / Leap / Tumbleweed | systemd | `/etc/systemd/system/node_exporter.service` |
+| Debian | 8.x+ | systemd | `/etc/systemd/system/node_exporter.service` |
+| SLES | 11 SP1-SP4 | SysV | `/etc/init.d/node_exporter` |
+| SLES / openSUSE | 12.x+ / 15.x+ | systemd | `/etc/systemd/system/node_exporter.service` |
 
-> 上表是常见版本；实际以目标机的 `/run/systemd/system`、`systemctl`、`/etc/init.d`
-> 检测结果为准。没有 systemd 时统一使用 SysV init 脚本，Agent 的 upstart/sysv
-> 管理器会通过 `service` 命令启停。
+也可以在目标机手动执行同一个脚本：
 
 ```bash
-# 下载 latest 静态二进制（proxy 加速）
-# amd64（x86_64）
-wget -q -c --no-check-certificate -O /tmp/node_exporter \
-  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64"
-# arm64（aarch64）：把最后面的 amd64 换成 arm64
-
-# 单机手动安装（自动识别架构、systemd/SysV，并完成注册和启动）
 sudo bash examples/node_exporter/install.sh
+
+# 指定架构/版本（可选）
+sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
+  bash examples/node_exporter/install.sh
 ```
 
-> 当前 iflyelf latest release 提供 `amd64` / `arm64` 资产；`arm` / `386`
-> 请自行静态编译后通过平台上传（平台制品支持这四种架构）。
+#### 5.6 验证与注意事项
 
-平台流程：组件填入示例并保存 → 制品页上传 `/tmp/node_exporter`（版本 `latest`，
-架构必须和主机一致）→ 任务页选组件/版本/IP 段 → 预览 → 创建 → 启动。
-
-首次安装时服务尚不存在，Agent 会跳过停服；替换二进制后由 `post_install` 写入
-systemd unit 或 SysV init 脚本并注册开机自启，随后启动服务。
-
-- systemd：`systemctl status node_exporter`，日志在 `journalctl -u node_exporter`。
-- SysV/upstart：`service node_exporter status` 或 `/etc/init.d/node_exporter status`，
-  日志在 `/var/log/node_exporter.log`，PID 文件 `/var/run/node_exporter.pid`。
-- 指标验证：`wget -qO- http://127.0.0.1:16666/metrics | head`。
+- systemd：`systemctl status node_exporter`，日志 `journalctl -u node_exporter`。
+- SysV/upstart：`service node_exporter status` 或
+  `/etc/init.d/node_exporter status`，日志 `/var/log/node_exporter.log`。
+- 指标：`wget -qO- http://127.0.0.1:16666/metrics | head`。
+- 远程抓取放行 `16666/tcp`：firewalld 用
+  `firewall-cmd --add-port=16666/tcp --permanent && firewall-cmd --reload`；
+  Ubuntu 可用 `ufw allow 16666/tcp`；SUSE 可用 YaST 防火墙。
 
 注意：
 
-- `ExecStart` / init 脚本都固定使用 `/opt/monitor/exporter/node_exporter`，下载后不要放到
-  `/opt/monitor/node_exporter`，否则服务找不到可执行文件。
-- `--web.listen-address=:16666` 必须和前面的参数在同一行，不能按 `--` 断行。
-- systemd unit 使用 `TimeoutStartSec=10` + `TimeoutStopSec=30`，避免 `TimeoutSec` 覆盖停止超时。
-- systemd unit 的 `MemoryMin=2G` / `MemoryMax=4G` 对 node_exporter 偏大，且 `MemoryMin`
-  需要 cgroup v2；可按机器规格调整或删除，老 systemd 会忽略不支持的资源限制项。
-- 默认参数包含 `--collector.processes` / `--collector.tcpstat`；若替换成不支持这两个
+- `script` 模式执行下载的脚本，服务端被攻破时风险等同于任意命令执行；务必依赖
+  `agent.allow_exec_mode` 和 RBAC，只允许可信管理员操作。
+- `script` 模式不做平台侧备份/自动回滚；需要平台备份和回滚时，改用
+  「填入示例：node_exporter（二进制替换）」，按主机架构上传二进制。该示例的
+  `post_install` 较长，适合需要平台回滚能力的场景。
+- 脚本会覆盖已有的同名 unit/init，以保证服务参数与当前示例一致；如需保留自定义
+  服务文件，请先备份或改脚本。
+- 当前 iflyelf latest 通常只提供 `amd64` / `arm64`；`arm` / `386` 若下载 404，
+  请自行静态编译后改用二进制替换模式上传。
+- systemd unit 的 `MemoryMin` / `MemoryMax` 默认已注释；如需限制，按机器规格取消注释。
+  `MemoryMin` 需要 cgroup v2，小内存机器强行设置可能导致启动失败。
+- 默认参数包含 `--collector.processes` / `--collector.tcpstat`；若换成不支持这两个
   参数的更老版本，启动报 `unknown collector` 时删除这两个参数。
-- SysV 日志写入 `/var/log/node_exporter.log`，建议按需配置 logrotate。
-- 若目标机已有同名 unit / init 脚本，`post_install` 不会覆盖；需要更新时手动替换后
-  `systemctl daemon-reload` 或直接重启服务。
-- 远程抓取需放行 `16666/tcp`：firewalld 用
-  `firewall-cmd --add-port=16666/tcp --permanent && firewall-cmd --reload`；
-  Ubuntu 可用 `ufw allow 16666/tcp`；SUSE 可用 YaST 防火墙或 firewalld 放行。
+- `examples/node_exporter/node_exporter.service` 和 `.init` 现在保留作参考；
+  实际平台安装只需要上传 `install.sh`。
 
 ---
 
@@ -549,7 +610,7 @@ systemd unit 或 SysV init 脚本并注册开机自启，随后启动服务。
 |------|------|
 | **灰度编排** | 金丝雀/定数/百分比分批，批间健康门禁，自动/人工推进 |
 | **安全加固** | HMAC 指令签名+过期校验，Agent 验签拒伪造/重放 |
-| **原子升级** | 备份→停服→替换→启服→健康检查，失败自动回滚 |
+| **原子升级（replace）** | 备份→停服→替换→启服→健康检查，失败自动回滚；script 模式由安装脚本自行处理备份/回滚 |
 | **崩溃自愈** | Watchdog 心跳检测，连续崩溃自动回滚旧版本 |
 | **断点续传** | 制品下载支持 HTTP Range，大文件续传节省带宽 |
 | **零依赖** | 静态编译单二进制，无 Python/Ruby 依赖 |
@@ -558,7 +619,7 @@ systemd unit 或 SysV init 脚本并注册开机自启，随后启动服务。
 
 **核心表**：
 - `components`：组件定义（被升级的服务/二进制）
-- `artifacts`：制品仓库（版本×架构的二进制文件）
+- `artifacts`：制品仓库（版本×架构的二进制文件或安装脚本；`arch=all` 表示通用脚本）
 - `hosts`：主机清单（可选同步 Consul）
 - `upgrade_tasks`：升级任务（批量升级编排）
 - `task_hosts`：任务关联主机（逐机状态追踪）
@@ -719,7 +780,7 @@ df -h /data/artifacts
 # 检查 Nginx body size 限制
 client_max_body_size 2G;
 
-# 检查制品 ELF 合法性
+# 二进制制品检查 ELF；Shell 安装脚本可忽略
 file your-binary
 ldd your-binary  # 应为静态链接（not a dynamic executable）
 ```
@@ -728,6 +789,7 @@ ldd your-binary  # 应为静态链接（not a dynamic executable）
 
 - 方式1：备份自动保留在 `backup_dir`，手动回滚
 - 方式2：创建回滚任务，指定旧版本
+- 注意：`script` 模式不创建平台备份；需要自动回滚请使用 `replace` / `replace_exec` 模式。
 
 ### Q4: 如何清理过期数据？
 
@@ -869,7 +931,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 2. **多实例部署**：编排器已改为 PostgreSQL advisory lock，不再依赖 Consul Leader；多副本需共享数据库、共享/对象制品存储，并建议使用一致的 `SESSION_SECRET`，见「容器水平扩展（多副本）与滚动重启」。
 
-3. **配置热更新**：设置页只对当前副本即时生效（同时写入 DB）；多副本需在修改后滚动重启全部副本。`app_settings` 优先级高于 YAML/环境变量，切回配置文件前需清理对应 DB 行。部分配置（如 `allow_exec_mode`、认证方式、制品目录）本来就需要重启。
+3. **配置热更新**：设置页只对当前副本即时生效（同时写入 DB）；多副本需在修改后滚动重启全部副本。`app_settings` 优先级高于 YAML/环境变量，切回配置文件前需清理对应 DB 行。部分配置（如认证方式、制品目录）本来就需要重启。
 
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
@@ -959,7 +1021,7 @@ internal/
   maintenance/   自动维护
 web/dist/     内嵌前端
 deploy/config/ 配置示例
-examples/     安装示例（node_exporter，含 systemd unit 与 SysV init）
+examples/     安装示例（node_exporter 单文件 install.sh，内嵌 systemd unit 与 SysV init）
 scripts/      工具脚本
 ```
 

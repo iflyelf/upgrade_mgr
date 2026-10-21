@@ -61,7 +61,7 @@ type Service struct {
 	db       *sql.DB
 	compRepo *component.Repo
 	artRepo  *artifact.Repo
-	// allowExecMode 是否允许下发 exec/replace_exec 模式（默认 false，安全）。
+	// allowExecMode 是否允许下发 exec/replace_exec/script 模式（默认 false，安全）。
 	// 用函数在下发时读取，页面修改设置后无需重启即可生效。
 	allowExecMode func() bool
 }

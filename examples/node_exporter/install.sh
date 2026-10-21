@@ -1,17 +1,26 @@
 #!/bin/bash
-# node_exporter 独立安装示例（不经过升级平台）
+# node_exporter 单文件安装脚本（可直接作为平台制品上传）
 #
 # 用法：sudo bash install.sh [amd64|arm64|arm|386]
+#
+# 环境变量（均可选）：
+#   NODE_EXPORTER_ARCH     目标架构，默认自动执行 uname -m
+#   NODE_EXPORTER_VERSION  版本，默认 latest
+#   NODE_EXPORTER_PROXY    下载代理前缀，默认 https://proxy.xiaonuo.live/?url=
+#   NODE_EXPORTER_BASE     下载基础 URL，默认 GitHub iflyelf release 地址
 #
 # 支持：
 #   - systemd：CentOS/RHEL/Rocky/openEuler 7+、Ubuntu 16.04+、Debian 8+、SLES 12+
 #   - SysV/upstart：CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11
 #
-# 二进制使用 iflyelf/node_exporter latest（静态编译，兼容 CentOS 6 等老内核），
-# 不依赖目标机 Go / glibc。服务文件自动按 init 系统选择。
-set -euo pipefail
+# 二进制使用 iflyelf/node_exporter（静态编译，兼容 CentOS 6 等老内核），
+# 不依赖目标机 Go / glibc。systemd unit 与 SysV init 已内嵌在本脚本中，
+# 单独上传并在任意目录执行即可，不再依赖同目录的 service/init 文件。
+#
+# 脚本使用 POSIX sh 兼容写法；Agent 优先用 /bin/bash，缺失时回退 /bin/sh。
+set -eu
 
-ARCH="${1:-}"
+ARCH="${NODE_EXPORTER_ARCH:-${1:-}}"
 if [ -z "$ARCH" ]; then
   ARCH="$(uname -m)"
 fi
@@ -71,26 +80,14 @@ case "$ARCH" in
     ;;
 esac
 
-PROXY="https://proxy.xiaonuo.live/?url="
-BASE="https://github.com/iflyelf/node_exporter/releases/download/latest"
+VERSION="${NODE_EXPORTER_VERSION:-latest}"
+PROXY="${NODE_EXPORTER_PROXY:-https://proxy.xiaonuo.live/?url=}"
+BASE="${NODE_EXPORTER_BASE:-https://github.com/iflyelf/node_exporter/releases/download/${VERSION}}"
 INSTALL_DIR="/opt/monitor/exporter"
 UNIT_FILE="/etc/systemd/system/node_exporter.service"
 INIT_FILE="/etc/init.d/node_exporter"
-SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP_BIN="/tmp/node_exporter-download.$$"
 trap 'rm -f "$TMP_BIN"' EXIT
-
-if [ "$USE_SYSTEMD" -eq 1 ]; then
-  if [ ! -f "${SRC_DIR}/node_exporter.service" ]; then
-    echo "缺少 ${SRC_DIR}/node_exporter.service，请从仓库 examples/node_exporter 目录完整执行。" >&2
-    exit 1
-  fi
-else
-  if [ ! -f "${SRC_DIR}/node_exporter.init" ]; then
-    echo "缺少 ${SRC_DIR}/node_exporter.init，请从仓库 examples/node_exporter 目录完整执行。" >&2
-    exit 1
-  fi
-fi
 
 download() {
   src="$1"
@@ -113,19 +110,244 @@ download() {
   return 1
 }
 
-echo "下载 node_exporter-linux-${ARCH}（latest，静态编译）..."
+write_unit() {
+  cat > "$UNIT_FILE" <<'NODE_EXPORTER_UNIT'
+# node_exporter systemd unit 示例
+# 安装路径：/opt/monitor/exporter/node_exporter
+# 指标目录：/opt/monitor/exporter/metrics（textfile collector）
+# 监听端口：16666
+#
+# 注意：
+# - ExecStart 中的 --web.listen-address 必须和前面的参数在同一行；按 -- 断行会变成两个参数。
+# - MemoryMin / MemoryMax 默认注释：node_exporter 常驻内存通常只有几十 MB，2G/4G 属于过度配置；
+#   MemoryMin 需要 cgroup v2（systemd 243+），小内存机器强行设置可能导致启动失败。
+# - TimeoutStartSec / TimeoutStopSec 分开写，避免 TimeoutSec 同时覆盖停止超时。
+# - systemd 目标机使用本 unit；CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11 等
+#   无 systemd 的系统使用 node_exporter.init。
+# - install.sh 已内嵌本 unit 与 init 脚本，可单独上传执行；本文件保留作参考。
+
+[Unit]
+# 描述服务
+Description=Node Exporter
+# 描述服务类别
+After=network.target
+# 禁用启动频率限制的时间窗口
+StartLimitIntervalSec=0
+# 禁用启动尝试的次数限制
+StartLimitBurst=0
+
+[Service]
+# 启动类型：启动主进程
+Type=simple
+# 启动当前服务的命令（web.listen-address 必须在同一行）
+ExecStart=/opt/monitor/exporter/node_exporter --collector.processes --collector.tcpstat --log.level=error --collector.textfile.directory=/opt/monitor/exporter/metrics --web.listen-address=:16666
+# 重启当前服务时执行的命令
+ExecReload=/bin/kill -s HUP $MAINPID
+# 停止当前服务时执行的命令
+ExecStop=/bin/kill -SIGTERM $MAINPID
+# 启动服务用户
+User=root
+# 启动服务用户组
+Group=root
+# 只终止主进程
+KillMode=process
+# 终止信号
+KillSignal=SIGTERM
+# 启动超时 10 秒
+TimeoutStartSec=10
+# 等待 30 秒后强制终止
+TimeoutStopSec=30
+# 重启方式：不管是什么退出原因，总是重启
+Restart=always
+# 重启需要等待的秒数
+RestartSec=5
+# 文件目录权限
+UMask=0022
+# CPU 限制
+CPUQuota=50%
+# 内存限制（可选，按需取消注释并调整）
+# MemoryMin=2G
+# MemoryMax=4G
+# 进程因内存不足而被杀死的优先级（可选）
+OOMScoreAdjust=-1000
+# 指定服务在系统日志中记录信息时使用的标识符
+SyslogIdentifier=node_exporter
+# 进程标准输出
+StandardOutput=journal
+# 进程标准错误
+StandardError=journal+console
+# 系统文件数限制
+TasksMax=infinity
+LimitSTACK=infinity
+LimitCORE=infinity
+LimitNOFILE=infinity
+LimitNPROC=infinity
+
+[Install]
+# 表示该服务所在的 Target
+WantedBy=multi-user.target
+NODE_EXPORTER_UNIT
+  chmod 0644 "$UNIT_FILE"
+}
+
+write_init() {
+  cat > "$INIT_FILE" <<'NODE_EXPORTER_INIT'
+#!/bin/sh
+#
+# node_exporter    Prometheus Node Exporter
+#
+# chkconfig: 2345 90 10
+# description: Prometheus node_exporter
+#
+### BEGIN INIT INFO
+# Provides:          node_exporter
+# Required-Start:    $network $local_fs
+# Required-Stop:     $network $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Prometheus Node Exporter
+# Description:       Exposes machine metrics for Prometheus
+### END INIT INFO
+#
+# 适用于无 systemd 的系统：
+#   - CentOS/RHEL 6（upstart + SysV）
+#   - Ubuntu 14.04（upstart）
+#   - Debian 7（SysV）
+#   - SUSE Linux Enterprise 11（SysV）
+# 安装路径、监听端口、collector 参数与 node_exporter.service 保持一致。
+# 本文件已内嵌到 install.sh，可单独上传执行；这里保留作参考。
+# 日志文件默认 /var/log/node_exporter.log，如需轮转请自行配置 logrotate。
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+NAME=node_exporter
+BIN=/opt/monitor/exporter/node_exporter
+PIDFILE=/var/run/node_exporter.pid
+LOGFILE=/var/log/node_exporter.log
+METRICS_DIR=/opt/monitor/exporter/metrics
+ARGS="--collector.processes --collector.tcpstat --log.level=error --collector.textfile.directory=/opt/monitor/exporter/metrics --web.listen-address=:16666"
+
+is_running() {
+    [ -f "$PIDFILE" ] || return 1
+    PID=$(cat "$PIDFILE" 2>/dev/null)
+    [ -n "$PID" ] || return 1
+    kill -0 "$PID" 2>/dev/null
+}
+
+start() {
+    if [ ! -x "$BIN" ]; then
+        echo "$BIN is not executable" >&2
+        return 1
+    fi
+
+    if is_running; then
+        echo "$NAME is already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+
+    # PID 文件丢失但进程还在（例如被手工启动）时，接管已有进程。
+    if command -v pgrep >/dev/null 2>&1; then
+        OTHER_PID=$(pgrep -f "^${BIN}([[:space:]]|\$)" 2>/dev/null | head -n 1)
+        if [ -n "$OTHER_PID" ]; then
+            echo "$OTHER_PID" >"$PIDFILE"
+            echo "$NAME is already running (pid $OTHER_PID)"
+            return 0
+        fi
+    fi
+
+    rm -f "$PIDFILE"
+    mkdir -p "$METRICS_DIR"
+    nohup "$BIN" $ARGS >>"$LOGFILE" 2>&1 &
+    PID=$!
+    echo "$PID" >"$PIDFILE"
+    sleep 1
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "$NAME started (pid $PID)"
+        return 0
+    fi
+
+    echo "$NAME failed to start; see $LOGFILE" >&2
+    rm -f "$PIDFILE"
+    return 1
+}
+
+stop() {
+    if is_running; then
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        kill "$PID" 2>/dev/null || true
+        i=0
+        while [ $i -lt 10 ]; do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -9 "$PID" 2>/dev/null || true
+        fi
+        echo "$NAME stopped"
+    elif command -v pgrep >/dev/null 2>&1; then
+        PIDS=$(pgrep -f "^${BIN}([[:space:]]|\$)" 2>/dev/null || true)
+        if [ -n "$PIDS" ]; then
+            kill $PIDS 2>/dev/null || true
+            echo "$NAME stopped"
+        else
+            echo "$NAME is not running"
+        fi
+    else
+        echo "$NAME is not running"
+    fi
+    rm -f "$PIDFILE"
+    return 0
+}
+
+status() {
+    if is_running; then
+        echo "$NAME is running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "$NAME is stopped"
+    return 3
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 2
+        ;;
+esac
+
+exit $?
+NODE_EXPORTER_INIT
+  chmod 0755 "$INIT_FILE"
+}
+
+echo "下载 node_exporter-linux-${ARCH}（${VERSION}，静态编译）..."
 download "${PROXY}${BASE}/node_exporter-linux-${ARCH}" "$TMP_BIN"
 
 install -d -m 0755 "${INSTALL_DIR}/metrics"
 install -m 0755 "$TMP_BIN" "${INSTALL_DIR}/node_exporter"
 
 if [ "$USE_SYSTEMD" -eq 1 ]; then
-  install -m 0644 "${SRC_DIR}/node_exporter.service" "$UNIT_FILE"
+  write_unit
   systemctl daemon-reload
   systemctl enable node_exporter
   systemctl restart node_exporter
 else
-  install -m 0755 "${SRC_DIR}/node_exporter.init" "$INIT_FILE"
+  write_init
 
   REGISTERED=0
   if command -v chkconfig >/dev/null 2>&1; then

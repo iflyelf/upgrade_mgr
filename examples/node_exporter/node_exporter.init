@@ -21,6 +21,7 @@
 #   - Debian 7（SysV）
 #   - SUSE Linux Enterprise 11（SysV）
 # 安装路径、监听端口、collector 参数与 node_exporter.service 保持一致。
+# 本文件已内嵌到 install.sh，可单独上传执行；这里保留作参考。
 # 日志文件默认 /var/log/node_exporter.log，如需轮转请自行配置 logrotate。
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin

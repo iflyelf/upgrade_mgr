@@ -27,6 +27,8 @@ const (
 	DeployReplace     = "replace"
 	DeployExec        = "exec"
 	DeployReplaceExec = "replace_exec"
+	// DeployScript 下载制品后作为 Shell 脚本执行，适合“安装脚本即制品”的场景。
+	DeployScript = "script"
 )
 
 // ---- 指令状态 ----

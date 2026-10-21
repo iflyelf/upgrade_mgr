@@ -1,4 +1,4 @@
-// Package executor 升级流水线：下载→md5→备份→停服→替换/exec→启服→校验→回滚。
+// Package executor 升级流水线：下载→md5→备份→停服→替换/exec/script→启服→校验→回滚。
 package executor
 
 import (
@@ -34,9 +34,12 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	comp := cmd.Payload.Component
 	art := cmd.Payload.Artifact
 
-	// 安全：白名单校验 install_path，防止服务端被攻破后下发恶意路径删除任意文件
-	if err := validateInstallPath(comp.InstallPath); err != nil {
-		return res, fmt.Errorf("install_path 非法: %w", err)
+	// 安全：白名单校验 install_path，防止服务端被攻破后下发恶意路径删除任意文件。
+	// script 模式不读写 install_path（安装位置由脚本自行决定），因此不做该校验。
+	if comp.DeployMode != protocol.DeployScript {
+		if err := validateInstallPath(comp.InstallPath); err != nil {
+			return res, fmt.Errorf("install_path 非法: %w", err)
+		}
 	}
 
 	logf := func(stage, msg string, args ...any) {
@@ -63,15 +66,19 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	}
 	logf(protocol.StageDownloaded, "下载完成，校验和验证通过")
 
-	// 2. 备份
-	logf(protocol.StageBackup, "备份当前版本")
-	bak, err := binswap.Backup(comp.InstallPath, comp.BackupDir)
-	if err != nil {
-		logf(protocol.StageDone, "备份失败: %v", err)
-		return res, err
+	// 2. 备份（script 模式由安装脚本自行处理升级/备份）
+	if comp.DeployMode == protocol.DeployScript {
+		logf(protocol.StageBackup, "脚本模式：跳过平台备份，由安装脚本自行处理")
+	} else {
+		logf(protocol.StageBackup, "备份当前版本")
+		bak, err := binswap.Backup(comp.InstallPath, comp.BackupDir)
+		if err != nil {
+			logf(protocol.StageDone, "备份失败: %v", err)
+			return res, err
+		}
+		res.BackupPath = bak
+		logf(protocol.StageBackup, "备份到 %s", bak)
 	}
-	res.BackupPath = bak
-	logf(protocol.StageBackup, "备份到 %s", bak)
 
 	// 3. pre_install 钩子
 	if len(comp.PreInstall) > 0 {
@@ -130,6 +137,17 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 					svcMgr.Start(comp.ServiceName)
 				}
 			}
+			return res, err
+		}
+	}
+	if comp.DeployMode == protocol.DeployScript {
+		logf(protocol.StageExec, "执行安装脚本 %s", dlPath)
+		out, err := runScript(ctx, comp, dlPath)
+		if strings.TrimSpace(out) != "" {
+			logf(protocol.StageExec, "脚本输出:\n%s", strings.TrimSpace(out))
+		}
+		if err != nil && !comp.IgnoreError {
+			logf(protocol.StageRollback, "安装脚本执行失败（脚本模式无平台备份，请查看脚本日志）: %v", err)
 			return res, err
 		}
 	}
@@ -245,6 +263,40 @@ func runExec(ctx context.Context, comp protocol.ComponentSpec) error {
 		return fmt.Errorf("exec exit %d: %s", res.ExitCode, res.Stderr)
 	}
 	return nil
+}
+
+// runScript 执行 script 模式下载的安装脚本。
+//
+// 优先用 bash（目标发行版均自带），缺失时回退 /bin/sh；通过解释器执行，
+// 避免备份目录挂载 noexec 时直接 exec 失败；
+// 脚本参数来自 exec_args，环境变量来自 exec_env，超时来自 exec_timeout。
+func runScript(ctx context.Context, comp protocol.ComponentSpec, path string) (string, error) {
+	if err := os.Chmod(path, 0755); err != nil {
+		return "", fmt.Errorf("设置安装脚本可执行权限失败: %w", err)
+	}
+	shell := "/bin/sh"
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		shell = "/bin/bash"
+	}
+	argv := append([]string{shell, path}, comp.ExecArgs...)
+	timeout, _ := time.ParseDuration(comp.ExecTimeout)
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	res, err := runner.Run(ctx, runner.Spec{
+		Argv: argv, Dir: comp.WorkDir, Env: comp.ExecEnv, Timeout: timeout,
+	})
+	var stdout string
+	if res != nil {
+		stdout = res.Stdout
+	}
+	if err != nil {
+		return stdout, fmt.Errorf("安装脚本启动失败: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return stdout, fmt.Errorf("安装脚本退出码 %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return stdout, nil
 }
 
 func runHealthCheck(ctx context.Context, cmd [][]string) bool {

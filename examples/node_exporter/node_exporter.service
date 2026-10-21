@@ -5,11 +5,12 @@
 #
 # 注意：
 # - ExecStart 中的 --web.listen-address 必须和前面的参数在同一行；按 -- 断行会变成两个参数。
-# - MemoryMin / MemoryMax / OOMScoreAdjust 为可选项：node_exporter 常驻内存通常只有几十 MB，
-#   2G/4G 属于过度配置；MemoryMin 需要 cgroup v2（systemd 243+），老系统会告警。
+# - MemoryMin / MemoryMax 默认注释：node_exporter 常驻内存通常只有几十 MB，2G/4G 属于过度配置；
+#   MemoryMin 需要 cgroup v2（systemd 243+），小内存机器强行设置可能导致启动失败。
 # - TimeoutStartSec / TimeoutStopSec 分开写，避免 TimeoutSec 同时覆盖停止超时。
 # - systemd 目标机使用本 unit；CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11 等
-#   无 systemd 的系统使用同目录的 node_exporter.init（安装脚本和页面 post_install 会自动选择）。
+#   无 systemd 的系统使用 node_exporter.init。
+# - install.sh 已内嵌本 unit 与 init 脚本，可单独上传执行；本文件保留作参考。
 
 [Unit]
 # 描述服务
@@ -50,9 +51,9 @@ RestartSec=5
 UMask=0022
 # CPU 限制
 CPUQuota=50%
-# 内存限制（可选，按需调整）
-MemoryMin=2G
-MemoryMax=4G
+# 内存限制（可选，按需取消注释并调整）
+# MemoryMin=2G
+# MemoryMax=4G
 # 进程因内存不足而被杀死的优先级（可选）
 OOMScoreAdjust=-1000
 # 指定服务在系统日志中记录信息时使用的标识符

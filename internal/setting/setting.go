@@ -85,7 +85,7 @@ var Registry = []Item{
 	{Key: "agent.lease_max", Group: "Agent", Label: "维护窗口上限(1h)", Type: "string",
 		Get: func(c *config.Config) string { return c.Agent.LeaseMax },
 		Set: func(c *config.Config, v string) { c.Agent.LeaseMax = v }},
-	{Key: "agent.allow_exec_mode", Group: "Agent", Label: "允许 exec 部署模式", Type: "bool",
+	{Key: "agent.allow_exec_mode", Group: "Agent", Label: "允许 exec/script 部署模式", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.AllowExecMode) },
 		Set: func(c *config.Config, v string) { c.Agent.AllowExecMode = v == "true" }},
 
