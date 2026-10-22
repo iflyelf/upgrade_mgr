@@ -490,10 +490,10 @@
     },
     {
       key: 'node_exporter_script',
-      label: 'node_exporter（上传安装脚本，Agent 下载后执行）',
+      label: 'node_exporter_script（脚本安装，Agent 下载后执行）',
       desc: '直接使用真实可用的 script_url（通过 proxy.xiaonuo.live 代理本仓库 examples/node_exporter/install.sh），不需要上传制品。Agent 下载脚本后用 Shell 执行；脚本会自行从 iflyelf/node_exporter latest 下载静态二进制（当前 1.12.1，仅 amd64/arm64），并按目标机 init 写 systemd unit 或 SysV init。script 模式与命令任务默认可用（由 agent.allow_exec_mode 控制，默认开启，可在“设置”里关闭）；高级配置 JSON 已预填 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd，post_install 脚本文本框也填入了一段可选的安装后检查示例，可直接修改参考。若不想依赖外链，删除高级 JSON 中的 script_url，改为上传 examples/node_exporter/install.sh 作为制品即可。',
       comp: {
-        name: 'node_exporter', display_name: 'Node Exporter', deploy_mode: 'script',
+        name: 'node_exporter_script', display_name: 'Node Exporter（脚本安装）', deploy_mode: 'script',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter',
         service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
@@ -518,10 +518,10 @@
     },
     {
       key: 'node_exporter_binary',
-      label: 'node_exporter（高级：二进制替换 + post_install 脚本注册服务）',
+      label: 'node_exporter_binary（高级：二进制替换 + post_install 脚本注册服务）',
       desc: '把对应架构的 node_exporter 静态二进制作为制品上传。Agent 替换到安装路径后，执行下方“post_install 脚本”：判断目标机 init 并写 unit/init。脚本单独存放，不再塞进高级配置 JSON。',
       comp: {
-        name: 'node_exporter', display_name: 'Node Exporter', deploy_mode: 'replace',
+        name: 'node_exporter_binary', display_name: 'Node Exporter（二进制替换）', deploy_mode: 'replace',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
@@ -560,7 +560,7 @@
         '组件示例提供「只执行命令」三种动作，与「任务」页的示例按钮一一对应：安装（exec_args=["install"]）、更新（["update"]，备份旧二进制并在启动失败时自动回滚）、卸载（["uninstall","-y"]，跳过交互确认）。三者都只需 script_url + 一个动作参数，Agent 下载 install.sh 后按参数执行，不再需要把整段 shell 写进 exec_args。',
         '任务页在组件升级模式下也提供「填入示例：安装组件 / 更新组件 / 卸载组件」，会选中对应组件；动作由组件自身配置决定。',
         '卸载示例不带服务名、health_cmd、version_cmd：exec 模式没有 stdin，因此传 -y；卸载后服务已不存在，保留健康检查会让任务必然失败。',
-        '点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
+        '点“填入示例：node_exporter_script（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
         '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
         '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',
         'CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11：无 systemd，脚本自动写 /etc/init.d/node_exporter。',
@@ -1156,8 +1156,8 @@
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入示例：只执行命令（安装）']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_update'); } }, ['填入示例：只执行命令（更新）']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_uninstall'); } }, ['填入示例：只执行命令（卸载）']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入示例：node_exporter（脚本安装）']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['二进制替换示例']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入示例：node_exporter_script（脚本安装）']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['填入示例：node_exporter_binary（二进制替换）']) : null,
       h('span', { class: 'muted' }, ['共 ' + state.components.length + ' 个组件'])
     ]);
 
@@ -1187,7 +1187,7 @@
     );
 
     var empty = state.components.length === 0
-      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：只执行命令（安装 / 更新 / 卸载） / node_exporter（脚本安装）”。'])
+      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：只执行命令（安装 / 更新 / 卸载） / node_exporter_script（脚本安装）”。'])
       : null;
 
     return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table, empty])]);
@@ -1674,7 +1674,8 @@
     // 任务页示例与组件示例对齐：安装 / 更新 / 卸载分别对应组件页的三个 exec 示例。
     // 只填任务名与组件，动作由组件自身的 script_url + exec_args 决定。
     var UPGRADE_SAMPLES = {
-      install: { comps: ['node_exporter_cmd', 'node_exporter'], name: '安装 node_exporter（示例）' },
+      // 依次尝试新示例组件名，最后回退到旧版模板使用的 node_exporter。
+      install: { comps: ['node_exporter_cmd', 'node_exporter_script', 'node_exporter'], name: '安装 node_exporter（示例）' },
       update: { comps: ['node_exporter_update'], name: '更新 node_exporter（示例）' },
       uninstall: { comps: ['node_exporter_uninstall'], name: '卸载 node_exporter（示例）' }
     };
