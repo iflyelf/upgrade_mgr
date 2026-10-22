@@ -806,13 +806,30 @@ sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
 「填入示例：卸载旧监控」会预填一个可直接执行的交互式卸载示例：
 
 ```bash
-script -q -c "bash <(curl -s 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh') uninstall" /dev/null
+#!/bin/bash
+set -e
+url='https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh'
+f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)
+trap 'rm -f "$f"' EXIT
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$url" -o "$f"
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "$f" "$url"
+else
+  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1
+fi
+bash "$f" uninstall
 ```
 
-配合标准输入 `Y\n`：示例本身已用 `script(1)` 分配伪终端，因此无需再勾选「分配伪终端」。
-若脚本用 `read -e -p "[Y/N]:"` 确认后又用 `dd if=/dev/tty` 等待回车，这种
-「PTY + 标准输入」组合可以正常通过。`install.sh` 的 `uninstall` 动作也会直接读取
-stdin，标准输入填 `Y`（或给脚本追加 `-y`）即可。
+配合标准输入 `Y\n`：`install.sh` 的 `uninstall` 动作直接从 stdin 读取确认，
+无需「分配伪终端」。若脚本用 `read -e -p "[Y/N]:"` 确认后又用
+`dd if=/dev/tty` 等待回车，可勾选「分配伪终端（PTY）」，这种
+「PTY + 标准输入」组合可以正常通过。
+
+> 不要把 `script -q -c "bash <(curl ...) uninstall" /dev/null` 直接填进「命令脚本」：
+> `script(1)` 的 `-c` 参数会交给 `/bin/sh` 解析，而进程替换 `<(...)` 是 bash 语法，
+> 在 dash/ash 环境下会报 `Syntax error: "(" unexpected`。上面的「先下载再执行」写法
+> 与 shell 无关，最稳妥。
 
 执行日志会随阶段上报实时写入任务详情，页面每 4 秒自动刷新；执行完成后按退出码
 标记成功/失败，失败主机可以直接「重试」。
