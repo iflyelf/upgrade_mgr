@@ -1953,7 +1953,11 @@
 
     var list = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
-        h('span', { class: 'muted' }, ['共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。']),
+        h('span', { class: 'muted' }, [
+          (state.taskFilterComp || state.taskFilterKind)
+            ? ('筛选结果 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
+            : ('共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
+        ]),
         h('label', { class: 'muted' }, ['按组件筛选：', filterCompEl]),
         h('label', { class: 'muted' }, ['类型：', filterKindEl]),
         state.taskFilterComp || state.taskFilterKind
@@ -1988,7 +1992,11 @@
             h('div', { class: 'row-actions' }, acts)];
         }),
       state.tasks.length === 0
-        ? h('div', { class: 'muted empty' }, ['还没有任务。先上传制品，再用上面的表单创建。'])
+        ? h('div', { class: 'muted empty' }, [
+          (state.taskFilterComp || state.taskFilterKind)
+            ? '当前筛选条件下没有任务，可点“清除筛选”查看全部。'
+            : '还没有任务。先上传制品，再用上面的表单创建。'
+        ])
         : null
     ]);
 
