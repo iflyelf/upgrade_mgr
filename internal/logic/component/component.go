@@ -164,7 +164,22 @@ func (r *Repo) Update(ctx context.Context, sc scope.Scope, c *Component) error {
 }
 
 // Delete 删除组件。
+//
+// upgrade_tasks.component_id 是 ON DELETE RESTRICT：只要组件被任何任务引用过
+// （含已取消、已成功的任务），直接 DELETE 会触发外键错误，被 Sanitize 后只剩
+// “数据库操作失败”。这里先统计引用数量并返回可操作的中文提示，避免用户无从下手。
 func (r *Repo) Delete(ctx context.Context, sc scope.Scope, id int64) error {
+	tCond, tArgs := sc.Where("upgrade_tasks", 2)
+	var taskCount int
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM upgrade_tasks WHERE component_id=$1 AND `+tCond,
+		append([]any{id}, tArgs...)...).Scan(&taskCount); err != nil {
+		return err
+	}
+	if taskCount > 0 {
+		return fmt.Errorf("该组件已被 %d 个任务引用，无法删除；请先在「任务」页删除相关任务（运行中的任务需先取消）", taskCount)
+	}
+
 	cond, args := sc.Where("", 2)
 	res, err := r.db.ExecContext(ctx, `DELETE FROM components WHERE id=$1 AND `+cond,
 		append([]any{id}, args...)...)

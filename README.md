@@ -988,7 +988,7 @@ GET /api/components          # 列出组件
 POST /api/components         # 创建组件
 GET /api/components/{id}     # 获取详情
 PUT /api/components/{id}     # 更新组件
-DELETE /api/components/{id}  # 删除组件
+DELETE /api/components/{id}  # 删除组件（被任务引用时拒绝，需先删除相关任务）
 ```
 
 ### 制品管理
