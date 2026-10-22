@@ -984,11 +984,25 @@ Content-Type: application/json
 ### 组件管理
 
 ```http
-GET /api/components          # 列出组件
-POST /api/components         # 创建组件
-GET /api/components/{id}     # 获取详情
-PUT /api/components/{id}     # 更新组件
-DELETE /api/components/{id}  # 删除组件（被任务引用时拒绝，需先删除相关任务）
+GET /api/components                       # 列出组件
+POST /api/components                      # 创建组件
+GET /api/components/{id}                  # 获取详情
+PUT /api/components/{id}                  # 更新组件
+GET /api/components/{id}/references       # 查询引用该组件的任务（删除前核对）
+DELETE /api/components/{id}               # 删除组件（被任务引用时拒绝）
+DELETE /api/components/{id}?cascade_tasks=true  # 连带删除引用任务后删除组件
+```
+
+删除组件的行为：
+
+- 不带 `cascade_tasks`：只要仍有任务引用（含已成功/已取消的历史任务）就拒绝，并返回引用数量。
+  先在「任务」页用“按组件筛选”核对，再逐个删除任务即可。
+- 带 `cascade_tasks=true`：在同一事务内先删引用任务（批次、逐机状态、指令日志随之级联），
+  再删组件；**存在 running / paused 任务或未完成指令时仍拒绝**，需先取消任务。
+- 前端会先调用 `GET /api/components/{id}/references` 展示引用任务清单，并通过“确认框 + 输入组件名”
+  做二次确认；无论成功失败都会写审计日志（`component.delete`，详情包含 `cascade_tasks`、
+  `deleted_tasks`、`referenced_tasks`）。
+- 制品文件在预检通过后才清理，避免组件删不掉但文件已丢。
 ```
 
 ### 制品管理
@@ -1004,7 +1018,8 @@ GET /api/artifacts/{id}/download        # 下载制品（支持 Range）
 ```http
 POST /api/tasks/preview          # 预览任务（展开 IP、批次划分）
 POST /api/tasks                  # 创建任务
-GET /api/tasks                   # 列出任务
+GET /api/tasks                   # 列出任务（支持 kind / component_id / status 筛选）
+GET /api/tasks?component_id=1    # 只看引用指定组件的任务（配合删除组件前核对）
 GET /api/tasks/{id}              # 任务详情（批次/逐机/日志，host_page/host_size 分页）
 POST /api/tasks/{id}/start       # 启动任务
 POST /api/tasks/{id}/pause       # 暂停任务

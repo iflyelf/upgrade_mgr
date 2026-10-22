@@ -156,6 +156,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/components", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ComponentCreate(sc))))
 	mux.HandleFunc("PUT /api/components/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ComponentUpdate(sc))))
 	mux.HandleFunc("DELETE /api/components/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ComponentDelete(sc))))
+	mux.HandleFunc("GET /api/components/{id}/references", middleware.RequireAuth(auth, handler.ComponentReferences(sc)))
 
 	// 制品管理
 	mux.HandleFunc("GET /api/artifacts", middleware.RequireAuth(auth, handler.ArtifactList(sc)))
