@@ -4,8 +4,11 @@ package agentrun
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -30,27 +33,55 @@ type Config struct {
 	Secret        string
 	StatePath     string
 	LastHeartbeat time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
+	// Version/Variant 是编译期注入的构建信息，不写入 state：
+	// 自升级替换二进制并重启后，新进程会自动使用新值。
+	Version string `json:"-"`
+	Variant string `json:"-"`
 }
 
 // Agent 主体
 type Agent struct {
-	cfg    Config
-	info   osinfo.Info
-	svcMgr svcmgr.Manager
-	client *http.Client
+	cfg       Config
+	info      osinfo.Info
+	svcMgr    svcmgr.Manager
+	client    *http.Client
+	buildHash string // 当前可执行文件 SHA256，用于服务端判断是否需要自升级
 }
 
 // New 创建 Agent
 func New(cfg Config) *Agent {
 	// 容忍 --server 末尾多写斜杠，避免请求路径变成 //api/...
 	cfg.ServerURL = strings.TrimRight(cfg.ServerURL, "/")
+	if cfg.Version == "" {
+		cfg.Version = "0.1.0"
+	}
 	info := osinfo.Detect()
 	return &Agent{
-		cfg:    cfg,
-		info:   info,
-		svcMgr: svcmgr.New(info.Init),
-		client: &http.Client{Timeout: 60 * time.Second},
+		cfg:       cfg,
+		info:      info,
+		svcMgr:    svcmgr.New(info.Init),
+		client:    &http.Client{Timeout: 60 * time.Second},
+		buildHash: executableSHA256(),
 	}
+}
+
+// executableSHA256 计算当前 Agent 二进制的 SHA256。
+// 服务端把它与待下发二进制的哈希比较，判断 Agent 是否已是最新版本。
+func executableSHA256() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Run 运行主循环
@@ -110,6 +141,9 @@ func (a *Agent) register() error {
 		Kernel:         a.info.Kernel,
 		Supervisor:     a.info.Init,
 		AgentVersion:   "0.1.0",
+		BuildVersion:   a.cfg.Version,
+		BuildHash:      a.buildHash,
+		BuildVariant:   a.cfg.Variant,
 		Components:     map[string]string{},
 		SignatureModes: protocol.SupportedSignatureModes(),
 	}
@@ -128,6 +162,9 @@ func (a *Agent) heartbeat() {
 		AgentID:        a.cfg.AgentID,
 		Busy:           false,
 		Status:         "online",
+		BuildVersion:   a.cfg.Version,
+		BuildHash:      a.buildHash,
+		BuildVariant:   a.cfg.Variant,
 		SignatureModes: protocol.SupportedSignatureModes(),
 	}
 	_ = a.postJSON("/api/agent/heartbeat", req, nil)
@@ -173,11 +210,20 @@ func (a *Agent) poll(ctx context.Context) {
 }
 
 func (a *Agent) executeSelfUpdate(ctx context.Context, cmd protocol.Command) {
-	// 自升级：下载→备份→替换→exit(75)，由 systemd/upstart 重启拉起新版本
+	// 自升级：下载→备份→替换→exit(75)，由 systemd/upstart 重启拉起新版本。
+	// 服务端下发绝对 URL；这里兼容相对路径，且只对平台自身地址携带 Agent 凭据。
+	artifactURL, downloadAuth := a.resolveArtifactURL(cmd.Payload.Artifact.URL)
+	cmd.Payload.Artifact.URL = artifactURL
+
 	log.Printf("执行自升级到版本 %s", cmd.Payload.ToVersion)
+	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
+		protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: protocol.StageMaintenance,
+			ExpectedSeconds: 600, WillRestart: true}, nil)
+	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
+		protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: protocol.StageDownloading}, nil)
 
 	binPath, _ := os.Executable()
-	if err := selfupdate.Execute(ctx, cmd, binPath, a.authHeader()); err != nil {
+	if err := selfupdate.Execute(ctx, cmd, binPath, downloadAuth); err != nil {
 		log.Printf("自升级失败: %v", err)
 		report := protocol.ReportRequest{
 			AgentID: a.cfg.AgentID, Status: protocol.CmdFailed,

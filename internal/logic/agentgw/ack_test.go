@@ -22,7 +22,7 @@ func TestAckOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 	if err := db.Ping(); err != nil {
 		t.Skipf("数据库不可达: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestAckOwnership(t *testing.T) {
 	}
 
 	// 攻击者尝试 ack 受害者的指令
-	err = g.Ack(ctx, attackerAgent, fmtInt(victimCmdID), "accepted")
+	err = g.Ack(ctx, attackerAgent, fmtInt(victimCmdID), "accepted", "")
 	if err == nil {
 		t.Fatal("❌ 越权：攻击者成功 ack 了他人指令")
 	}
@@ -63,7 +63,7 @@ func TestAckOwnership(t *testing.T) {
 	t.Logf("✅ 受害者指令状态保持 %s 未被篡改", status)
 
 	// 本人 ack 应成功
-	if err := g.Ack(ctx, victimAgent, fmtInt(victimCmdID), "accepted"); err != nil {
+	if err := g.Ack(ctx, victimAgent, fmtInt(victimCmdID), "accepted", ""); err != nil {
 		t.Fatalf("❌ 本人 ack 应成功却失败: %v", err)
 	}
 	db.QueryRowContext(ctx, `SELECT status FROM commands WHERE id=$1`, victimCmdID).Scan(&status)

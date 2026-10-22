@@ -31,6 +31,7 @@
 
   var state = { user: null, view: 'hosts', hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
     hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
+    agentTargetVersion: '', agentAutoUpdate: false,
     guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
     taskDetailOpenLogs: {} };
@@ -563,11 +564,18 @@
         h('td', {}, [x.ip]), h('td', {}, [x.hostname || '-']),
         h('td', {}, [x.os_type || x.os_family || '-']), h('td', {}, [x.arch || '-']),
         h('td', {}, [x.biz_group || '-']), h('td', {}, [x.app_code || '-']),
-        h('td', {}, [h('span', { class: 'tag' }, [x.agent_status || 'unknown'])]),
+        h('td', {}, [
+          h('span', { class: 'tag' }, [x.agent_status || 'unknown']),
+          agentBuildLine(x),
+          x.agent_update_status ? h('div', { class: 'muted' }, ['自升级：' + cmdStatusText(x.agent_update_status)]) : null
+        ]),
         h('td', {}, [x.source])
       ];
       if (isAdmin()) {
         cells.push(h('td', {}, [h('div', { class: 'row-actions' }, [
+          x.agent_id ? h('button', {
+            class: 'btn ghost small', onclick: function () { upgradeAgents([x.id]); }
+          }, ['升级 Agent']) : null,
           h('button', {
             class: 'btn ghost small', onclick: function () {
               state.editingHost = Object.assign({}, x);
@@ -590,6 +598,7 @@
     return h('div', {}, [
       isAdmin() ? enrollCard() : null,
       state.hostErr ? h('div', { class: 'card' }, [h('div', { class: 'err', role: 'alert' }, [state.hostErr])]) : null,
+      isAdmin() ? agentUpdateCard() : null,
       isAdmin() ? hostForm() : null,
       h('div', { class: 'card' }, [
         toolbar,
@@ -598,6 +607,59 @@
         state.total > 0 ? hostsPager() : null
       ])
     ]);
+  }
+
+  function shortHash(s) {
+    s = String(s || '');
+    return s.length > 12 ? s.slice(0, 12) : s;
+  }
+
+  function agentBuildLine(x) {
+    var text = x.agent_build_version || '';
+    if (!text && x.agent_build_hash) text = 'sha256:' + shortHash(x.agent_build_hash);
+    if (!text) return null;
+    return h('div', {
+      class: 'muted', title: x.agent_build_hash ? ('SHA256 ' + x.agent_build_hash) : ''
+    }, ['构建 ' + text]);
+  }
+
+  // agentUpdateCard 自升级入口：服务端从 AGENT_BINARY_DIR 读取二进制并计算 SHA256，
+  // Agent 下载校验后替换自身并重启；新版本心跳会自动确认成功。
+  function agentUpdateCard() {
+    var target = state.agentTargetVersion || '-';
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['Agent 自升级']),
+      hint('服务端目标版本：' + target + '。旧 Agent 会收到 self_update 指令，下载与当前架构匹配的二进制、校验 SHA256、备份并替换后自动重启。' +
+        '升级期间主机会进入维护窗口；新 Agent 心跳上报构建哈希后，指令自动标记成功。' +
+        '自动升级：' + (state.agentAutoUpdate ? '已开启（心跳发现旧版本时自动下发）' : '未开启（可在“设置”页开启 agent.auto_update）')),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', onclick: function () { upgradeAgents(null); } }, ['升级全部旧 Agent']),
+        h('span', { class: 'muted' }, ['只下发仍不是目标二进制哈希的 Agent；已有任务/指令在执行的主机会跳过。'])
+      ])
+    ]);
+  }
+
+  function upgradeAgents(hostIDs) {
+    var single = hostIDs && hostIDs.length === 1;
+    var msg = single
+      ? '确定向这台主机下发 Agent 自升级吗？Agent 将下载新二进制并重启。'
+      : '确定向全部旧 Agent 下发自升级吗？Agent 将下载新二进制并重启。';
+    if (!confirm(msg)) return;
+    var payload = single ? { host_ids: hostIDs } : { all_outdated: true };
+    api('/api/agents/self-update', { method: 'POST', body: JSON.stringify(payload) })
+      .then(function (d) {
+        var out = '已下发 ' + d.enqueued + ' 台 Agent 自升级';
+        if (d.skipped_count) out += '，跳过 ' + d.skipped_count + ' 台';
+        if (d.skipped && d.skipped.length) {
+          out += '\n\n' + d.skipped.slice(0, 8).map(function (s) {
+            return (s.ip || s.host_id) + '：' + s.reason;
+          }).join('\n');
+          if (d.skipped_count > 8) out += '\n…';
+        }
+        alert(out);
+        loadHosts();
+      })
+      .catch(function (e) { alert('下发自升级失败: ' + e.message); });
   }
 
   // hostsPager 服务端分页控件：主机可能达到几万台，页面只按当前页拉取。
@@ -1548,6 +1610,8 @@
         state.hostPage = d.page || 1;
         state.hostSize = d.size || state.hostSize;
         state.hostPages = d.pages || Math.max(1, Math.ceil(state.total / state.hostSize));
+        state.agentTargetVersion = d.agent_target_version || '';
+        state.agentAutoUpdate = !!d.agent_auto_update;
         state.hostsLoading = false;
         state.hostErr = '';
         render();

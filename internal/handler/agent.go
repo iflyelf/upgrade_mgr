@@ -58,24 +58,31 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		if len(signatureModes) == 0 {
 			signatureModes = []string{protocol.SignatureModeID}
 		}
+		buildVersion, buildHash, buildVariant := normalizeAgentBuild(req.BuildVersion, req.BuildHash, req.BuildVariant)
 
 		// 安全：token 仅存哈希（SHA-256，token 为 256bit 随机，抗爆破）；明文只回给 Agent 一次。
-		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO agents (agent_id, ip, token_hash, secret, arch, os, agent_version, supervisor, signature_modes, status, last_heartbeat_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'online',NOW())`,
+		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO agents (agent_id, ip, token_hash, secret, arch, os, agent_version, supervisor, signature_modes, build_version, build_hash, build_variant, status, last_heartbeat_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'online',NOW())`,
 			agentID, ip, agentgw.HashToken(token), secret, req.Arch, req.OS, req.AgentVersion, req.Supervisor,
-			strings.Join(signatureModes, ","))
+			strings.Join(signatureModes, ","), buildVersion, buildHash, buildVariant)
 		if err != nil {
 			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
 			return
 		}
-		_, err = s.DB.ExecContext(r.Context(), `INSERT INTO hosts (ip, hostname, os_family, os_version, arch, kernel, agent_id, agent_version, agent_status, supervisor, source, last_seen)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'online',$9,'agent',NOW())
+		_, err = s.DB.ExecContext(r.Context(), `INSERT INTO hosts (ip, hostname, os_family, os_version, arch, kernel, agent_id, agent_version,
+				agent_build_version, agent_build_hash, agent_build_variant, agent_status, supervisor, source, last_seen)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'online',$12,'agent',NOW())
 			ON CONFLICT (ip) DO UPDATE SET hostname=EXCLUDED.hostname, os_family=COALESCE(NULLIF(EXCLUDED.os_family,''),hosts.os_family),
 				arch=COALESCE(NULLIF(EXCLUDED.arch,''),hosts.arch), agent_id=EXCLUDED.agent_id,
-				agent_version=EXCLUDED.agent_version, agent_status='online', supervisor=EXCLUDED.supervisor,
+				agent_version=EXCLUDED.agent_version,
+				agent_build_version=EXCLUDED.agent_build_version,
+				agent_build_hash=EXCLUDED.agent_build_hash,
+				agent_build_variant=EXCLUDED.agent_build_variant,
+				agent_status='online', supervisor=EXCLUDED.supervisor,
 				source='agent', last_seen=NOW()`,
-			ip, req.Hostname, req.OS, req.OSVersion, req.Arch, req.Kernel, agentID, req.AgentVersion, req.Supervisor)
+			ip, req.Hostname, req.OS, req.OSVersion, req.Arch, req.Kernel, agentID, req.AgentVersion,
+			buildVersion, buildHash, buildVariant, req.Supervisor)
 		if err != nil {
 			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
@@ -83,6 +90,7 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		}
 
 		auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", agentID, nil)
+		maybeAutoUpdateAgent(s, r, agentID)
 		httpx.OK(w, protocol.RegisterResponse{AgentID: agentID, Token: token, Secret: secret})
 	}
 }
@@ -113,11 +121,26 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 					agentID, strings.Join(modes, ","))
 			}
 		}
-		_, _ = s.DB.Exec(`UPDATE agents SET last_heartbeat_at=NOW(), status=$2 WHERE agent_id=$1`, agentID, status)
+		buildVersion, buildHash, buildVariant := normalizeAgentBuild(req.BuildVersion, req.BuildHash, req.BuildVariant)
+		// 旧 Agent 不上报 build_hash：不能用空值覆盖已有构建信息。
+		// 新 Agent 上报 build_hash 后，即使 variant 为空也会写回（普通构建）。
+		_, _ = s.DB.ExecContext(r.Context(), `UPDATE agents SET last_heartbeat_at=NOW(), status=$2,
+			build_version=CASE WHEN $3<>'' THEN $3 ELSE build_version END,
+			build_hash=CASE WHEN $4<>'' THEN $4 ELSE build_hash END,
+			build_variant=CASE WHEN $4<>'' THEN $5 ELSE build_variant END
+			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant)
 		// 维护窗口内不覆盖 upgrading 状态
-		_, _ = s.DB.Exec(`UPDATE hosts SET last_seen=NOW(),
-			agent_status=CASE WHEN maintenance_until IS NOT NULL AND maintenance_until>NOW() THEN agent_status ELSE $2 END
-			WHERE agent_id=$1`, agentID, status)
+		_, _ = s.DB.ExecContext(r.Context(), `UPDATE hosts SET last_seen=NOW(),
+			agent_status=CASE WHEN maintenance_until IS NOT NULL AND maintenance_until>NOW() THEN agent_status ELSE $2 END,
+			agent_build_version=CASE WHEN $4<>'' THEN $3 ELSE agent_build_version END,
+			agent_build_hash=CASE WHEN $4<>'' THEN $4 ELSE agent_build_hash END,
+			agent_build_variant=CASE WHEN $4<>'' THEN $5 ELSE agent_build_variant END
+			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant)
+		// 自升级命令在 Agent 退出前无法上报 success，由新版本心跳按目标 SHA256 确认。
+		if buildHash != "" {
+			markSelfUpdateSuccess(r.Context(), s.DB, agentID, buildHash)
+		}
+		maybeAutoUpdateAgent(s, r, agentID)
 		httpx.OK(w, nil)
 	}
 }
@@ -177,7 +200,7 @@ func AgentCommandAck(s *svc.ServiceContext) http.HandlerFunc {
 		var req protocol.AckRequest
 		_ = httpx.DecodeJSON(r, &req)
 		cmdID := r.PathValue("id")
-		if err := s.AgentGW.Ack(r.Context(), agentID, cmdID, req.Status); err != nil {
+		if err := s.AgentGW.Ack(r.Context(), agentID, cmdID, req.Status, req.Reason); err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}

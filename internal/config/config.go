@@ -150,6 +150,9 @@ type AgentConfig struct {
 	RequireEnrollToken bool `yaml:"require_enroll_token"`
 	// AllowExecMode 是否允许下发 exec/replace_exec/script 模式（默认 false，安全）。
 	AllowExecMode bool `yaml:"allow_exec_mode"`
+	// AutoUpdate 是否在 Agent 心跳发现旧版本时自动下发自升级（默认 false）。
+	// 开启后 Agent 会下载新二进制并重启，建议确认 dist 目录已放置目标版本再开启。
+	AutoUpdate bool `yaml:"auto_update"`
 }
 
 // LogConfig 日志。
@@ -260,6 +263,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.Artifact.OSSBucket, "ARTIFACT_OSS_BUCKET")
 	setStr(&c.Artifact.OSSAccessKey, "ARTIFACT_OSS_ACCESS_KEY")
 	setStr(&c.Artifact.OSSSecretKey, "ARTIFACT_OSS_SECRET_KEY")
+	setBool(&c.Agent.AutoUpdate, "AGENT_AUTO_UPDATE")
 	setStr(&c.Log.Level, "LOG_LEVEL")
 
 	if c.Server.Host == "" {

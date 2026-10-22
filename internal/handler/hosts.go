@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/lib/pq"
 
 	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -14,21 +17,27 @@ import (
 
 // Host 主机列表行。
 type Host struct {
-	ID           int64  `json:"id"`
-	IP           string `json:"ip"`
-	Hostname     string `json:"hostname"`
-	OSFamily     string `json:"os_family"`
-	OSType       string `json:"os_type"`
-	Arch         string `json:"arch"`
-	Account      string `json:"account"`
-	AppCode      string `json:"app_code"`
-	BizGroup     string `json:"biz_group"`
-	Department   string `json:"department"`
-	Vendor       string `json:"vendor"`
-	HostType     string `json:"host_type"`
-	AgentVersion string `json:"agent_version"`
-	AgentStatus  string `json:"agent_status"`
-	Source       string `json:"source"`
+	ID                int64      `json:"id"`
+	IP                string     `json:"ip"`
+	Hostname          string     `json:"hostname"`
+	OSFamily          string     `json:"os_family"`
+	OSType            string     `json:"os_type"`
+	Arch              string     `json:"arch"`
+	Account           string     `json:"account"`
+	AppCode           string     `json:"app_code"`
+	BizGroup          string     `json:"biz_group"`
+	Department        string     `json:"department"`
+	Vendor            string     `json:"vendor"`
+	HostType          string     `json:"host_type"`
+	AgentID           string     `json:"agent_id"`
+	AgentVersion      string     `json:"agent_version"`
+	AgentBuildVersion string     `json:"agent_build_version"`
+	AgentBuildHash    string     `json:"agent_build_hash"`
+	AgentBuildVariant string     `json:"agent_build_variant"`
+	AgentStatus       string     `json:"agent_status"`
+	AgentUpdateStatus string     `json:"agent_update_status,omitempty"`
+	AgentUpdateAt     *time.Time `json:"agent_update_at,omitempty"`
+	Source            string     `json:"source"`
 }
 
 // ListHosts 主机列表，支持关键字与分组过滤（?q=&app_code=&os_family=&page=&size=）。
@@ -96,7 +105,9 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 		listArgs := append(append([]any{}, args...), size, offset)
 		rows, err := s.DB.QueryContext(r.Context(),
 			`SELECT id, ip, hostname, os_family, os_type, arch, account, app_code,
-			        biz_group, department, vendor, host_type, agent_version, agent_status, source
+			        biz_group, department, vendor, host_type, COALESCE(agent_id,''),
+			        agent_version, COALESCE(agent_build_version,''), COALESCE(agent_build_hash,''),
+			        COALESCE(agent_build_variant,''), agent_status, source
 			   FROM hosts`+whereSQL+
 				" ORDER BY ip LIMIT $"+strconv.Itoa(i)+" OFFSET $"+strconv.Itoa(i+1), listArgs...)
 		if err != nil {
@@ -110,14 +121,71 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			var h Host
 			if err := rows.Scan(&h.ID, &h.IP, &h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
 				&h.Account, &h.AppCode, &h.BizGroup, &h.Department, &h.Vendor, &h.HostType,
-				&h.AgentVersion, &h.AgentStatus, &h.Source); err != nil {
+				&h.AgentID, &h.AgentVersion, &h.AgentBuildVersion, &h.AgentBuildHash,
+				&h.AgentBuildVariant, &h.AgentStatus, &h.Source); err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
 			}
 			list = append(list, h)
 		}
+		if err := rows.Err(); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// 当前页 Agent 的最近一次自升级状态（单独查询，避免主机列表 JOIN commands 放大行数）。
+		agentIDs := make([]string, 0, len(list))
+		for _, h := range list {
+			if h.AgentID != "" {
+				agentIDs = append(agentIDs, h.AgentID)
+			}
+		}
+		statuses := map[string]struct {
+			Status string
+			At     time.Time
+		}{}
+		if len(agentIDs) > 0 {
+			srows, err := s.DB.QueryContext(r.Context(), `
+				SELECT DISTINCT ON (agent_id) agent_id, status, created_at
+				FROM commands
+				WHERE agent_id = ANY($1) AND type='self_update'
+				ORDER BY agent_id, id DESC`, pq.Array(agentIDs))
+			if err == nil {
+				defer srows.Close()
+				for srows.Next() {
+					var id, st string
+					var at time.Time
+					if err := srows.Scan(&id, &st, &at); err == nil {
+						statuses[id] = struct {
+							Status string
+							At     time.Time
+						}{Status: st, At: at}
+					}
+				}
+				// 自升级状态属于附加信息，查询失败不影响主机列表返回。
+				_ = srows.Err()
+			}
+		}
+		for idx := range list {
+			if v, ok := statuses[list[idx].AgentID]; ok {
+				at := v.At
+				list[idx].AgentUpdateStatus = v.Status
+				list[idx].AgentUpdateAt = &at
+			}
+		}
+
+		targetVersion := s.Version
+		if targetVersion == "" {
+			targetVersion = "dev"
+		}
+		autoUpdate := false
+		if s.Settings != nil {
+			autoUpdate = s.Settings.Snapshot().Agent.AutoUpdate
+		}
 		httpx.OK(w, map[string]any{
 			"total": total, "list": list, "page": page, "size": size, "pages": pages,
+			"agent_target_version": targetVersion,
+			"agent_auto_update":    autoUpdate,
 		})
 	}
 }

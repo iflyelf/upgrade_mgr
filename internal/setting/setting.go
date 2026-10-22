@@ -99,6 +99,9 @@ var Registry = []Item{
 	{Key: "agent.allow_exec_mode", Group: "Agent", Label: "允许 exec/script 部署模式", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.AllowExecMode) },
 		Set: func(c *config.Config, v string) { c.Agent.AllowExecMode = v == "true" }},
+	{Key: "agent.auto_update", Group: "Agent", Label: "自动升级旧 Agent（下载新二进制并重启 Agent）", Type: "bool",
+		Get: func(c *config.Config) string { return b2s(c.Agent.AutoUpdate) },
+		Set: func(c *config.Config, v string) { c.Agent.AutoUpdate = v == "true" }},
 
 	// 日志
 	{Key: "log.level", Group: "日志", Label: "级别", Type: "string",

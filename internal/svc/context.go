@@ -36,6 +36,8 @@ import (
 
 // ServiceContext 服务端上下文。
 type ServiceContext struct {
+	// Version 服务端构建版本，同时作为下发给 Agent 的目标版本展示值。
+	Version    string
 	Config     *config.Config
 	DB         *sql.DB
 	Settings   *setting.Service

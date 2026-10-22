@@ -29,7 +29,8 @@
 - CI（GitHub Actions 多架构交叉编译发布 amd64/arm64/arm）
 
 **P4 自升级与生产完善**
-- **Agent 自升级**：收到 self_update 指令 → 下载新版本 → 备份 → 替换 → exit(75) 触发重启；watchdog 检测连续崩溃（≥3次）自动回滚旧版本
+- **Agent 自升级**：服务端按二进制 SHA256 判断旧 Agent → 下发 `self_update` → 下载校验 → 备份 → 替换 → exit(75) 触发重启；新版本心跳按目标哈希自动确认成功；watchdog 检测连续崩溃（≥3次）自动回滚旧版本
+- **无需逐台登录**：管理员可在主机页一键升级全部旧 Agent，或开启 `agent.auto_update` 在心跳/注册时自动下发；旧 Agent 的签名路径不匹配会被自动探测并重试，无需手工修改 `agents.signature_modes`
 - **Consul Meta 回写**：升级成功后回写服务实例 Meta（`upgraded_version`），供 consul_mgr 展示最新版本
 - **enroll-token 生成**：管理员生成一次性注册令牌 + 一键安装命令（`GET /api/agent/enroll-token`）
 - **主机升级历史**：`GET /api/hosts/{ip}/upgrade-history`，展示逐机升级记录
@@ -194,6 +195,7 @@ Agent 只依赖标准库，所以用独立 modfile `build/agent-legacy.mod`（`g
 
 - 产物：`dist/upgrade-agent-linux-{amd64,386,arm64}-legacy`，均为静态链接
 - CI：`agent-legacy` job 用 Go 1.23 运行测试并构建
+- **自升级变体选择**：新 Agent 注册/心跳会携带 `build_variant`；旧 Agent 未上报时，服务端按内核判断：`2.x` 使用 `*-legacy`，其余使用普通构建。混合 fleet 请同时执行 `make cross` 与 `make agent-legacy`，否则缺少对应产物时该主机只会被跳过并在页面提示原因。
 - ⚠️ Go 1.23 已停止安全维护，legacy 产物只建议用于确实无法升级内核的主机
 - ⚠️ 还没有在真实 CentOS 6 主机上跑过，上线前请先实测 `install` / `run` / `watchdog`
 - CentOS 6 没有 systemd，也没有 `/etc/os-release`。服务管理走 upstart（`initctl`，缺失时回退 SysV `service`），系统识别回退到 `/etc/centos-release` / `/etc/redhat-release`
@@ -280,6 +282,7 @@ agent:
   poll_hold: 20
   require_enroll_token: true  # 生产环境强烈建议开启
   allow_exec_mode: false      # 使用 script/exec/replace_exec 模式时改为 true（安全开关）
+  auto_update: false          # 心跳/注册发现旧 Agent 时自动自升级（需 dist 中已有目标二进制）
 
 consul:  # 可选：同步主机清单；编排器不依赖 Consul
   enabled: true
@@ -475,6 +478,40 @@ status upgrade-agent            # upstart
 > 覆盖目标机已有 state 并用新令牌重新注册。也可手动执行：
 > `/tmp/upgrade-agent install --server '<url>' --enroll-token '<新令牌>' --force`。
 > `--force` 必须同时提供 `--enroll-token`；普通重装请勿勾选，否则会生成新的 Agent 身份。
+
+#### Agent 自升级（无需逐台登录）
+
+Agent 注册/心跳会上报 `build_version`、自身二进制 SHA256（`build_hash`）和构建变体
+（`build_variant`）。服务端从 `server.agent_binary_dir` 读取目标二进制并计算 SHA256，
+二者一致就认为已是最新，不会重复下发。旧 Agent 没有这些字段，视为需要升级。
+
+**触发方式**：
+
+1. **手动批量/单台**：管理员在「主机」页点击「升级全部旧 Agent」，或在主机行点击
+   「升级 Agent」。只下发仍不是目标哈希的 Agent；已有在途指令的主机会跳过。
+2. **自动**：设置页把 `agent.auto_update` 设为 `true`（或配置 `agent.auto_update: true`）。
+   Agent 注册/心跳时服务端发现旧版本即自动下发，每个 Agent 有 30 分钟冷却，避免失败后
+   每次心跳反复重试。建议先确认 `dist` 中已放好目标版本再开启。
+
+**执行流程**：服务端创建 `self_update` 指令 → Agent 下载并校验 SHA256 → 备份当前二进制
+→ 原子替换 → `exit(75)` → systemd/upstart 重启 → 新 Agent 心跳上报新 `build_hash` →
+服务端用指令中的目标哈希精确匹配并标记 `success`、清除维护窗口。Agent 不需要在退出前
+上报 success，因此即使 `exit(75)` 立即退出也能正确闭环。
+
+**旧 Agent 签名路径自动探测**：旧 Agent 注册时默认按 legacy `id` 签名。若目标 Agent 实际
+只支持 `signed_path`，首次会以「签名不匹配」拒绝；服务端自动把该 Agent 的 legacy 签名路径
+切换为 `signed_path` 并重排一次，第二次仍拒绝才标记失败，避免死循环。整个过程无需手工
+修改 `agents.signature_modes`。
+
+**相关接口**：
+
+```http
+POST /api/agents/self-update           # {host_ids:[1,2]} 或 {"all_outdated":true}，管理员
+GET  /api/agents/self-update           # 目标版本、可用二进制、最近 50 条升级记录
+```
+
+下载地址由服务端生成绝对 URL：`/api/agent/binary/linux-<arch>`，legacy 追加 `-legacy`。
+若使用 Nginx/域名，请正确设置 `server.external_url`，否则 Agent 可能无法访问下载地址。
 
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
 
@@ -817,7 +854,21 @@ GET /api/agent/enroll-token           # 生成注册令牌（管理员）
 ```
 
 注册与心跳请求可携带 `signature_modes`（`id` / `signed_path` / `v2`），服务端据此选择
-legacy `signature` 的 Path；旧 Agent 不传该字段时按 `id` 处理。
+legacy `signature` 的 Path；旧 Agent 不传该字段时按 `id` 处理。注册/心跳还可携带
+`build_version`、`build_hash`（自身二进制 SHA256）、`build_variant`（空/`legacy`），
+用于服务端判断是否需要自升级。旧 Agent 不传时保留数据库原值。
+
+### Agent 自升级
+
+```http
+POST /api/agents/self-update           # 管理员；{"host_ids":[1,2]} 或 {"all_outdated":true}
+GET  /api/agents/self-update           # 管理员；目标版本、可用二进制、最近升级记录
+```
+
+- `POST` 返回 `enqueued`（已下发数）、`skipped_count`、`skipped`（最多 200 条原因）。
+- 可选 `force=true` 即使哈希一致也重新下发；`variant=legacy` 强制使用 legacy 构建。
+- 同一 Agent 同时只允许一条未结束的 `self_update`（数据库唯一索引兜底）。
+- 自升级成功由新 Agent 心跳中的 `build_hash` 与指令目标 SHA256 精确匹配确认。
 
 ### 主机管理
 

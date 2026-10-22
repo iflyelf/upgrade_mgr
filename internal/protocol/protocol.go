@@ -131,6 +131,11 @@ type RegisterRequest struct {
 	Supervisor   string            `json:"supervisor"` // systemd/upstart/cron/bare
 	AgentVersion string            `json:"agent_version"`
 	Components   map[string]string `json:"components"` // 组件名 → 当前版本
+	// BuildVersion/BuildHash/BuildVariant 用于服务端判断 Agent 是否需要自升级。
+	// BuildHash 是 Agent 对自身可执行文件计算的 SHA256；旧 Agent 不上报（空值）。
+	BuildVersion string `json:"build_version,omitempty"`
+	BuildHash    string `json:"build_hash,omitempty"`
+	BuildVariant string `json:"build_variant,omitempty"` // "" 普通构建 / legacy 旧内核构建
 	// SignatureModes 声明可校验的指令签名能力，取值见 SignatureMode*。
 	// 旧 Agent 不发送该字段，服务端按 id 兼容处理。
 	SignatureModes []string `json:"signature_modes,omitempty"`
@@ -151,6 +156,10 @@ type HeartbeatRequest struct {
 	Stage      string            `json:"stage,omitempty"`
 	Status     string            `json:"status,omitempty"` // online/upgrading/...
 	Components map[string]string `json:"components,omitempty"`
+	// 原地自升级后，新 Agent 通过心跳刷新构建信息；旧 Agent 不发送，保持数据库原值。
+	BuildVersion string `json:"build_version,omitempty"`
+	BuildHash    string `json:"build_hash,omitempty"`
+	BuildVariant string `json:"build_variant,omitempty"`
 	// SignatureModes 与注册时一致；用于 Agent 原地升级后刷新签名能力。
 	SignatureModes []string `json:"signature_modes,omitempty"`
 }

@@ -16,7 +16,10 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/agent/watchdog"
 )
 
-var version = "0.1.0"
+var (
+	version = "0.1.0"
+	variant = "" // legacy 构建由 Makefile 注入 -X main.variant=legacy
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -66,6 +69,8 @@ func runCmd() {
 		cfg.EnrollToken = *enrollToken
 	}
 	cfg.StatePath = *statePath
+	cfg.Version = version
+	cfg.Variant = variant
 
 	agent := agentrun.New(cfg)
 	ctx, cancel := context.WithCancel(context.Background())

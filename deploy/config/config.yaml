@@ -84,6 +84,7 @@ agent:
   enroll_token_ttl: 15m
   require_enroll_token: true  # 是否强制要求注册令牌（生产环境强烈建议开启）
   allow_exec_mode: false      # 是否允许 exec/replace_exec 部署模式
+  auto_update: false          # 心跳/注册发现旧 Agent 时自动下发自升级（需 dist 中已有目标二进制）
 
 log:
   level: info

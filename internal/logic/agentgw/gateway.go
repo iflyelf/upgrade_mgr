@@ -180,23 +180,91 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 // 安全：必须校验指令归属该 agent。commands.id 为 BIGSERIAL（连续可枚举），
 // 若不校验 agent_id，任何已认证 Agent 都能猜 id 篡改他人指令状态
 // （把别人的升级标记为 failed 造成拒绝服务，或标记 accepted 干扰编排）。
-func (g *Gateway) Ack(ctx context.Context, agentID, cmdID, status string) error {
-	dbStatus := protocol.CmdAccepted
-	if status == "rejected" {
-		dbStatus = protocol.CmdFailed
-	}
-	// 防止覆盖终态（租约回收可能已将 dispatched 置为 timeout）
-	res, err := g.db.ExecContext(ctx,
-		`UPDATE commands SET status=$3 
-		 WHERE id=$1 AND agent_id=$2 AND status IN ('dispatched')`,
-		cmdID, agentID, dbStatus)
+//
+// 兼容：旧 Agent 没有上报签名能力，数据库只能默认 id。SignedPath-only 旧 Agent
+// 首次收到 id 签名会拒绝。此时若拒绝原因是“签名不匹配”，服务端自动把该 Agent
+// 的 legacy 签名路径切换到 SignedPath 并重排一次指令；反之亦然。这样旧 Agent
+// 也能收到 self_update 指令完成自升级，无需人工改 agents.signature_modes。
+func (g *Gateway) Ack(ctx context.Context, agentID, cmdID, status, reason string) error {
+	tx, err := g.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	defer tx.Rollback()
+
+	var (
+		attempts int
+		dbStatus string
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT attempts, status FROM commands
+		WHERE id=$1 AND agent_id=$2 FOR UPDATE`, cmdID, agentID).Scan(&attempts, &dbStatus)
+	if err == sql.ErrNoRows {
 		return fmt.Errorf("指令不存在或不属于当前 Agent")
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+	// 防止覆盖终态（租约回收可能已将 dispatched 置为 timeout）
+	if dbStatus != "dispatched" {
+		return fmt.Errorf("指令不存在或不属于当前 Agent")
+	}
+
+	if status != "rejected" {
+		if _, err := tx.ExecContext(ctx, `UPDATE commands SET status=$2 WHERE id=$1`, cmdID, protocol.CmdAccepted); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	// 仅探测一次：第一次拒绝若确为签名路径不匹配，则切换 legacy 签名路径并重排。
+	if attempts <= 1 && strings.Contains(reason, "签名不匹配") {
+		var modes string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(signature_modes,'') FROM agents WHERE agent_id=$1 FOR UPDATE`, agentID).Scan(&modes); err == nil {
+			normalized := protocol.NormalizeSignatureModes(strings.Split(modes, ","))
+			// 只切换“明确只有一种 legacy 能力”的旧 Agent；同时支持 id+signed_path 的
+			// 新 Agent 不应因单次 v2 校验失败被降级。
+			if len(normalized) == 1 &&
+				(normalized[0] == protocol.SignatureModeID || normalized[0] == protocol.SignatureModeSignedPath) {
+				next := protocol.SignatureModeSignedPath
+				if normalized[0] == protocol.SignatureModeSignedPath {
+					next = protocol.SignatureModeID
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE agents SET signature_modes=$2 WHERE agent_id=$1`, agentID, next); err != nil {
+					return err
+				}
+				line := fmt.Sprintf("[%s] 检测到旧 Agent 签名路径不匹配，自动切换 legacy 签名为 %s 并重试\n",
+					time.Now().Format("2006-01-02 15:04:05"), next)
+				_, err := tx.ExecContext(ctx, `
+					UPDATE commands SET status='pending', dispatched_at=NULL, lease_expire_at=NULL,
+					       log=COALESCE(log,'')||$2
+					WHERE id=$1`, cmdID, line)
+				if err != nil {
+					return err
+				}
+				return tx.Commit()
+			}
+		}
+	}
+
+	line := fmt.Sprintf("[%s] Agent 拒绝指令：%s\n", time.Now().Format("2006-01-02 15:04:05"), truncateReason(reason))
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE commands SET status=$2, finished_at=NOW(), log=COALESCE(log,'')||$3 WHERE id=$1`,
+		cmdID, protocol.CmdFailed, line); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func truncateReason(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if len(s) > 300 {
+		return s[:300] + "..."
+	}
+	if s == "" {
+		return "未提供原因"
+	}
+	return s
 }
 
 // EnterMaintenance 申请维护租约：置主机 maintenance_until，避免升级期间被判掉线。

@@ -42,6 +42,7 @@ func main() {
 	}
 
 	sc := svc.New(c)
+	sc.Version = version
 
 	// 可选：Consul 定时同步（未启用则不启动）
 	ctx, cancel := context.WithCancel(context.Background())
@@ -129,6 +130,9 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, handler.SyncHosts(sc)))
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
+	// Agent 自升级：管理员触发 + 查看最近状态；自动升级由 agent.auto_update 设置控制。
+	mux.HandleFunc("POST /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdate(sc))))
+	mux.HandleFunc("GET /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdateStatus(sc))))
 
 	// 需超级管理员（全局配置影响所有租户）
 	mux.HandleFunc("GET /api/settings", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ListSettings(sc))))
