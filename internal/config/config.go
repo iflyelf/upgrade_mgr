@@ -90,6 +90,9 @@ type ConsulConfig struct {
 	Concurrency  int    `yaml:"concurrency"` // 批量查询并发
 	SyncOnStart  bool   `yaml:"sync_on_start"`
 	SyncInterval string `yaml:"sync_interval"` // 如 5m/1h，空则不定时
+	// CleanupMissing 同步后清理已从 Consul 移除的纯 Consul 主机。
+	// 只删除 source=consul、未装 Agent、无未完成任务/指令的主机。
+	CleanupMissing bool `yaml:"cleanup_missing"`
 }
 
 // CasdoorConfig 可选：FlyIAM/Casdoor SSO。
@@ -163,7 +166,7 @@ func Default() *Config {
 			SSLMode: "disable", MaxOpenConns: 50, MaxIdleConns: 10, ConnMaxLifetime: 3600,
 		},
 		Auth:     AuthConfig{Provider: "builtin", AdminUsername: "admin"},
-		Consul:   ConsulConfig{Timeout: 10, Concurrency: 16},
+		Consul:   ConsulConfig{Timeout: 10, Concurrency: 16, CleanupMissing: true},
 		Redis:    RedisConfig{Enabled: false, Host: "localhost", Port: 6379, TTL: 300},
 		Artifact: ArtifactConfig{Dir: "/var/lib/upgrade_mgr/artifacts"},
 		Agent: AgentConfig{
@@ -230,6 +233,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.Consul.Datacenter, "CONSUL_DATACENTER")
 	setBool(&c.Consul.SyncOnStart, "CONSUL_SYNC_ON_START")
 	setStr(&c.Consul.SyncInterval, "CONSUL_SYNC_INTERVAL")
+	setBool(&c.Consul.CleanupMissing, "CONSUL_CLEANUP_MISSING")
 
 	setStr(&c.Casdoor.Endpoint, "CASDOOR_ENDPOINT")
 	setStr(&c.Casdoor.PublicEndpoint, "CASDOOR_PUBLIC_ENDPOINT")

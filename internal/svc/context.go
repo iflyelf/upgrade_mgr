@@ -182,7 +182,7 @@ func (s *ServiceContext) runSyncOnce() {
 	if cli == nil {
 		return
 	}
-	res, err := s.Syncer.SyncFromConsul(context.Background(), cli)
+	res, err := s.Syncer.SyncFromConsul(context.Background(), cli, s.Config.Consul.CleanupMissing)
 	if errors.Is(err, synclogic.ErrSyncInProgress) {
 		return // 其他副本/请求正在同步，本轮跳过
 	}
@@ -190,8 +190,11 @@ func (s *ServiceContext) runSyncOnce() {
 		log.Printf("⚠️ Consul 同步失败: %v", err)
 		return
 	}
-	log.Printf("✅ Consul 同步完成: 服务=%d 实例=%d 主机=%d 耗时=%s",
-		res.Services, res.Instances, res.Upserted, res.Duration)
+	log.Printf("✅ Consul 同步完成: 服务=%d 实例=%d 主机=%d 清理=%d 耗时=%s",
+		res.Services, res.Instances, res.Upserted, res.Deleted, res.Duration)
+	if res.CleanupSkipped != "" && res.CleanupSkipped != "未开启自动清理" {
+		log.Printf("⚠️ Consul 清理已跳过: %s", res.CleanupSkipped)
+	}
 }
 
 func mustOpenDB(c *config.Config) *sql.DB {

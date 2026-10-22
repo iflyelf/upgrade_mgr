@@ -7,6 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/signer"
+	"github.com/iflyelf/upgrade_mgr/internal/protocol"
 )
 
 func TestNewTrimsServerURL(t *testing.T) {
@@ -83,6 +87,34 @@ func TestSaveStateAtomicAndPrivate(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("临时文件不应残留: %v", err)
+	}
+}
+
+func TestVerifyCommandUsesSignedPath(t *testing.T) {
+	secret := "test-secret"
+	cmd := protocol.Command{
+		ID:        "1",
+		Type:      protocol.CmdUpgradeComponent,
+		Payload:   protocol.CommandPayload{ToVersion: "2.0.0"},
+		Timestamp: time.Now().Unix(),
+		Nonce:     "nonce-1",
+		ExpireAt:  time.Now().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	body, _ := json.Marshal(cmd.Payload)
+	cmd.Signature = signer.Sign(secret, signer.Envelope{
+		Method: "CMD", Path: cmd.SignedPath(), Body: body,
+		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
+	})
+
+	a := New(Config{Secret: secret})
+	if err := a.verifyCommand(cmd); err != nil {
+		t.Fatalf("正确签名应通过: %v", err)
+	}
+
+	// 类型也参与签名：篡改类型必须验签失败。
+	cmd.Type = protocol.CmdSelfUpdate
+	if err := a.verifyCommand(cmd); err == nil {
+		t.Fatal("篡改指令类型后验签应失败")
 	}
 }
 

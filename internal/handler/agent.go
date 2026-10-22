@@ -66,7 +66,8 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'online',$9,'agent',NOW())
 			ON CONFLICT (ip) DO UPDATE SET hostname=EXCLUDED.hostname, os_family=COALESCE(NULLIF(EXCLUDED.os_family,''),hosts.os_family),
 				arch=COALESCE(NULLIF(EXCLUDED.arch,''),hosts.arch), agent_id=EXCLUDED.agent_id,
-				agent_version=EXCLUDED.agent_version, agent_status='online', supervisor=EXCLUDED.supervisor, last_seen=NOW()`,
+				agent_version=EXCLUDED.agent_version, agent_status='online', supervisor=EXCLUDED.supervisor,
+				source='agent', last_seen=NOW()`,
 			ip, req.Hostname, req.OS, req.OSVersion, req.Arch, req.Kernel, agentID, req.AgentVersion, req.Supervisor)
 		if err != nil {
 			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)

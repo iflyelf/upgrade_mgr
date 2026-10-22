@@ -1429,7 +1429,16 @@
   }
   function syncHosts() {
     api('/api/hosts/sync', { method: 'POST' })
-      .then(function (d) { alert('同步完成: 主机 ' + d.upserted + ' 台，耗时 ' + d.duration); loadHosts(); })
+      .then(function (d) {
+        var msg = '同步完成: 主机 ' + d.upserted + ' 台';
+        if (d.deleted) msg += '，清理已移除主机 ' + d.deleted + ' 台';
+        if (d.cleanup_skipped && d.cleanup_skipped !== '未开启自动清理') {
+          msg += '\n未清理: ' + d.cleanup_skipped;
+        }
+        msg += '\n耗时: ' + d.duration;
+        alert(msg);
+        loadHosts();
+      })
       .catch(function (e) { alert('同步失败: ' + e.message); });
   }
   function logout() { api('/api/auth/logout', { method: 'POST' }).then(function () { state.user = null; render(); }); }

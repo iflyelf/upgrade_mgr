@@ -11,6 +11,7 @@
 **P0 骨架**
 - 独立启动、可选依赖优雅降级（Consul / Casdoor / Redis 不可用仅告警，不阻塞）
 - 主机清单本地化（事实来源为 `hosts` 表），Consul 为可选同步来源（含业务分组 account/app_code/group…）
+- Consul 同步自动清理已移除的纯 Consul 主机（有 Agent/未完成任务时保留；部分或空清单自动跳过）
 - 可切换认证：内置 bcrypt 账号（默认）/ FlyIAM-Casdoor SSO
 - 页面设置化（DB 优先 / env 兜底），改动即时生效
 - IP 段表达式解析：`10.1.255.24-26,10.1.255.38,10.1.255.0/24,10.1.26.5-10.1.26.7`（含排除、展开上限）
@@ -285,10 +286,11 @@ consul:  # 可选：同步主机清单；编排器不依赖 Consul
   address: consul.internal:8500
   token: ""  # 建议用环境变量 CONSUL_TOKEN 覆盖
   datacenter: ""  # 留空自动探测；多数据中心需显式指定
+  cleanup_missing: true  # 同步后清理已从 Consul 移除的纯 Consul 主机（默认开启）
 ```
 
 > **配置优先级**：运行期「设置页」写入的 `app_settings` > 环境变量 > 配置文件 > 内置默认值。
-> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
 
 **`server.external_url` 怎么填**：
 
@@ -836,6 +838,15 @@ POST /api/hosts/sync                    # 从 Consul 同步主机
 - 删除主机会级联删除 `task_hosts`、`commands` 历史，并删除关联 `agents` 记录以撤销 Agent 凭据。
 - 编辑/删除均带租户隔离；`superadmin` 可跨租户操作。
 
+**Consul 自动清理**
+
+- 默认开启（`consul.cleanup_missing=true`，设置页 Consul 分组可关闭）。
+- 同步结束后，删除「已从 Consul 移除」的 `source='consul'` 主机。
+- 只删 `agent_id` 为空、没有 `agents` 记录、没有未完成任务/指令的主机；Agent 主机、手工主机不受影响。
+- 任一服务实例查询失败，或本轮 Consul 未返回任何主机时，**整轮跳过清理**，防止 Consul ACL/网络/配置异常导致误删。
+- 返回字段：`upserted`（写入/更新数）、`deleted`（清理数）、`cleanup_skipped`（跳过原因）。
+- 环境变量：`CONSUL_CLEANUP_MISSING=false` 可关闭。
+
 **几万台主机的分页**
 
 - 列表由后端分页，页面默认 50 条/页，可选 20/50/100/200/500，支持页码跳转。
@@ -1075,6 +1086,20 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
+
+### 2026-10-22 修复：Agent 指令验签路径不一致
+
+- 服务端签名使用 `Command.SignedPath()`（`ID|类型|过期时间`），Agent 之前只校验 `cmd.ID`，导致升级指令被误判为「签名不匹配」。
+- Agent 改为使用 `cmd.SignedPath()` 验签，篡改指令类型或延长过期时间同样会被拒绝。
+- **旧 Agent 二进制需要更新到本次构建**；服务端升级后请同步替换各主机上的 `upgrade-agent`。
+
+### 2026-10-22 Consul 同步自动清理
+
+- 新增 `consul.cleanup_missing`（默认 `true`）：同步后删除已从 Consul 移除的纯 Consul 主机。
+- 安全保护：只删 `source='consul'` 且无 `agent_id`/`agents` 记录的主机；有未完成任务/指令的主机保留；服务实例查询失败或本轮清单为空时跳过清理。
+- Agent 注册时同步把 `source` 更新为 `agent`，避免已装 Agent 的主机被 Consul 清理。
+- 同步接口返回 `deleted` / `cleanup_skipped`，页面提示清理结果；定时同步日志包含清理数量。
+- 迁移 011 增加清理扫描与保护判断所需索引。
 
 ### 2026-10-22 主机管理：分页、编辑、删除
 

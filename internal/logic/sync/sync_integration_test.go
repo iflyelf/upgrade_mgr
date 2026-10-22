@@ -39,7 +39,7 @@ func TestSyncFromConsulReal(t *testing.T) {
 		t.Fatalf("consul connect: %v", err)
 	}
 
-	res, err := NewSyncer(db).SyncFromConsul(context.Background(), cli)
+	res, err := NewSyncer(db).SyncFromConsul(context.Background(), cli, true)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}

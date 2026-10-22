@@ -52,6 +52,9 @@ var Registry = []Item{
 	{Key: "consul.sync_interval", Group: "Consul", Label: "同步间隔(5m/1h)", Type: "string",
 		Get: func(c *config.Config) string { return c.Consul.SyncInterval },
 		Set: func(c *config.Config, v string) { c.Consul.SyncInterval = v }},
+	{Key: "consul.cleanup_missing", Group: "Consul", Label: "自动清理 Consul 中已移除的主机（仅纯 Consul 主机，有 Agent/任务时保留）", Type: "bool",
+		Get: func(c *config.Config) string { return b2s(c.Consul.CleanupMissing) },
+		Set: func(c *config.Config, v string) { c.Consul.CleanupMissing = v == "true" }},
 
 	// 认证
 	{Key: "auth.provider", Group: "认证", Label: "认证方式(builtin/casdoor)", Type: "string",

@@ -196,7 +196,7 @@ func (a *Agent) verifyCommand(cmd protocol.Command) error {
 	}
 	body, _ := json.Marshal(cmd.Payload)
 	return signer.Verify(a.cfg.Secret, cmd.Signature, signer.Envelope{
-		Method: "CMD", Path: cmd.ID, Body: body,
+		Method: "CMD", Path: cmd.SignedPath(), Body: body,
 		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
 	}, 10*time.Minute)
 }

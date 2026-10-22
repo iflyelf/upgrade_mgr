@@ -96,6 +96,15 @@ func TestUpgradeClosedLoop(t *testing.T) {
 	defer sc.DB.Exec(`DELETE FROM agents WHERE agent_id=$1`, agentID)
 	defer sc.DB.Exec(`DELETE FROM hosts WHERE ip=$1`, agentIP)
 
+	// Agent 注册后 source 必须变为 agent，避免被 Consul 自动清理误删。
+	var hostSource string
+	if err := sc.DB.QueryRow(`SELECT source FROM hosts WHERE ip=$1`, agentIP).Scan(&hostSource); err != nil {
+		t.Fatalf("读取 Agent 主机 source 失败: %v", err)
+	}
+	if hostSource != "agent" {
+		t.Fatalf("Agent 注册后 source 应为 agent，实际 %q", hostSource)
+	}
+
 	// 5) 创建任务（selector 精确命中该 IP）
 	taskBody := map[string]any{
 		"name": "e2e task", "component_id": compID, "version": "2.0.0",
@@ -185,6 +194,16 @@ func doAgentRegister(t *testing.T, sc *svc.ServiceContext, ip string, body map[s
 		} `json:"data"`
 	}
 	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Data.AgentID == "" || resp.Data.Secret == "" {
+		t.Fatalf("Agent 注册响应缺少凭据: %s", rec.Body.String())
+	}
+	var dbSecret string
+	if err := sc.DB.QueryRow(`SELECT secret FROM agents WHERE agent_id=$1`, resp.Data.AgentID).Scan(&dbSecret); err != nil {
+		t.Fatalf("读取 Agent 密钥失败: %v", err)
+	}
+	if dbSecret != resp.Data.Secret {
+		t.Fatalf("Agent 密钥不一致：响应=%q 数据库=%q", resp.Data.Secret, dbSecret)
+	}
 	return resp.Data.AgentID, resp.Data.Token, resp.Data.Secret
 }
 
