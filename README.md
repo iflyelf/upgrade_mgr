@@ -796,11 +796,12 @@ GET /api/artifacts/{id}/download        # 下载制品（支持 Range）
 POST /api/tasks/preview          # 预览任务（展开 IP、批次划分）
 POST /api/tasks                  # 创建任务
 GET /api/tasks                   # 列出任务
-GET /api/tasks/{id}              # 任务详情
+GET /api/tasks/{id}              # 任务详情（批次/逐机/日志，host_page/host_size 分页）
 POST /api/tasks/{id}/start       # 启动任务
 POST /api/tasks/{id}/pause       # 暂停任务
 POST /api/tasks/{id}/promote     # 推进下一批（手动）
 POST /api/tasks/{id}/cancel      # 取消任务
+DELETE /api/tasks/{id}           # 删除任务（draft/终态且无活动指令）
 ```
 
 ### Agent 网关
@@ -1087,11 +1088,24 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
 
-### 2026-10-22 修复：Agent 指令验签路径不一致
+### 2026-10-22 任务执行详情、阶段日志与删除
 
-- 服务端签名使用 `Command.SignedPath()`（`ID|类型|过期时间`），Agent 之前只校验 `cmd.ID`，导致升级指令被误判为「签名不匹配」。
-- Agent 改为使用 `cmd.SignedPath()` 验签，篡改指令类型或延长过期时间同样会被拒绝。
-- **旧 Agent 二进制需要更新到本次构建**；服务端升级后请同步替换各主机上的 `upgrade-agent`。
+- `GET /api/tasks/{id}` 重写：返回任务汇总、批次进度、逐机状态/当前阶段和指令累计日志；主机按 `host_page`/`host_size` 分页（默认 50，最大 500），只查询当前页主机的日志，避免几万台主机导致响应体膨胀。
+- 任务列表新增“详情日志”入口：弹窗展示批次进度、逐机阶段、最新指令状态和每台主机的执行日志；运行中/已暂停任务每 4 秒自动刷新，终态停止轮询。
+- Agent 阶段上报现在同时更新 `commands.log`、`task_hosts.stage` 和 `hosts.last_stage`，任务详情可看到“下载 → 备份 → 停服 → 替换 → 启动 → 验证”的完整链路；终态指令不再追加阶段日志。
+- 取消任务时同步把未完成批次置为 `canceled`，详情页不会继续显示“执行中”。
+- 新增 `DELETE /api/tasks/{id}`：仅允许 `draft` 或终态（`success/failed/canceled/rolled_back`），`running/paused` 需先取消；即使终态，只要仍有 `pending/dispatched/accepted/running` 指令也拒绝删除。
+- 删除走租户作用域并写审计 `task.delete`，级联清理 `task_batches/task_hosts/commands`；前端对可删除状态展示“删除”按钮并二次确认。
+
+### 2026-10-22 Agent 指令签名兼容：服务端升级不再要求重装 Agent
+
+- 服务端同时下发两套签名：
+  - `signature`：旧版，Path 仅含指令 ID，供尚未升级的旧 Agent 校验；
+  - `signature_v2`：新版，Path 为 `ID|类型|过期时间`，新 Agent 优先校验。
+- **旧 Agent 无需重装**即可执行新服务端下发的指令；服务端滚动升级不再要求全量替换 Agent。
+- 新 Agent 同时兼容旧服务端：`signature_v2` 缺失时，依次尝试新版 `SignedPath` 与旧版 ID 签名。
+- `signature_v2` 存在但校验失败时**不会回退**到旧签名；只有字段缺失时才进入旧服务端兼容路径（篡改 `signature_v2` 会被拒绝）。
+- 新 Agent 仍保留强校验：篡改类型、延长过期时间都会被拒绝。旧服务端/旧 Agent 链路的安全强度仍取决于传输层，建议启用 HTTPS，并建议新装或后续轮换时升级 Agent；但 Agent 升级不再是服务端升级的前置条件。
 
 ### 2026-10-22 Consul 同步自动清理
 

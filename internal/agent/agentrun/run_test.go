@@ -118,6 +118,63 @@ func TestVerifyCommandUsesSignedPath(t *testing.T) {
 	}
 }
 
+// TestVerifyCommandLegacySignature 新 Agent 必须兼容只签 ID 的旧服务端。
+func TestVerifyCommandLegacySignature(t *testing.T) {
+	secret := "test-secret"
+	cmd := protocol.Command{
+		ID:        "1",
+		Type:      protocol.CmdUpgradeComponent,
+		Payload:   protocol.CommandPayload{ToVersion: "2.0.0"},
+		Timestamp: time.Now().Unix(),
+		Nonce:     "nonce-legacy",
+		ExpireAt:  time.Now().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	body, _ := json.Marshal(cmd.Payload)
+	cmd.Signature = signer.Sign(secret, signer.Envelope{
+		Method: "CMD", Path: cmd.ID, Body: body,
+		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
+	})
+
+	a := New(Config{Secret: secret})
+	if err := a.verifyCommand(cmd); err != nil {
+		t.Fatalf("旧版 ID 签名应通过: %v", err)
+	}
+}
+
+// TestVerifyCommandV2TakesPrecedence 新版签名存在时不得回退到旧签名，
+// 防止 signature_v2 校验失败后改用旧签名实施降级。
+func TestVerifyCommandV2TakesPrecedence(t *testing.T) {
+	secret := "test-secret"
+	cmd := protocol.Command{
+		ID:        "1",
+		Type:      protocol.CmdUpgradeComponent,
+		Payload:   protocol.CommandPayload{ToVersion: "2.0.0"},
+		Timestamp: time.Now().Unix(),
+		Nonce:     "nonce-v2",
+		ExpireAt:  time.Now().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	body, _ := json.Marshal(cmd.Payload)
+	env := signer.Envelope{
+		Method: "CMD", Body: body,
+		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
+	}
+	env.Path = cmd.ID
+	cmd.Signature = signer.Sign(secret, env) // 旧签名仍有效
+	env.Path = cmd.SignedPath()
+	cmd.SignatureV2 = signer.Sign(secret, env)
+
+	a := New(Config{Secret: secret})
+	if err := a.verifyCommand(cmd); err != nil {
+		t.Fatalf("双签名应通过: %v", err)
+	}
+
+	// 类型变了：旧签名只签 ID 仍然“有效”，但 v2 必须拒绝。
+	cmd.Type = protocol.CmdSelfUpdate
+	if err := a.verifyCommand(cmd); err == nil {
+		t.Fatal("signature_v2 存在时，篡改类型不得回退到旧签名")
+	}
+}
+
 func TestResolveArtifactURL(t *testing.T) {
 	a := New(Config{ServerURL: "http://10.0.88.88:8090/", AgentID: "agent-1", Token: "tok"})
 

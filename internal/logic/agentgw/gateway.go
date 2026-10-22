@@ -45,9 +45,9 @@ func (g *Gateway) VerifyToken(ctx context.Context, agentID, token string) error 
 
 // Gateway Agent 网关。
 type Gateway struct {
-	db        *sql.DB
-	consulMu  sync.RWMutex
-	consul    ConsulWriter // 可选：升级成功回写 Consul Meta（需加锁保护）
+	db       *sql.DB
+	consulMu sync.RWMutex
+	consul   ConsulWriter // 可选：升级成功回写 Consul Meta（需加锁保护）
 }
 
 // ConsulWriter Consul Meta 回写接口（避免循环依赖）。
@@ -132,10 +132,18 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 	// 注意：payload 列为 JSONB（键序被规范化），不能用 DB 原始字节签名。
 	// 用 Go 规范化的 payload 字节签名，与 Agent 侧 json.Marshal(cmd.Payload) 一致。
 	canonical, _ := json.Marshal(pl)
-	cmd.Signature = signer.Sign(secret, signer.Envelope{
-		Method: "CMD", Path: cmd.SignedPath(), Body: canonical,
+	env := signer.Envelope{
+		Method: "CMD", Body: canonical,
 		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
-	})
+	}
+	// 双签名兼容：
+	//   - signature   使用旧 Path（仅 ID），供尚未升级的旧 Agent 校验；
+	//   - signature_v2 使用 SignedPath（ID|类型|过期时间），新 Agent 优先校验。
+	// 这样服务端滚动升级不会强制所有主机重装 Agent。
+	env.Path = cmd.ID
+	cmd.Signature = signer.Sign(secret, env)
+	env.Path = cmd.SignedPath()
+	cmd.SignatureV2 = signer.Sign(secret, env)
 	return cmd, nil
 }
 
@@ -152,7 +160,7 @@ func (g *Gateway) Ack(ctx context.Context, agentID, cmdID, status string) error 
 	// 防止覆盖终态（租约回收可能已将 dispatched 置为 timeout）
 	res, err := g.db.ExecContext(ctx,
 		`UPDATE commands SET status=$3 
-		 WHERE id=$1 AND agent_id=$2 AND status IN ('dispatched')`, 
+		 WHERE id=$1 AND agent_id=$2 AND status IN ('dispatched')`,
 		cmdID, agentID, dbStatus)
 	if err != nil {
 		return err
@@ -179,10 +187,89 @@ func (g *Gateway) EnterMaintenance(ctx context.Context, agentID string, expected
 	return err
 }
 
-// UpdateStage 更新主机与指令阶段。
-func (g *Gateway) UpdateStage(ctx context.Context, agentID, stage string) error {
-	_, err := g.db.ExecContext(ctx, `UPDATE hosts SET last_stage=$2 WHERE agent_id=$1`, agentID, stage)
-	return err
+// stageLabels 阶段中文名（仅用于展示日志，不影响协议值）。
+var stageLabels = map[string]string{
+	protocol.StageAccepted:    "已接收",
+	protocol.StageMaintenance: "进入维护窗口",
+	protocol.StageDownloading: "下载制品",
+	protocol.StageDownloaded:  "下载完成",
+	protocol.StagePreInstall:  "安装前检查",
+	protocol.StageBackup:      "备份当前版本",
+	protocol.StageStopping:    "停止服务",
+	protocol.StageReplacing:   "替换文件",
+	protocol.StageExec:        "执行安装",
+	protocol.StageStarting:    "启动服务",
+	protocol.StageVerifying:   "验证版本",
+	protocol.StagePostInstall: "安装后处理",
+	protocol.StageRollback:    "回滚",
+	protocol.StageDone:        "完成",
+}
+
+func stageLabel(stage string) string {
+	if v, ok := stageLabels[stage]; ok {
+		return v
+	}
+	if stage == "" {
+		return "未知阶段"
+	}
+	return stage
+}
+
+// UpdateStage 更新主机当前阶段，并把阶段追加到指令与逐机进度日志。
+//
+// 日志用于任务详情页实时展示「执行到哪一步」。只对仍处于非终态的指令追加，
+// 避免心跳/重试在已完成指令上写入噪声。
+func (g *Gateway) UpdateStage(ctx context.Context, agentID, cmdID, stage string) error {
+	tx, err := g.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var taskHostID sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+		SELECT task_host_id FROM commands
+		WHERE id=$1 AND agent_id=$2
+		  AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
+		cmdID, agentID).Scan(&taskHostID)
+	if err == sql.ErrNoRows {
+		// 指令已结束或不属于该 Agent：只更新主机阶段，不追加日志。
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE hosts SET last_stage=$2 WHERE agent_id=$1`, agentID, stage); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+
+	// 锁顺序与 Cancel/Report 一致：先 task_hosts，再 commands。
+	// 避免取消事务与阶段上报因加锁顺序相反而互相等待。
+	if taskHostID.Valid {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE task_hosts SET stage=$2
+			WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','canceled')`,
+			taskHostID.Int64, stage); err != nil {
+			return err
+		}
+	}
+
+	line := fmt.Sprintf("[%s] 阶段: %s\n", time.Now().Format("2006-01-02 15:04:05"), stageLabel(stage))
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE commands
+		SET status=CASE WHEN status IN ('pending','dispatched','accepted') THEN 'running' ELSE status END,
+		    started_at=COALESCE(started_at,NOW()), log=log||$3
+		WHERE id=$1 AND agent_id=$2
+		  AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
+		cmdID, agentID, line); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE hosts SET last_stage=$2 WHERE agent_id=$1`, agentID, stage); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Report 处理结果上报：更新 commands + task_hosts，成功则清除维护窗口。
@@ -213,6 +300,17 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 	}
 
 	final := isFinalStatus(req.Status)
+	// 锁顺序与 Cancel/UpdateStage 一致：先 task_hosts，再 commands。
+	if taskHostID.Valid && final {
+		// 防止覆盖终态：租约回收可能已置为 timeout
+		_, err = tx.ExecContext(ctx, `
+			UPDATE task_hosts SET status=$2, stage=$3, to_version=$4, exit_code=$5, log=$6, finished_at=NOW()
+			WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','canceled')`,
+			taskHostID.Int64, req.Status, req.Stage, req.ToVersion, req.ExitCode, req.Log)
+		if err != nil {
+			return err
+		}
+	}
 	if cmdID.Valid {
 		result, _ := json.Marshal(req)
 		if final {
@@ -224,19 +322,9 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 		} else {
 			_, err = tx.ExecContext(ctx, `
 				UPDATE commands SET status='running', log=log||$2 
-				WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`, 
+				WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
 				cmdID.Int64, req.Log)
 		}
-		if err != nil {
-			return err
-		}
-	}
-	if taskHostID.Valid && final {
-		// 防止覆盖终态：租约回收可能已置为 timeout
-		_, err = tx.ExecContext(ctx, `
-			UPDATE task_hosts SET status=$2, stage=$3, to_version=$4, exit_code=$5, log=$6, finished_at=NOW()
-			WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','canceled')`, 
-			taskHostID.Int64, req.Status, req.Stage, req.ToVersion, req.ExitCode, req.Log)
 		if err != nil {
 			return err
 		}
@@ -265,7 +353,7 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 		g.consulMu.RLock()
 		consulClient := g.consul
 		g.consulMu.RUnlock()
-		
+
 		if consulClient != nil {
 			// key 以 ip 为标识，value 为升级后版本；具体 serviceID 由 ConsulWriter 内部解析
 			_ = consulClient.WriteServiceMeta(hostIP, "upgraded_version", req.ToVersion)

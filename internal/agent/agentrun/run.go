@@ -195,10 +195,31 @@ func (a *Agent) verifyCommand(cmd protocol.Command) error {
 		return fmt.Errorf("指令已过期")
 	}
 	body, _ := json.Marshal(cmd.Payload)
-	return signer.Verify(a.cfg.Secret, cmd.Signature, signer.Envelope{
-		Method: "CMD", Path: cmd.SignedPath(), Body: body,
+	env := signer.Envelope{
+		Method: "CMD", Body: body,
 		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
-	}, 10*time.Minute)
+	}
+
+	// 新服务端同时下发 signature_v2。存在时必须校验通过，
+	// 不能回退到旧签名，否则攻击者可篡改 v2 签名实施降级。
+	if cmd.SignatureV2 != "" {
+		env.Path = cmd.SignedPath()
+		return signer.Verify(a.cfg.Secret, cmd.SignatureV2, env, 10*time.Minute)
+	}
+
+	// 兼容旧服务端：signature_v2 缺失时，signature 可能是新版 SignedPath，
+	// 也可能只签了 ID。先按新版校验，失败再按旧版校验；两种服务端均可工作。
+	// 注意：缺失时的回退是为了兼容旧服务端，旧链路应配合 HTTPS 使用。
+	env.Path = cmd.SignedPath()
+	errV2 := signer.Verify(a.cfg.Secret, cmd.Signature, env, 10*time.Minute)
+	if errV2 == nil {
+		return nil
+	}
+	env.Path = cmd.ID
+	if errV1 := signer.Verify(a.cfg.Secret, cmd.Signature, env, 10*time.Minute); errV1 == nil {
+		return nil
+	}
+	return errV2
 }
 
 func (a *Agent) executeUpgrade(ctx context.Context, cmd protocol.Command) {

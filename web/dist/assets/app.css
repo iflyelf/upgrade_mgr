@@ -170,6 +170,44 @@ pre.code {
   background: var(--panel-bg); font-size: 13px;
 }
 
+.link { color: var(--primary-color); text-decoration: none; }
+.link:hover { text-decoration: underline; }
+
+/* 任务详情弹窗 */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0, 0, 0, .45);
+  overflow: auto; padding: 24px 16px;
+}
+.modal {
+  max-width: 1200px; margin: 0 auto; padding: 20px;
+  background: var(--card-bg); color: var(--text-color);
+  border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+.modal-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.modal-head h3 { margin: 0; flex: 1 1 240px; }
+.detail-summary { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 10px; font-size: 13px; color: var(--text-secondary); }
+.detail-stat {
+  padding: 6px 10px; border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); background: var(--panel-bg);
+}
+.progress {
+  height: 8px; margin: 8px 0 10px; overflow: hidden;
+  background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 999px;
+}
+.progress > div { height: 100%; background: var(--primary-color); transition: width .3s; }
+.detail-subtitle { margin: 16px 0 8px; }
+.modal .table-wrap { max-height: 340px; overflow: auto; }
+.log-details summary { cursor: pointer; color: var(--primary-color); font-size: 12px; }
+.log-pre { max-height: 260px; margin-top: 6px; white-space: pre-wrap; word-break: break-word; }
+.tag.status-running { background: color-mix(in srgb, var(--primary-color) 22%, transparent); }
+.tag.status-success { background: color-mix(in srgb, #22c55e 20%, transparent); }
+.tag.status-failed, .tag.status-timeout { background: color-mix(in srgb, var(--err-color) 18%, transparent); }
+.tag.status-paused, .tag.status-canceled, .tag.status-skipped { background: color-mix(in srgb, #f59e0b 20%, transparent); }
+.tag.status-rolled_back { background: color-mix(in srgb, #f97316 22%, transparent); }
+.tag.status-draft { opacity: .8; }
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 999px; }
 
@@ -180,4 +218,7 @@ pre.code {
   .brand { font-size: 16px; }
   .grid2 { grid-template-columns: 1fr; }
   pre.code { font-size: 11px; }
+  .modal-mask { padding: 10px 8px; }
+  .modal { padding: 14px; }
+  .detail-summary { font-size: 12px; }
 }

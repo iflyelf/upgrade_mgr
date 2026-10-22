@@ -31,7 +31,9 @@
 
   var state = { user: null, view: 'hosts', hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
     hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
-    guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '' };
+    guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
+    taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
+    taskDetailOpenLogs: {} };
 
   function h(tag, attrs, children) {
     var el = document.createElement(tag);
@@ -100,9 +102,44 @@
 
   var TASK_STATUS = {
     draft: '待启动', running: '运行中', paused: '已暂停',
-    success: '成功', failed: '失败', canceled: '已取消'
+    success: '成功', failed: '失败', canceled: '已取消', rolled_back: '已回滚'
+  };
+  var HOST_STATUS = {
+    pending: '待下发', running: '执行中', success: '成功', failed: '失败',
+    rolled_back: '已回滚', skipped: '已跳过', timeout: '超时', canceled: '已取消'
+  };
+  var CMD_STATUS = {
+    pending: '待下发', dispatched: '已下发', accepted: '已接收', running: '执行中',
+    success: '成功', failed: '失败', rolled_back: '已回滚', timeout: '超时',
+    expired: '已过期', canceled: '已取消'
+  };
+  var BATCH_STATUS = {
+    pending: '待执行', running: '执行中', success: '成功', failed: '失败',
+    skipped: '已跳过', canceled: '已取消'
+  };
+  var STAGE_TEXT = {
+    accepted: '已接收', enter_maintenance: '进入维护窗口', maintenance: '维护窗口',
+    downloading: '下载制品', downloaded: '下载完成', pre_install: '安装前检查',
+    backup: '备份当前版本', stopping: '停止服务', replacing: '替换文件',
+    exec: '执行安装', starting: '启动服务', verifying: '验证版本',
+    post_install: '安装后处理', rollback: '回滚', done: '完成'
   };
   function statusText(s) { return TASK_STATUS[s] || s; }
+  function hostStatusText(s) { return HOST_STATUS[s] || s || '-'; }
+  function cmdStatusText(s) { return CMD_STATUS[s] || s || '-'; }
+  function batchStatusText(s) { return BATCH_STATUS[s] || s || '-'; }
+  function stageText(s) { return STAGE_TEXT[s] || s || '-'; }
+  function fmtTime(v) {
+    if (!v) return '-';
+    var d = new Date(v);
+    if (isNaN(d.getTime())) return String(v);
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+      p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  function deletableTask(x) {
+    return ['draft', 'success', 'failed', 'canceled', 'rolled_back'].indexOf(x.status) >= 0;
+  }
 
   function themeSwitcher() {
     return h('div', { class: 'theme-switcher' }, THEMES.map(function (t) {
@@ -471,6 +508,8 @@
   }
 
   function switchView(v) {
+    // 切换页签时关闭任务详情并停止轮询，避免后台定时器继续渲染旧弹窗。
+    closeTaskDetail(true);
     state.view = v;
     state.err = '';
     if (v === 'settings') loadSettings();
@@ -1078,6 +1117,141 @@
     return h('div', {}, [uploadForm, table]);
   }
 
+  function taskDetailModal() {
+    var d = state.taskDetail;
+    var mask = h('div', {
+      id: 'task-detail-mask',
+      class: 'modal-mask',
+      onclick: function (e) { if (e.target === mask) closeTaskDetail(); },
+      onscroll: function () { state.taskDetailScroll = mask.scrollTop; }
+    }, []);
+    var modal = h('div', { class: 'modal' }, []);
+    mask.appendChild(modal);
+
+    var title = '任务详情' + (d && d.id ? ' #' + d.id : (state.taskDetailId ? ' #' + state.taskDetailId : ''));
+    if (d && d.name) title += ' · ' + d.name;
+    var actions = d ? taskActions(d, function () {
+      loadTaskDetail(d.id, state.taskDetailPage, true);
+    }) : [];
+    modal.appendChild(h('div', { class: 'modal-head' }, [
+      h('h3', {}, [title]),
+      h('div', { class: 'row-actions' }, actions.concat([
+        h('button', { class: 'btn ghost small', onclick: function () { closeTaskDetail(); } }, ['关闭'])
+      ]))
+    ]));
+
+    if (state.taskDetailErr) {
+      modal.appendChild(h('div', { class: 'err field' }, ['加载失败: ' + state.taskDetailErr]));
+      modal.appendChild(h('button', {
+        class: 'btn ghost small',
+        onclick: function () { loadTaskDetail(state.taskDetailId, state.taskDetailPage); }
+      }, ['重试']));
+    }
+    if (!d) {
+      modal.appendChild(h('div', { class: 'muted empty' }, [state.taskDetailLoading ? '加载中…' : '暂无数据']));
+      return mask;
+    }
+
+    var total = d.total || 0;
+    var success = d.success || 0;
+    var failed = d.failed || 0;
+    var done = d.done || 0;
+    var active = d.active || 0;
+    var percent = total ? Math.round(done * 100 / total) : 0;
+
+    modal.appendChild(h('div', { class: 'detail-summary' }, [
+      h('div', { class: 'detail-stat' }, ['状态: ', h('span', { class: 'tag status-' + d.status }, [statusText(d.status)])]),
+      h('div', { class: 'detail-stat' }, ['组件: ', d.component_display_name || d.component_name || ('#' + d.component_id)]),
+      h('div', { class: 'detail-stat' }, ['目标版本: ', d.version || '-']),
+      h('div', { class: 'detail-stat' }, ['进度: ', done + ' / ' + total + '（' + percent + '%）']),
+      h('div', { class: 'detail-stat' }, ['成功: ', success, ' 失败: ', failed, ' 执行中/待执行: ', active]),
+      h('div', { class: 'detail-stat' }, ['创建人: ', d.created_by || '-']),
+      h('div', { class: 'detail-stat' }, ['创建时间: ', fmtTime(d.created_at)])
+    ]));
+    modal.appendChild(h('div', { class: 'progress', title: '完成 ' + done + ' / ' + total }, [
+      h('div', { style: 'width:' + percent + '%' }, [])
+    ]));
+    modal.appendChild(hint('运行中每 4 秒自动刷新；日志来自 Agent 阶段上报和最终执行结果。'));
+
+    var batches = d.batches || [];
+    modal.appendChild(h('h4', { class: 'detail-subtitle' }, ['批次进度']));
+    modal.appendChild(batches.length ? simpleTable(
+      ['批次', '状态', '总数', '成功', '失败', '已完成', '开始时间', '结束时间'],
+      batches,
+      function (b) {
+        return ['第 ' + (b.batch_index + 1) + ' 批', batchStatusText(b.status), b.total, b.success,
+          b.failed, b.done, fmtTime(b.started_at), fmtTime(b.finished_at)];
+      }
+    ) : h('div', { class: 'muted' }, ['暂无批次数据']));
+
+    // 当前页主机的指令日志按 task_host_id 聚合；后端只返回当前页主机的日志。
+    var cmdByHost = {};
+    (d.commands || []).forEach(function (c) {
+      if (!c.task_host_id) return;
+      (cmdByHost[c.task_host_id] = cmdByHost[c.task_host_id] || []).push(c);
+    });
+    var hosts = d.hosts || [];
+    modal.appendChild(h('h4', { class: 'detail-subtitle' }, ['逐机执行状态']));
+    modal.appendChild(hosts.length ? simpleTable(
+      ['主机', '批次', '状态', '当前阶段', '最新指令', '版本变化', '尝试', '开始时间', '结束时间', '执行日志'],
+      hosts,
+      function (x) {
+        var cmds = cmdByHost[x.id] || [];
+        var latest = cmds.length ? cmds[cmds.length - 1] : null;
+        var logText = '';
+        cmds.forEach(function (c) { if (c.log) logText += c.log; });
+        if (!logText) logText = x.log || '';
+        var logEl = logText
+          ? h('details', {
+              class: 'log-details',
+              open: state.taskDetailOpenLogs[x.id] ? 'open' : null,
+              ontoggle: function (e) {
+                if (e.target.open) state.taskDetailOpenLogs[x.id] = true;
+                else delete state.taskDetailOpenLogs[x.id];
+              }
+            }, [
+              h('summary', {}, ['查看日志' + (latest ? '（' + cmdStatusText(latest.status) + '）' : '')]),
+              h('pre', { class: 'code log-pre' }, [logText])
+            ])
+          : h('span', { class: 'muted' }, ['暂无日志']);
+        var ver = (x.from_version || '-') + ' → ' + (x.to_version || '-');
+        var stage = stageText(x.stage);
+        if (x.exit_code) stage += '（exit ' + x.exit_code + '）';
+        return [
+          h('div', {}, [h('div', {}, [x.ip]), h('div', { class: 'muted' }, [x.hostname || '-'])]),
+          '第 ' + (x.batch + 1) + ' 批',
+          h('span', { class: 'tag status-' + x.status }, [hostStatusText(x.status)]),
+          stage,
+          latest ? cmdStatusText(latest.status) : '-',
+          ver,
+          x.attempts || 0,
+          fmtTime(x.started_at),
+          fmtTime(x.finished_at),
+          logEl
+        ];
+      }
+    ) : h('div', { class: 'muted empty' }, ['没有命中主机']));
+
+    var pages = d.host_pages || 1;
+    var page = d.host_page || 1;
+    if (pages > 1 || total > 0) {
+      modal.appendChild(h('div', { class: 'pager' }, [
+        h('button', {
+          class: 'btn ghost small',
+          disabled: page <= 1 ? 'disabled' : null,
+          onclick: function () { state.taskDetailScroll = 0; loadTaskDetail(d.id, page - 1); }
+        }, ['上一页']),
+        h('span', { class: 'muted' }, ['第 ' + page + ' / ' + pages + ' 页，共 ' + total + ' 台']),
+        h('button', {
+          class: 'btn ghost small',
+          disabled: page >= pages ? 'disabled' : null,
+          onclick: function () { state.taskDetailScroll = 0; loadTaskDetail(d.id, page + 1); }
+        }, ['下一页'])
+      ]));
+    }
+    return mask;
+  }
+
   function tasksView() {
     var compMap = {};
     state.components.forEach(function (c) { compMap[c.id] = c; });
@@ -1262,36 +1436,21 @@
       hint('创建后任务处于 draft 状态，需要在下方列表点“启动”才会开始下发。')
     ]);
 
-    function actBtn(x, label, action, cls) {
-      return h('button', {
-        class: 'btn small ' + (cls || 'ghost'),
-        onclick: function () {
-          if (action === 'cancel' && !confirm('确定取消任务 #' + x.id + ' 吗？')) return;
-          api('/api/tasks/' + x.id + '/' + action, { method: 'POST' })
-            .then(function () { loadTasks(); })
-            .catch(function (e) { alert(e.message); });
-        }
-      }, [label]);
-    }
-
-    function taskActions(x) {
-      var btns = [];
-      if (x.status === 'draft') btns.push(actBtn(x, '启动', 'start', ''));
-      if (x.status === 'running') btns.push(actBtn(x, '暂停', 'pause'));
-      if (x.status === 'paused') btns.push(actBtn(x, '推进', 'promote', ''));
-      if (x.status === 'draft' || x.status === 'running' || x.status === 'paused') btns.push(actBtn(x, '取消', 'cancel', 'danger'));
-      return btns.length ? btns : [h('span', { class: 'muted' }, ['-'])];
-    }
-
     var list = h('div', { class: 'card' }, [
-      h('div', { class: 'toolbar' }, [h('span', { class: 'muted' }, ['共 ' + state.tasks.length + ' 个任务'])]),
+      h('div', { class: 'toolbar' }, [h('span', { class: 'muted' }, ['共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。'])]),
       simpleTable(['ID', '名称', '组件', '版本', '状态', '总数', '成功', '失败', '操作'], state.tasks,
         function (x) {
           var c = compMap[x.component_id];
-          return [x.id, x.name, c ? c.name : x.component_id, x.version,
-            h('span', { class: 'tag' }, [statusText(x.status)]),
+          var acts = [detailBtn(x)].concat(isAdmin() ? taskActions(x) : []);
+          return [x.id,
+            h('a', {
+              href: '#', class: 'link',
+              onclick: function (e) { e.preventDefault(); openTaskDetail(x.id); }
+            }, [x.name]),
+            c ? c.name : x.component_id, x.version,
+            h('span', { class: 'tag status-' + x.status }, [statusText(x.status)]),
             x.total, x.success, x.failed,
-            isAdmin() ? h('div', { class: 'row-actions' }, taskActions(x)) : '-'];
+            h('div', { class: 'row-actions' }, acts)];
         }),
       state.tasks.length === 0
         ? h('div', { class: 'muted empty' }, ['还没有任务。先上传制品，再用上面的表单创建。'])
@@ -1360,9 +1519,17 @@
       body = h('div', {}, [guide(), body]);
     }
     app.appendChild(h('div', { class: 'container' }, [tabs(), body]));
+    if (state.taskDetailId) {
+      app.appendChild(taskDetailModal());
+      // 自动刷新会重建 DOM，恢复用户原来的滚动位置。
+      var mask = document.getElementById('task-detail-mask');
+      if (mask) mask.scrollTop = state.taskDetailScroll || 0;
+    }
   }
 
   var hostsReqSeq = 0;
+  var taskDetailSeq = 0;
+  var taskDetailTimer = null;
   function loadHosts(page) {
     state.view = 'hosts';
     if (page != null) {
@@ -1427,6 +1594,117 @@
         render();
       });
   }
+  function stopTaskDetailTimer() {
+    if (taskDetailTimer) {
+      clearInterval(taskDetailTimer);
+      taskDetailTimer = null;
+    }
+  }
+  function closeTaskDetail(skipRender) {
+    taskDetailSeq++;
+    stopTaskDetailTimer();
+    state.taskDetailId = null;
+    state.taskDetail = null;
+    state.taskDetailPage = 1;
+    state.taskDetailLoading = false;
+    state.taskDetailErr = '';
+    state.taskDetailScroll = 0;
+    state.taskDetailOpenLogs = {};
+    if (!skipRender) render();
+  }
+  function openTaskDetail(id) {
+    taskDetailSeq++;
+    stopTaskDetailTimer();
+    state.taskDetailId = id;
+    state.taskDetail = null;
+    state.taskDetailPage = 1;
+    state.taskDetailLoading = true;
+    state.taskDetailErr = '';
+    state.taskDetailScroll = 0;
+    state.taskDetailOpenLogs = {};
+    render();
+    loadTaskDetail(id, 1);
+  }
+  function loadTaskDetail(id, page, quiet) {
+    stopTaskDetailTimer();
+    var seq = ++taskDetailSeq;
+    if (!quiet) state.taskDetailLoading = true;
+    api('/api/tasks/' + id + '?host_page=' + (page || 1) + '&host_size=50')
+      .then(function (d) {
+        if (seq !== taskDetailSeq || state.taskDetailId !== id) return;
+        state.taskDetail = d;
+        state.taskDetailPage = d.host_page || page || 1;
+        state.taskDetailLoading = false;
+        state.taskDetailErr = '';
+        render();
+        scheduleTaskDetailRefresh();
+      })
+      .catch(function (e) {
+        if (seq !== taskDetailSeq || state.taskDetailId !== id) return;
+        state.taskDetailLoading = false;
+        state.taskDetailErr = e.message;
+        render();
+        // 网络抖动后继续轮询，避免详情页停在旧阶段。
+        if (state.taskDetail) scheduleTaskDetailRefresh();
+      });
+  }
+  function scheduleTaskDetailRefresh() {
+    stopTaskDetailTimer();
+    var d = state.taskDetail;
+    if (!state.taskDetailId || !d) return;
+    // 仅运行中/已暂停任务需要轮询；终态任务不再请求。
+    if (d.status !== 'running' && d.status !== 'paused') return;
+    taskDetailTimer = setInterval(function () {
+      if (!state.taskDetailId) return;
+      loadTaskDetail(state.taskDetailId, state.taskDetailPage, true);
+    }, 4000);
+  }
+  function detailBtn(x) {
+    return h('button', {
+      class: 'btn ghost small',
+      onclick: function () { openTaskDetail(x.id); }
+    }, ['详情日志']);
+  }
+  function taskActionBtn(x, label, action, cls, after) {
+    return h('button', {
+      class: 'btn small ' + (cls || 'ghost'),
+      onclick: function () {
+        if (action === 'cancel' && !confirm('确定取消任务 #' + x.id + ' 吗？未完成的指令会被取消。')) return;
+        api('/api/tasks/' + x.id + '/' + action, { method: 'POST' })
+          .then(function () {
+            if (after) after();
+            loadTasks();
+          })
+          .catch(function (e) { alert(e.message); });
+      }
+    }, [label]);
+  }
+  function deleteTaskBtn(x) {
+    return h('button', {
+      class: 'btn danger small',
+      onclick: function () {
+        if (!confirm('确定删除任务 #' + x.id + ' 吗？\n任务批次、逐机状态和指令日志会一并删除，且无法恢复。')) return;
+        api('/api/tasks/' + x.id, { method: 'DELETE' })
+          .then(function () {
+            if (state.taskDetailId === x.id) closeTaskDetail(true);
+            loadTasks();
+          })
+          .catch(function (e) { alert('删除失败: ' + e.message); });
+      }
+    }, ['删除']);
+  }
+  function taskActions(x, after) {
+    var btns = [];
+    if (x.status === 'draft') btns.push(taskActionBtn(x, '启动', 'start', '', after));
+    if (x.status === 'running') btns.push(taskActionBtn(x, '暂停', 'pause', '', after));
+    if (x.status === 'paused') btns.push(taskActionBtn(x, '推进', 'promote', '', after));
+    if (x.status === 'draft' || x.status === 'running' || x.status === 'paused') {
+      btns.push(taskActionBtn(x, '取消', 'cancel', 'danger', after));
+    }
+    if (deletableTask(x)) btns.push(deleteTaskBtn(x));
+    return btns;
+  }
+
   function syncHosts() {
     api('/api/hosts/sync', { method: 'POST' })
       .then(function (d) {
@@ -1441,7 +1719,15 @@
       })
       .catch(function (e) { alert('同步失败: ' + e.message); });
   }
-  function logout() { api('/api/auth/logout', { method: 'POST' }).then(function () { state.user = null; render(); }); }
+  function logout() {
+    stopTaskDetailTimer();
+    api('/api/auth/logout', { method: 'POST' }).then(function () {
+      state.user = null;
+      state.taskDetailId = null;
+      state.taskDetail = null;
+      render();
+    });
+  }
 
   // 启动：尝试拿当前用户
   api('/api/auth/userinfo').then(function (u) { state.user = u; loadHosts(); }).catch(function () { render(); });

@@ -1,8 +1,12 @@
 package handler
 
 import (
+	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strconv"
+
+	"github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/task"
@@ -86,42 +90,257 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
-// TaskDetail 任务详情（含逐机状态）。
+// taskBatchDetail 批次进度。
+type taskBatchDetail struct {
+	BatchIndex int    `json:"batch_index"`
+	Status     string `json:"status"`
+	Total      int    `json:"total"`
+	Success    int    `json:"success"`
+	Failed     int    `json:"failed"`
+	Done       int    `json:"done"`
+	StartedAt  any    `json:"started_at"`
+	FinishedAt any    `json:"finished_at"`
+}
+
+// taskHostDetail 逐机状态与当前阶段。
+type taskHostDetail struct {
+	ID          int64  `json:"id"`
+	HostID      int64  `json:"host_id"`
+	IP          string `json:"ip"`
+	Hostname    string `json:"hostname"`
+	Batch       int    `json:"batch"`
+	Status      string `json:"status"`
+	Stage       string `json:"stage"`
+	FromVersion string `json:"from_version"`
+	ToVersion   string `json:"to_version"`
+	ExitCode    int    `json:"exit_code"`
+	Attempts    int    `json:"attempts"`
+	Log         string `json:"log"`
+	AgentID     string `json:"agent_id"`
+	AgentStatus string `json:"agent_status"`
+	StartedAt   any    `json:"started_at"`
+	FinishedAt  any    `json:"finished_at"`
+}
+
+// taskCommandDetail 指令状态与累计日志。
+type taskCommandDetail struct {
+	ID           int64           `json:"id"`
+	TaskHostID   int64           `json:"task_host_id,omitempty"`
+	Type         string          `json:"type"`
+	Status       string          `json:"status"`
+	Attempts     int             `json:"attempts"`
+	Log          string          `json:"log"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	CreatedAt    any             `json:"created_at"`
+	DispatchedAt any             `json:"dispatched_at"`
+	StartedAt    any             `json:"started_at"`
+	FinishedAt   any             `json:"finished_at"`
+}
+
+// nullableTime 将 sql.NullTime 转为 JSON 可序列化的 nil / time.Time。
+func nullableTime(t sql.NullTime) any {
+	if t.Valid {
+		return t.Time
+	}
+	return nil
+}
+
+// TaskDetail 任务详情：批次进度、逐机状态、当前阶段与指令日志。
+//
+// 主机分页返回（默认 50、最大 500），只查询当前页主机的指令日志，
+// 即使任务命中几万台主机，详情接口也不会一次性返回全部数据。
 func TaskDetail(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-		var name, version, status string
+		ctx := r.Context()
+
+		var (
+			name, version, status, createdBy, compName, compDisplay string
+			componentID                                             int64
+			createdAt, updatedAt                                    sql.NullTime
+			selectorRaw, strategyRaw                                []byte
+		)
 		// 租户隔离：非本租户任务一律视为不存在（不泄露存在性）
-		dCond, dArgs := reqScope(r).Where("", 2)
-		err := s.DB.QueryRowContext(r.Context(),
-			`SELECT name, version, status FROM upgrade_tasks WHERE id=$1 AND `+dCond,
-			append([]any{id}, dArgs...)...).Scan(&name, &version, &status)
-		if err != nil {
+		tCond, tArgs := reqScope(r).Where("t", 2)
+		err := s.DB.QueryRowContext(ctx, `
+			SELECT t.name, t.component_id, t.version, t.status, COALESCE(t.created_by,''),
+			       t.created_at, t.updated_at, t.selector, t.strategy,
+			       COALESCE(c.name,''), COALESCE(c.display_name,'')
+			FROM upgrade_tasks t
+			LEFT JOIN components c ON c.id=t.component_id
+			WHERE t.id=$1 AND `+tCond,
+			append([]any{id}, tArgs...)...).
+			Scan(&name, &componentID, &version, &status, &createdBy,
+				&createdAt, &updatedAt, &selectorRaw, &strategyRaw, &compName, &compDisplay)
+		if err == sql.ErrNoRows {
 			httpx.Fail(w, http.StatusNotFound, "任务不存在")
 			return
 		}
-		rows, _ := s.DB.QueryContext(r.Context(), `
-			SELECT h.ip, th.batch_index, th.status, th.stage, th.from_version, th.to_version, th.exit_code
-			FROM task_hosts th JOIN hosts h ON h.id=th.host_id
-			WHERE th.task_id=$1 ORDER BY th.batch_index, h.ip`, id)
-		defer rows.Close()
-		hosts := []map[string]any{}
-		for rows.Next() {
-			var ip, st, stage, fromV, toV string
-			var batch, exit int
-			_ = rows.Scan(&ip, &batch, &st, &stage, &fromV, &toV, &exit)
-			hosts = append(hosts, map[string]any{
-				"ip": ip, "batch": batch, "status": st, "stage": stage,
-				"from_version": fromV, "to_version": toV, "exit_code": exit,
-			})
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// 任务级汇总。
+		var total, success, failed, done, active int
+		if err := s.DB.QueryRowContext(ctx, `
+			SELECT COUNT(*),
+			       COUNT(*) FILTER (WHERE status='success'),
+			       COUNT(*) FILTER (WHERE status IN ('failed','timeout')),
+			       COUNT(*) FILTER (WHERE status IN ('success','failed','rolled_back','timeout','skipped','canceled')),
+			       COUNT(*) FILTER (WHERE status IN ('pending','running'))
+			FROM task_hosts WHERE task_id=$1`, id).
+			Scan(&total, &success, &failed, &done, &active); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// 批次进度（成功/失败/完成数从 task_hosts 实时计算）。
+		brows, err := s.DB.QueryContext(ctx, `
+			SELECT b.batch_index, b.status, b.total,
+			       COUNT(th.id) FILTER (WHERE th.status='success'),
+			       COUNT(th.id) FILTER (WHERE th.status IN ('failed','timeout')),
+			       COUNT(th.id) FILTER (WHERE th.status IN ('success','failed','rolled_back','timeout','skipped','canceled')),
+			       b.started_at, b.finished_at
+			FROM task_batches b
+			LEFT JOIN task_hosts th ON th.task_id=b.task_id AND th.batch_index=b.batch_index
+			WHERE b.task_id=$1
+			GROUP BY b.id, b.batch_index, b.status, b.total, b.started_at, b.finished_at
+			ORDER BY b.batch_index`, id)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		batches := []taskBatchDetail{}
+		for brows.Next() {
+			var b taskBatchDetail
+			var started, finished sql.NullTime
+			if err := brows.Scan(&b.BatchIndex, &b.Status, &b.Total, &b.Success, &b.Failed, &b.Done,
+				&started, &finished); err != nil {
+				brows.Close()
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			b.StartedAt, b.FinishedAt = nullableTime(started), nullableTime(finished)
+			batches = append(batches, b)
+		}
+		brows.Close()
+		if err := brows.Err(); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// 主机分页：默认 50，最大 500；页码越界夹紧到最后一页。
+		page := atoiDefault(r.URL.Query().Get("host_page"), 1)
+		size := atoiDefault(r.URL.Query().Get("host_size"), 50)
+		if size > 500 {
+			size = 500
+		}
+		pages := (total + size - 1) / size
+		if pages < 1 {
+			pages = 1
+		}
+		if page > pages {
+			page = pages
+		}
+		offset := (page - 1) * size
+
+		hrows, err := s.DB.QueryContext(ctx, `
+			SELECT th.id, th.host_id, h.ip, COALESCE(h.hostname,''),
+			       th.batch_index, th.status, COALESCE(th.stage,''),
+			       COALESCE(th.from_version,''), COALESCE(th.to_version,''),
+			       COALESCE(th.exit_code,0), th.attempts, COALESCE(th.log,''),
+			       th.started_at, th.finished_at,
+			       COALESCE(h.agent_id,''), COALESCE(h.agent_status,'')
+			FROM task_hosts th
+			JOIN hosts h ON h.id=th.host_id
+			WHERE th.task_id=$1
+			ORDER BY th.batch_index, h.ip
+			LIMIT $2 OFFSET $3`, id, size, offset)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		hosts := []taskHostDetail{}
+		hostIDs := make([]int64, 0, size)
+		for hrows.Next() {
+			var h taskHostDetail
+			var started, finished sql.NullTime
+			if err := hrows.Scan(&h.ID, &h.HostID, &h.IP, &h.Hostname, &h.Batch, &h.Status, &h.Stage,
+				&h.FromVersion, &h.ToVersion, &h.ExitCode, &h.Attempts, &h.Log,
+				&started, &finished, &h.AgentID, &h.AgentStatus); err != nil {
+				hrows.Close()
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			h.StartedAt, h.FinishedAt = nullableTime(started), nullableTime(finished)
+			hosts = append(hosts, h)
+			hostIDs = append(hostIDs, h.ID)
+		}
+		hrows.Close()
+		if err := hrows.Err(); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// 只返回当前页主机的指令日志，避免大任务响应体膨胀。
+		commands := []taskCommandDetail{}
+		if len(hostIDs) > 0 {
+			crows, err := s.DB.QueryContext(ctx, `
+				SELECT id, COALESCE(task_host_id,0), type, status, attempts, COALESCE(log,''), result,
+				       created_at, dispatched_at, started_at, finished_at
+				FROM commands
+				WHERE task_host_id = ANY($1)
+				ORDER BY id`, pq.Array(hostIDs))
+			if err != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			for crows.Next() {
+				var c taskCommandDetail
+				var result []byte
+				var created, dispatched, started, finished sql.NullTime
+				if err := crows.Scan(&c.ID, &c.TaskHostID, &c.Type, &c.Status, &c.Attempts, &c.Log,
+					&result, &created, &dispatched, &started, &finished); err != nil {
+					crows.Close()
+					httpx.FailErr(w, http.StatusInternalServerError, err)
+					return
+				}
+				if len(result) > 0 {
+					c.Result = json.RawMessage(result)
+				}
+				c.CreatedAt, c.DispatchedAt = nullableTime(created), nullableTime(dispatched)
+				c.StartedAt, c.FinishedAt = nullableTime(started), nullableTime(finished)
+				commands = append(commands, c)
+			}
+			crows.Close()
+			if err := crows.Err(); err != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+
+		if len(selectorRaw) == 0 {
+			selectorRaw = []byte("{}")
+		}
+		if len(strategyRaw) == 0 {
+			strategyRaw = []byte("{}")
 		}
 		httpx.OK(w, map[string]any{
-			"id": id, "name": name, "version": version, "status": status, "hosts": hosts,
+			"id": id, "name": name, "component_id": componentID,
+			"component_name": compName, "component_display_name": compDisplay,
+			"version": version, "status": status, "created_by": createdBy,
+			"created_at": nullableTime(createdAt), "updated_at": nullableTime(updatedAt),
+			"selector": json.RawMessage(selectorRaw), "strategy": json.RawMessage(strategyRaw),
+			"total": total, "success": success, "failed": failed, "done": done, "active": active,
+			"batches": batches, "hosts": hosts,
+			"host_total": total, "host_page": page, "host_size": size, "host_pages": pages,
+			"commands": commands,
 		})
 	}
 }
 
-// TaskStart / TaskPause / TaskCancel。
+// TaskStart / TaskPause / TaskCancel / TaskDelete / TaskPromote 统一走 taskAction。
 func TaskStart(s *svc.ServiceContext) http.HandlerFunc {
 	return taskAction(s, audit.ActionTaskStart, func(id int64, r *http.Request) error { return s.Task.Start(r.Context(), reqScope(r), id) })
 }
@@ -131,6 +350,15 @@ func TaskPause(s *svc.ServiceContext) http.HandlerFunc {
 func TaskCancel(s *svc.ServiceContext) http.HandlerFunc {
 	return taskAction(s, audit.ActionTaskCancel, func(id int64, r *http.Request) error { return s.Task.Cancel(r.Context(), reqScope(r), id) })
 }
+
+// TaskDelete 删除任务及其批次、逐机记录和历史指令。
+// 仅允许删除 draft 或终态任务；running/paused 需先取消，避免删除仍在执行的升级。
+func TaskDelete(s *svc.ServiceContext) http.HandlerFunc {
+	return taskAction(s, audit.ActionTaskDelete, func(id int64, r *http.Request) error {
+		return s.Task.Delete(r.Context(), reqScope(r), id)
+	})
+}
+
 func TaskPromote(s *svc.ServiceContext) http.HandlerFunc {
 	return taskAction(s, audit.ActionTaskPromote, func(id int64, r *http.Request) error { return s.Task.Promote(r.Context(), reqScope(r), id) })
 }

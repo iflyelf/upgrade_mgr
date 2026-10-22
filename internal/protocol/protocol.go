@@ -160,8 +160,13 @@ type Command struct {
 	Payload   CommandPayload `json:"payload"`
 	Timestamp int64          `json:"timestamp"`
 	Nonce     string         `json:"nonce"`
-	Signature string         `json:"signature"`
-	ExpireAt  time.Time      `json:"expire_at"`
+	// Signature 旧版签名：Path 只含指令 ID。
+	// 服务端必须继续下发该字段，旧 Agent 才能在不重装的情况下工作。
+	Signature string `json:"signature"`
+	// SignatureV2 新版签名：Path 为 SignedPath()（ID|类型|过期时间）。
+	// 新 Agent 优先校验；旧 Agent 会忽略该未知字段。
+	SignatureV2 string    `json:"signature_v2,omitempty"`
+	ExpireAt    time.Time `json:"expire_at"`
 }
 
 // SignedPath 返回参与 HMAC 签名的指令标识：ID、Type、ExpireAt 均纳入签名，

@@ -182,13 +182,17 @@ func AgentCommandStage(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
+		cmdID := r.PathValue("id")
 		if req.Stage == protocol.StageMaintenance {
 			if err := s.AgentGW.EnterMaintenance(r.Context(), agentID, req.ExpectedSeconds, req.WillRestart); err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
 			}
-		} else {
-			_ = s.AgentGW.UpdateStage(r.Context(), agentID, req.Stage)
+		}
+		// 阶段日志：进入维护窗口也记录，任务详情页能看到完整执行链路。
+		if err := s.AgentGW.UpdateStage(r.Context(), agentID, cmdID, req.Stage); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
 		}
 		httpx.OK(w, nil)
 	}

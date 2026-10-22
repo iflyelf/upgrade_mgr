@@ -38,9 +38,18 @@ func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error
 		return err
 	}
 	// 置为 running，实际的批次下发由 Orchestrator 按灰度策略逐批推进。
-	_, err = s.db.ExecContext(ctx, `UPDATE upgrade_tasks SET status='running', updated_at=NOW() WHERE id=$1 AND `+tCond,
+	// 带状态条件并检查影响行数：防止检查后任务被取消/删除，或被并发操作改状态。
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE upgrade_tasks SET status='running', updated_at=NOW()
+		 WHERE id=$1 AND `+tCond+` AND status IN ('draft','paused')`,
 		append([]any{taskID}, tArgs...)...)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("任务状态已变化，请刷新后重试")
+	}
+	return nil
 }
 
 // Promote 人工推进：auto_promote=false 时，将 paused 任务恢复为 running 以继续下一批。
@@ -77,10 +86,16 @@ func (s *Service) Promote(ctx context.Context, sc scope.Scope, taskID int64) err
 // Pause 暂停任务（仅限 running 状态）。
 func (s *Service) Pause(ctx context.Context, sc scope.Scope, taskID int64) error {
 	tCond, tArgs := sc.Where("", 2)
-	_, err := s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE upgrade_tasks SET status='paused', updated_at=NOW() WHERE id=$1 AND `+tCond+` AND status='running'`,
 		append([]any{taskID}, tArgs...)...)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("任务非运行状态，无法暂停")
+	}
+	return nil
 }
 
 // Cancel 取消任务：仅作用于非终态任务（draft/running/paused），
@@ -109,8 +124,19 @@ func (s *Service) Cancel(ctx context.Context, sc scope.Scope, taskID int64) erro
 		return fmt.Errorf("任务已处于终态 %s，无法取消", status)
 	}
 
-	// 2. 先锁 task_hosts，再取消 commands，与 dispatchHost 的加锁顺序一致，
-	//    避免 Cancel 与下发事务互相等待。
+	// 2. 锁顺序：task_batches -> task_hosts -> commands -> upgrade_tasks。
+	//    与 completeBatch（batch -> task_hosts -> task）、dispatchHost/Report/
+	//    UpdateStage（task_hosts -> commands）保持一致。先锁逐机记录可阻止
+	//    dispatchHost 在取消过程中继续插入新指令，也避免事务互相等待。
+	_, err = tx.ExecContext(ctx, `
+		UPDATE task_batches
+		SET status='canceled', finished_at=NOW()
+		WHERE task_id=$1 AND status IN ('pending','running')`, taskID)
+	if err != nil {
+		return err
+	}
+
+	// 3. 取消逐机记录。
 	_, err = tx.ExecContext(ctx, `
 		UPDATE task_hosts
 		SET status='canceled', finished_at=NOW()
@@ -119,7 +145,7 @@ func (s *Service) Cancel(ctx context.Context, sc scope.Scope, taskID int64) erro
 		return err
 	}
 
-	// 3. 取消未完成的 commands（pending/dispatched/accepted/running）
+	// 4. 取消未完成的 commands（pending/dispatched/accepted/running）
 	_, err = tx.ExecContext(ctx, `
 		UPDATE commands
 		SET status='canceled', finished_at=NOW()
@@ -128,12 +154,17 @@ func (s *Service) Cancel(ctx context.Context, sc scope.Scope, taskID int64) erro
 		return err
 	}
 
-	// 4. 更新任务状态为 canceled
-	_, err = tx.ExecContext(ctx,
-		`UPDATE upgrade_tasks SET status='canceled', updated_at=NOW() WHERE id=$1 AND `+tCond,
+	// 5. 更新任务状态为 canceled。带状态条件并检查影响行数：
+	// 若任务在检查后已完成或已被删除，回滚本次取消，避免覆盖终态。
+	res, err := tx.ExecContext(ctx,
+		`UPDATE upgrade_tasks SET status='canceled', updated_at=NOW()
+		 WHERE id=$1 AND `+tCond+` AND status IN ('draft','running','paused')`,
 		append([]any{taskID}, tArgs...)...)
 	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("任务状态已变化，请刷新后重试")
 	}
 
 	return tx.Commit()
