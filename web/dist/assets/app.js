@@ -1212,6 +1212,15 @@
             }
           }, ['编辑']),
           h('button', {
+            class: 'btn ghost small', onclick: function () {
+              // 直接跳到任务页并按该组件筛选，删除前先看清引用情况。
+              state.taskFilterComp = String(x.id);
+              state.taskFilterKind = '';
+              state.tasksSig = '';
+              switchView('tasks');
+            }
+          }, ['相关任务']),
+          h('button', {
             class: 'btn danger small', onclick: function () {
               // 先查引用：有任务引用时必须二次确认是否连带删除；
               // 运行中/暂停中的任务不能连带删除，需要先取消。
