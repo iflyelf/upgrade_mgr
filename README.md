@@ -803,7 +803,15 @@ sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
    - **超时**：默认 `10m`，支持 `30m` 等 Go duration 格式。
 4. 填 IP 段，点「预览」→「创建任务」→ 列表里点「启动」。
 
-「填入示例：卸载旧监控」会预填一个可直接执行的交互式卸载示例：
+「任务」页在命令任务模式下提供三个示例按钮，覆盖安装脚本的三种动作：
+
+| 按钮 | 脚本动作 | 说明 |
+| --- | --- | --- |
+| 填入示例：安装脚本 | `bash "$f" install` | 首次安装或覆盖升级（幂等），不需要 stdin |
+| 填入示例：更新脚本 | `bash "$f" update` | 备份旧二进制，启动失败自动回滚，不需要 stdin |
+| 填入示例：卸载旧监控 | `bash "$f" uninstall` | 交互确认，标准输入填 `Y\n` |
+
+三个示例共用的骨架（以卸载为例）：
 
 ```bash
 #!/bin/bash
@@ -821,10 +829,10 @@ fi
 bash "$f" uninstall
 ```
 
-配合标准输入 `Y\n`：`install.sh` 的 `uninstall` 动作直接从 stdin 读取确认，
-无需「分配伪终端」。若脚本用 `read -e -p "[Y/N]:"` 确认后又用
-`dd if=/dev/tty` 等待回车，可勾选「分配伪终端（PTY）」，这种
-「PTY + 标准输入」组合可以正常通过。
+只把最后一行换成 `install` / `update` / `status` 即可切换动作。卸载示例需配合
+标准输入 `Y\n`：`install.sh` 的 `uninstall` 动作直接从 stdin 读取确认，无需
+「分配伪终端」。若脚本用 `read -e -p "[Y/N]:"` 确认后又用 `dd if=/dev/tty`
+等待回车，可勾选「分配伪终端（PTY）」，这种「PTY + 标准输入」组合可以正常通过。
 
 > 不要把 `script -q -c "bash <(curl ...) uninstall" /dev/null` 直接填进「命令脚本」：
 > `script(1)` 的 `-c` 参数会交给 `/bin/sh` 解析，而进程替换 `<(...)` 是 bash 语法，
@@ -851,7 +859,7 @@ API 创建示例：
   "strategy": { "mode": "count", "batch_size": 10, "auto_promote": true },
   "version": "command",
   "command": {
-    "script": "bash <(curl -s http://example.com/uninstall.sh) uninstall",
+    "script": "bash /tmp/node_exporter-install.sh install",
     "interpreter": "/bin/bash",
     "args": [],
     "stdin": "Y\n",

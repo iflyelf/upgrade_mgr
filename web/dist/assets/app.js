@@ -1624,15 +1624,11 @@
       render();
     }
 
-    // fillCommandSample 预填“卸载旧监控”示例：
-    // 先把 install.sh 下载到临时文件再执行，避免 script(1) 的 -c 字符串
-    // 被 /bin/sh 解析而报 `Syntax error: "(" unexpected`（进程替换是 bash 语法）。
-    // 卸载确认由平台“标准输入”提供（Y\n），脚本内部用 read 读取，无需 PTY。
-    function fillCommandSample() {
-      f.kind = 'command';
-      f.name = '卸载旧监控（示例）';
-      f.ip_expr = '10.1.255.24-26';
-      f.script = [
+    // commandScript 生成命令任务的通用脚本：先下载 install.sh 再按动作执行。
+    // 不使用 `script -c "bash <(curl ...)"`：script 的 -c 由 /bin/sh 解析，
+    // 进程替换 <(...) 是 bash 语法，dash/ash 下会报 Syntax error。
+    function commandScript(action) {
+      return [
         '#!/bin/bash',
         'set -e',
         'url=\'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh\'',
@@ -1645,11 +1641,60 @@
         'else',
         '  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1',
         'fi',
-        'bash "$f" uninstall'
+        'bash "$f" ' + action
       ].join('\n');
+    }
+
+    // fillCommandInstallSample 预填“安装/更新 node_exporter”示例：
+    // install.sh 的 install 动作幂等，已安装时会覆盖升级，首次执行即安装。
+    function fillCommandInstallSample() {
+      f.kind = 'command';
+      f.name = '安装/更新 node_exporter（示例）';
+      f.ip_expr = '10.1.255.24-26';
+      f.script = commandScript('install');
+      f.interpreter = '/bin/bash';
+      f.stdin = '';
+      f.tty = false;
+      f.timeout = '30m';
+      f.mode = 'count';
+      f.batch_size = '10';
+      f.auto_promote = true;
+      state.preview = null;
+      state.err = '';
+      render();
+    }
+
+    // fillCommandUpdateSample 预填“更新 node_exporter”示例：
+    // update 会备份旧二进制，启动失败自动回滚。
+    function fillCommandUpdateSample() {
+      f.kind = 'command';
+      f.name = '更新 node_exporter（示例）';
+      f.ip_expr = '10.1.255.24-26';
+      f.script = commandScript('update');
+      f.interpreter = '/bin/bash';
+      f.stdin = '';
+      f.tty = false;
+      f.timeout = '30m';
+      f.mode = 'count';
+      f.batch_size = '10';
+      f.auto_promote = true;
+      state.preview = null;
+      state.err = '';
+      render();
+    }
+
+    // fillCommandSample 预填“卸载旧监控”示例：
+    // 先把 install.sh 下载到临时文件再执行，避免 script(1) 的 -c 字符串
+    // 被 /bin/sh 解析而报 `Syntax error: "(" unexpected`（进程替换是 bash 语法）。
+    // 卸载确认由平台“标准输入”提供（Y\n），脚本内部用 read 读取，无需 PTY。
+    function fillCommandSample() {
+      f.kind = 'command';
+      f.name = '卸载旧监控（示例）';
+      f.ip_expr = '10.1.255.24-26';
+      f.script = commandScript('uninstall');
       f.interpreter = '/bin/bash';
       f.stdin = 'Y\\n';
-      f.tty = false; // 脚本内部已通过 script(1) 分配伪终端
+      f.tty = false; // 不需要 PTY：install.sh 的 uninstall 直接读取 stdin
       f.timeout = '30m';
       f.mode = 'count';
       f.batch_size = '10';
@@ -1715,6 +1760,12 @@
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn ghost', onclick: doPreview }, ['预览']),
         h('button', { class: 'btn', onclick: doCreate }, ['创建任务']),
+        f.kind === 'command'
+          ? h('button', { class: 'btn ghost', onclick: fillCommandInstallSample }, ['填入示例：安装脚本'])
+          : null,
+        f.kind === 'command'
+          ? h('button', { class: 'btn ghost', onclick: fillCommandUpdateSample }, ['填入示例：更新脚本'])
+          : null,
         f.kind === 'command'
           ? h('button', { class: 'btn ghost', onclick: fillCommandSample }, ['填入示例：卸载旧监控'])
           : h('button', { class: 'btn ghost', onclick: fillSample }, ['填入示例'])
