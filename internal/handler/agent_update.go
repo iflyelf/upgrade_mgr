@@ -60,6 +60,7 @@ func markSelfUpdateSuccess(ctx context.Context, db *sql.DB, agentID, buildHash s
 	res, err := db.ExecContext(ctx, `
 		UPDATE commands
 		SET status='success', finished_at=NOW(),
+		    last_stage='done', last_stage_at=NOW(),
 		    result=jsonb_build_object('status','success','stage','done',
 		        'to_version', COALESCE(payload->>'to_version','')),
 		    log=COALESCE(log,'')||$3

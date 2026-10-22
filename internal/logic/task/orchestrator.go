@@ -64,6 +64,16 @@ func (o *Orchestrator) tickWithLock(ctx context.Context) {
 }
 
 func (o *Orchestrator) tick(ctx context.Context) {
+	// 先对账：回收超时指令、把已终态指令同步到 task_hosts。
+	// 否则一条丢失的 report 会让批次永远无法完成。
+	if o.svc.reconcile != nil {
+		if n, err := o.svc.reconcile(ctx); err != nil {
+			log.Printf("[orchestrator] 指令状态对账失败: %v", err)
+		} else if n > 0 {
+			log.Printf("[orchestrator] 指令状态对账完成，修正 %d 条记录", n)
+		}
+	}
+
 	rows, err := o.svc.db.QueryContext(ctx,
 		`SELECT id, component_id, version, strategy, COALESCE(tenant_id,1) FROM upgrade_tasks WHERE status='running'`)
 	if err != nil {
@@ -189,8 +199,8 @@ func (o *Orchestrator) currentBatch(ctx context.Context, taskID int64) (int, str
 func (o *Orchestrator) batchProgress(ctx context.Context, taskID int64, batchIdx int) (total, done, failed int, err error) {
 	err = o.svc.db.QueryRowContext(ctx, `
 		SELECT COUNT(*),
-		       COUNT(*) FILTER (WHERE status IN ('success','failed','rolled_back','timeout','skipped')),
-		       COUNT(*) FILTER (WHERE status IN ('failed','timeout'))
+		       COUNT(*) FILTER (WHERE status IN ('success','failed','rolled_back','timeout','skipped','canceled')),
+		       COUNT(*) FILTER (WHERE status IN ('failed','timeout','canceled'))
 		FROM task_hosts WHERE task_id=$1 AND batch_index=$2`, taskID, batchIdx).
 		Scan(&total, &done, &failed)
 	return
@@ -332,6 +342,29 @@ func (o *Orchestrator) dispatchHost(ctx context.Context, taskID, thID, hostID in
 		return false, nil
 	}
 
+	// 幂等防护：数据库唯一索引保证同一 task_host 只有一条活动指令。
+	// 如果历史上已有活动指令但 task_host 仍是 pending，直接接管为 running，
+	// 避免每轮重复尝试 INSERT 并报唯一键冲突。
+	var existing int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM commands
+		WHERE task_host_id=$1
+		  AND status IN ('pending','dispatched','accepted','running')
+		ORDER BY id DESC
+		LIMIT 1
+		FOR UPDATE`, thID).Scan(&existing)
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE task_hosts SET status='running', started_at=COALESCE(started_at,NOW())
+			WHERE id=$1 AND status='pending'`, thID); err != nil {
+			return false, err
+		}
+		return false, tx.Commit()
+	}
+	if err != sql.ErrNoRows {
+		return false, err
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO commands (task_id, task_host_id, host_id, agent_id, type, payload, status, expire_at)
 		VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)`,
@@ -392,7 +425,7 @@ func (o *Orchestrator) completeBatch(ctx context.Context, taskID int64, batchIdx
 func (o *Orchestrator) finishTask(ctx context.Context, taskID int64) error {
 	var failed int
 	_ = o.svc.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM task_hosts WHERE task_id=$1 AND status IN ('failed','timeout')`, taskID).Scan(&failed)
+		`SELECT COUNT(*) FROM task_hosts WHERE task_id=$1 AND status IN ('failed','timeout','canceled')`, taskID).Scan(&failed)
 	status := "success"
 	if failed > 0 {
 		status = "failed"

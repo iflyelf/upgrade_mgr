@@ -211,9 +211,9 @@ func (a *Agent) executeUpgrade(ctx context.Context, cmd protocol.Command) {
 	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
 		protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: protocol.StageMaintenance, ExpectedSeconds: 600}, nil)
 
-	res, err := executor.Execute(ctx, cmd, a.svcMgr, a.authHeader(), func(stage string) {
+	res, err := executor.Execute(ctx, cmd, a.svcMgr, a.authHeader(), func(stage, message string) {
 		_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
-			protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: stage}, nil)
+			protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: stage, Message: message}, nil)
 	})
 
 	report := protocol.ReportRequest{AgentID: a.cfg.AgentID, ToVersion: cmd.Payload.ToVersion}

@@ -29,7 +29,7 @@ type Result struct {
 }
 
 // Execute 执行组件升级流水线
-func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, authHeader string, onStage func(string)) (*Result, error) {
+func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, authHeader string, onStage func(stage, message string)) (*Result, error) {
 	res := &Result{ToVersion: cmd.Payload.ToVersion}
 	comp := cmd.Payload.Component
 	art := cmd.Payload.Artifact
@@ -45,7 +45,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		res.Log += fmt.Sprintf("[%s] %s\n", stage, m)
 		log.Printf("[%s/%s] %s", comp.Name, stage, m)
 		if onStage != nil {
-			onStage(stage)
+			onStage(stage, m)
 		}
 	}
 
@@ -58,7 +58,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		URL: art.URL, Dest: dlPath, MD5: art.MD5, SHA256: art.SHA256,
 		AuthHeader: authHeader, MaxRetries: 3, Timeout: 20 * time.Minute,
 	}); err != nil {
-		logf(protocol.StageDone, "下载失败: %v", err)
+		logf(protocol.StageFailed, "下载失败: %v", err)
 		return res, err
 	}
 	logf(protocol.StageDownloaded, "下载完成，校验和验证通过")
@@ -67,7 +67,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	logf(protocol.StageBackup, "备份当前版本")
 	bak, err := binswap.Backup(comp.InstallPath, comp.BackupDir)
 	if err != nil {
-		logf(protocol.StageDone, "备份失败: %v", err)
+		logf(protocol.StageFailed, "备份失败: %v", err)
 		return res, err
 	}
 	res.BackupPath = bak
@@ -77,7 +77,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	if len(comp.PreInstall) > 0 {
 		logf(protocol.StagePreInstall, "执行 pre_install")
 		if err := runHooks(ctx, comp.PreInstall); err != nil && !comp.IgnoreError {
-			logf(protocol.StageDone, "pre_install 失败: %v", err)
+			logf(protocol.StageFailed, "pre_install 失败: %v", err)
 			return res, err
 		}
 	}
@@ -86,7 +86,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	if comp.ServiceName != "" {
 		logf(protocol.StageStopping, "停止服务 %s", comp.ServiceName)
 		if err := svcMgr.Stop(comp.ServiceName); err != nil && !comp.IgnoreError {
-			logf(protocol.StageDone, "停服失败: %v", err)
+			logf(protocol.StageFailed, "停服失败: %v", err)
 			return res, err
 		}
 	}

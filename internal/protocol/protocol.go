@@ -116,7 +116,10 @@ const (
 	StageVerifying   = "verifying"
 	StagePostInstall = "post_install"
 	StageRollback    = "rollback"
-	StageDone        = "done"
+	// StageFailed 表示执行失败的最终阶段。旧实现错误复用了 StageDone，
+	// 导致界面把“下载失败/停服失败”也显示成“完成”。
+	StageFailed = "failed"
+	StageDone   = "done"
 )
 
 // RegisterRequest Agent 首次注册（携带一次性 enroll token）。
@@ -253,6 +256,9 @@ type PollResponse struct {
 type StageRequest struct {
 	AgentID         string `json:"agent_id"`
 	Stage           string `json:"stage"`
+	// Message 是阶段详情（下载地址、脚本输出、错误原因等）。
+	// 旧 Agent 不发送，服务端只能显示阶段名称；新 Agent 会携带以便任务详情排查。
+	Message         string `json:"message,omitempty"`
 	ExpectedSeconds int    `json:"expected_seconds,omitempty"`
 	WillRestart     bool   `json:"will_restart,omitempty"`
 }

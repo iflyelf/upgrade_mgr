@@ -229,7 +229,7 @@ func AgentCommandStage(s *svc.ServiceContext) http.HandlerFunc {
 			}
 		}
 		// 阶段日志：进入维护窗口也记录，任务详情页能看到完整执行链路。
-		if err := s.AgentGW.UpdateStage(r.Context(), agentID, cmdID, req.Stage); err != nil {
+		if err := s.AgentGW.UpdateStage(r.Context(), agentID, cmdID, req.Stage, req.Message); err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}

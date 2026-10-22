@@ -258,9 +258,7 @@ func (g *Gateway) Ack(ctx context.Context, agentID, cmdID, status, reason string
 
 func truncateReason(s string) string {
 	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
-	if len(s) > 300 {
-		return s[:300] + "..."
-	}
+	s = sanitizeAndTruncate(s, maxReasonBytes)
 	if s == "" {
 		return "未提供原因"
 	}
@@ -298,6 +296,7 @@ var stageLabels = map[string]string{
 	protocol.StageVerifying:   "验证版本",
 	protocol.StagePostInstall: "安装后处理",
 	protocol.StageRollback:    "回滚",
+	protocol.StageFailed:      "失败",
 	protocol.StageDone:        "完成",
 }
 
@@ -311,16 +310,20 @@ func stageLabel(stage string) string {
 	return stage
 }
 
-// UpdateStage 更新主机当前阶段，并把阶段追加到指令与逐机进度日志。
+// UpdateStage 更新主机当前阶段，并把阶段与详情追加到指令与逐机进度日志。
 //
 // 日志用于任务详情页实时展示「执行到哪一步」。只对仍处于非终态的指令追加，
-// 避免心跳/重试在已完成指令上写入噪声。
-func (g *Gateway) UpdateStage(ctx context.Context, agentID, cmdID, stage string) error {
+// 避免心跳/重试在已完成指令上写入噪声。每次阶段上报同时续租，
+// 防止长时间下载/安装被租约回收误判为超时。
+func (g *Gateway) UpdateStage(ctx context.Context, agentID, cmdID, stage, message string) error {
 	tx, err := g.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	stage = normalizeStage(stage)
+	message = sanitizeAndTruncate(message, maxStageMessageBytes)
 
 	var taskHostID sql.NullInt64
 	err = tx.QueryRowContext(ctx, `
@@ -340,32 +343,114 @@ func (g *Gateway) UpdateStage(ctx context.Context, agentID, cmdID, stage string)
 		return err
 	}
 
+	line := fmt.Sprintf("[%s] 阶段: %s", time.Now().Format("2006-01-02 15:04:05"), stageLabel(stage))
+	if message != "" {
+		line += " - " + message
+	}
+	line += "\n"
+
 	// 锁顺序与 Cancel/Report 一致：先 task_hosts，再 commands。
 	// 避免取消事务与阶段上报因加锁顺序相反而互相等待。
 	if taskHostID.Valid {
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE task_hosts SET stage=$2
+			UPDATE task_hosts SET stage=$2, log=COALESCE(log,'')||$3
 			WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','canceled')`,
-			taskHostID.Int64, stage); err != nil {
+			taskHostID.Int64, stage, line); err != nil {
 			return err
 		}
 	}
 
-	line := fmt.Sprintf("[%s] 阶段: %s\n", time.Now().Format("2006-01-02 15:04:05"), stageLabel(stage))
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE commands
 		SET status=CASE WHEN status IN ('pending','dispatched','accepted') THEN 'running' ELSE status END,
-		    started_at=COALESCE(started_at,NOW()), log=log||$3
+		    started_at=COALESCE(started_at,NOW()),
+		    last_stage=$3, last_stage_at=NOW(),
+		    lease_expire_at=CASE WHEN lease_expire_at IS NULL THEN NULL
+		                         ELSE GREATEST(lease_expire_at, NOW() + INTERVAL '30 minutes') END,
+		    log=COALESCE(log,'')||$4
 		WHERE id=$1 AND agent_id=$2
 		  AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
-		cmdID, agentID, line); err != nil {
+		cmdID, agentID, stage, line); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE hosts SET last_stage=$2 WHERE agent_id=$1`, agentID, stage); err != nil {
 		return err
 	}
+
+	// 兜底闭环：新 Agent 的成功/失败终态阶段本身已带明确语义
+	// （成功：executor 在版本校验通过后才发 done + “升级成功”；
+	//  失败：错误路径发 failed），因此在阶段到达时即可落终态。
+	// 最终 report 仍会重试并携带完整日志；这里先保证任务不会永久停在执行中。
+	var finalStatus string
+	switch {
+	case stage == protocol.StageDone && strings.Contains(message, "升级成功"):
+		finalStatus = protocol.CmdSuccess
+	case stage == protocol.StageFailed:
+		finalStatus = protocol.CmdFailed
+	}
+	if finalStatus != "" {
+		note := fmt.Sprintf("[%s] 服务端根据终态阶段自动标记为 %s（最终结果上报会自动覆盖/补充）\n",
+			time.Now().Format("2006-01-02 15:04:05"), finalStatus)
+		toVersion := cmdPayloadVersion(ctx, tx, cmdID)
+		if finalStatus == protocol.CmdSuccess {
+			if v := versionFromSuccessMessage(message); v != "" {
+				toVersion = v
+			}
+		}
+		if taskHostID.Valid {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE task_hosts
+				SET status=$2, stage=$3, to_version=CASE WHEN $4<>'' THEN $4 ELSE to_version END,
+				    finished_at=NOW(), log=COALESCE(log,'')||$5
+				WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','canceled')`,
+				taskHostID.Int64, finalStatus, stage, toVersion, note); err != nil {
+				return err
+			}
+		}
+		result, _ := json.Marshal(map[string]any{
+			"status": finalStatus, "stage": stage, "to_version": toVersion,
+			"auto_finalized": true,
+		})
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE commands
+			SET status=$2, last_stage=$3, last_stage_at=NOW(), finished_at=NOW(),
+			    result=COALESCE(result, $4), log=COALESCE(log,'')||$5
+			WHERE id=$1 AND agent_id=$6
+			  AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
+			cmdID, finalStatus, stage, result, note, agentID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE hosts SET maintenance_until=NULL, maintenance_reason='',
+			       agent_status='online', last_stage=$2
+			WHERE agent_id=$1`, agentID, stage); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// cmdPayloadVersion 读取指令下发时的目标版本（用于自动终态时补 to_version）。
+func cmdPayloadVersion(ctx context.Context, tx *sql.Tx, cmdID string) string {
+	var v string
+	_ = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(payload->>'to_version','') FROM commands WHERE id=$1`, cmdID).Scan(&v)
+	return normalizeVersion(v)
+}
+
+// versionFromSuccessMessage 从「升级成功，当前版本: X」中提取版本号。
+func versionFromSuccessMessage(message string) string {
+	const marker = "当前版本:"
+	idx := strings.LastIndex(message, marker)
+	if idx < 0 {
+		return ""
+	}
+	v := strings.TrimSpace(message[idx+len(marker):])
+	if v == "" || strings.ContainsAny(v, "\r\n") {
+		return ""
+	}
+	return normalizeVersion(v)
 }
 
 // Report 处理结果上报：更新 commands + task_hosts，成功则清除维护窗口。
@@ -395,12 +480,33 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 		return err
 	}
 
+	// 清洗所有会落库的 Agent 文本，尤其是脚本输出中的 NUL / 非法 UTF-8。
+	// 版本号目标列是 VARCHAR(64)，阶段列是 VARCHAR(32)，超长会直接让整个
+	// 事务失败，因此必须截断。
+	req.Stage = normalizeStage(req.Stage)
+	req.ToVersion = normalizeVersion(req.ToVersion)
+	req.FromVersion = normalizeVersion(req.FromVersion)
+	req.Log = sanitizeAndTruncate(req.Log, maxReportLogBytes)
+	req.Status = strings.TrimSpace(req.Status)
+	if req.Status == "" {
+		req.Status = protocol.CmdRunning
+	}
+	if req.Status != protocol.CmdRunning && !isFinalStatus(req.Status) {
+		// 非法状态也按失败落库，避免上报被静默丢弃后任务永久运行。
+		req.Log = appendLog(req.Log, fmt.Sprintf("[%s] Agent 上报了未知状态 %q，按失败处理\n",
+			time.Now().Format("2006-01-02 15:04:05"), req.Status), maxReportLogBytes)
+		req.Status = protocol.CmdFailed
+	}
+
 	final := isFinalStatus(req.Status)
 	// 锁顺序与 Cancel/UpdateStage 一致：先 task_hosts，再 commands。
 	if taskHostID.Valid && final {
 		// 防止覆盖终态：租约回收可能已置为 timeout
 		_, err = tx.ExecContext(ctx, `
-			UPDATE task_hosts SET status=$2, stage=$3, to_version=$4, exit_code=$5, log=$6, finished_at=NOW()
+			UPDATE task_hosts
+			SET status=$2, stage=COALESCE(NULLIF($3,''),stage),
+			    to_version=CASE WHEN $4<>'' THEN $4 ELSE to_version END,
+			    exit_code=$5, log=$6, finished_at=NOW()
 			WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','canceled')`,
 			taskHostID.Int64, req.Status, req.Stage, req.ToVersion, req.ExitCode, req.Log)
 		if err != nil {
@@ -412,14 +518,22 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 		if final {
 			// 防止覆盖终态：租约回收可能已置为 timeout/expired
 			_, err = tx.ExecContext(ctx, `
-				UPDATE commands SET status=$2, result=$3, log=log||$4, finished_at=NOW() 
+				UPDATE commands SET status=$2, result=$3,
+				       last_stage=COALESCE(NULLIF($5,''),last_stage),
+				       last_stage_at=NOW(),
+				       log=COALESCE(log,'')||$4, finished_at=NOW()
 				WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
-				cmdID.Int64, req.Status, result, req.Log)
+				cmdID.Int64, req.Status, result, req.Log, req.Stage)
 		} else {
 			_, err = tx.ExecContext(ctx, `
-				UPDATE commands SET status='running', log=log||$2 
+				UPDATE commands SET status='running',
+				       last_stage=COALESCE(NULLIF($3,''),last_stage),
+				       last_stage_at=NOW(),
+				       lease_expire_at=CASE WHEN lease_expire_at IS NULL THEN NULL
+				                            ELSE GREATEST(lease_expire_at, NOW() + INTERVAL '30 minutes') END,
+				       log=COALESCE(log,'')||$2
 				WHERE id=$1 AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
-				cmdID.Int64, req.Log)
+				cmdID.Int64, req.Log, req.Stage)
 		}
 		if err != nil {
 			return err

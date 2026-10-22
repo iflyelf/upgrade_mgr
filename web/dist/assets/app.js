@@ -123,13 +123,18 @@
     downloading: '下载制品', downloaded: '下载完成', pre_install: '安装前检查',
     backup: '备份当前版本', stopping: '停止服务', replacing: '替换文件',
     exec: '执行安装', starting: '启动服务', verifying: '验证版本',
-    post_install: '安装后处理', rollback: '回滚', done: '完成'
+    post_install: '安装后处理', rollback: '回滚', failed: '失败', done: '完成'
+  };
+  var AGENT_STATUS = {
+    online: '在线', upgrading: '升级中', restarting: '重启中',
+    crash_loop: '崩溃重启', offline: '离线', unknown: '未知'
   };
   function statusText(s) { return TASK_STATUS[s] || s; }
   function hostStatusText(s) { return HOST_STATUS[s] || s || '-'; }
   function cmdStatusText(s) { return CMD_STATUS[s] || s || '-'; }
   function batchStatusText(s) { return BATCH_STATUS[s] || s || '-'; }
   function stageText(s) { return STAGE_TEXT[s] || s || '-'; }
+  function agentStatusText(s) { return AGENT_STATUS[s] || s || '未知'; }
   function fmtTime(v) {
     if (!v) return '-';
     var d = new Date(v);
@@ -565,9 +570,17 @@
         h('td', {}, [x.os_type || x.os_family || '-']), h('td', {}, [x.arch || '-']),
         h('td', {}, [x.biz_group || '-']), h('td', {}, [x.app_code || '-']),
         h('td', {}, [
-          h('span', { class: 'tag' }, [x.agent_status || 'unknown']),
+          h('span', { class: 'tag' }, [agentStatusText(x.agent_status)]),
           agentBuildLine(x),
-          x.agent_update_status ? h('div', { class: 'muted' }, ['自升级：' + cmdStatusText(x.agent_update_status)]) : null
+          x.agent_update_status ? h('div', { class: 'muted' }, [
+            '自升级：' + cmdStatusText(x.agent_update_status) +
+            (x.agent_update_stage ? ' / ' + stageText(x.agent_update_stage) : '') +
+            (x.agent_update_at ? ' · ' + fmtTime(x.agent_update_at) : '')
+          ]) : null,
+          x.agent_update_log ? h('details', { class: 'log-details' }, [
+            h('summary', {}, ['自升级日志']),
+            h('pre', { class: 'code log-pre' }, [x.agent_update_log])
+          ]) : null
         ]),
         h('td', {}, [x.source])
       ];

@@ -37,6 +37,10 @@ type Config struct {
 	// 自升级替换二进制并重启后，新进程会自动使用新值。
 	Version string `json:"-"`
 	Variant string `json:"-"`
+	// PendingReports 是尚未成功送达服务端的最终结果。
+	// 网络抖动、服务端瞬时 5xx 或进程重启时，心跳会继续补报；
+	// 服务端按 cmdID + agentID 幂等落库，因此重复上报是安全的。
+	PendingReports map[string]protocol.ReportRequest `json:"pending_reports,omitempty"`
 }
 
 // Agent 主体
@@ -46,7 +50,15 @@ type Agent struct {
 	svcMgr    svcmgr.Manager
 	client    *http.Client
 	buildHash string // 当前可执行文件 SHA256，用于服务端判断是否需要自升级
+	// executed 记录本进程已执行过的指令 ID，防止至少一次投递导致重复升级。
+	// 只在验签通过、准备执行时写入；进程重启后服务端不会重新投递已派发指令。
+	executed map[string]time.Time
 }
+
+const (
+	maxPendingReports      = 20
+	maxAgentReportLogBytes = 64 * 1024
+)
 
 // New 创建 Agent
 func New(cfg Config) *Agent {
@@ -56,12 +68,16 @@ func New(cfg Config) *Agent {
 		cfg.Version = "0.1.0"
 	}
 	info := osinfo.Detect()
+	if cfg.PendingReports == nil {
+		cfg.PendingReports = map[string]protocol.ReportRequest{}
+	}
 	return &Agent{
 		cfg:       cfg,
 		info:      info,
 		svcMgr:    svcmgr.New(info.Init),
 		client:    &http.Client{Timeout: 60 * time.Second},
 		buildHash: executableSHA256(),
+		executed:  map[string]time.Time{},
 	}
 }
 
@@ -111,6 +127,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		// 直接给出可操作的错误，避免 systemd 无限重启。
 		return fmt.Errorf("Agent 状态文件缺少 token/secret，请删除 %s 后重新执行安装命令", a.cfg.StatePath)
 	}
+
+	// 进程重启后先补报上次未送达的最终结果，避免任务永久停在执行中。
+	a.flushPendingReports()
 
 	// 2. 心跳 ticker
 	heartbeatTicker := time.NewTicker(30 * time.Second)
@@ -172,6 +191,8 @@ func (a *Agent) heartbeat() {
 	if err := a.saveState(); err != nil {
 		log.Printf("⚠️ 保存心跳状态失败: %v", err)
 	}
+	// 心跳是稳定的 30s 周期，用它补报执行结果，避免一次网络抖动导致任务卡死。
+	a.flushPendingReports()
 }
 
 func (a *Agent) poll(ctx context.Context) {
@@ -195,9 +216,17 @@ func (a *Agent) poll(ctx context.Context) {
 		return
 	}
 
+	// 至少一次投递 + 进程内去重：同一指令 ID 只执行一次。
+	// 若上一次执行结果还没送达，心跳会负责补报。
+	if a.wasExecuted(cmd.ID) {
+		log.Printf("忽略重复指令: id=%s（本进程已执行过）", cmd.ID)
+		return
+	}
+
 	// ACK
 	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/ack",
 		protocol.AckRequest{AgentID: a.cfg.AgentID, Status: "accepted"}, nil)
+	a.markExecuted(cmd.ID)
 
 	switch cmd.Type {
 	case protocol.CmdUpgradeComponent, protocol.CmdRollbackComponent:
@@ -216,20 +245,27 @@ func (a *Agent) executeSelfUpdate(ctx context.Context, cmd protocol.Command) {
 	cmd.Payload.Artifact.URL = artifactURL
 
 	log.Printf("执行自升级到版本 %s", cmd.Payload.ToVersion)
-	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
-		protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: protocol.StageMaintenance,
-			ExpectedSeconds: 600, WillRestart: true}, nil)
-	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
-		protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: protocol.StageDownloading}, nil)
+	a.postStage(cmd.ID, protocol.StageRequest{
+		AgentID: a.cfg.AgentID, Stage: protocol.StageMaintenance,
+		Message: "Agent 自升级，进入维护窗口", ExpectedSeconds: 600, WillRestart: true,
+	})
+	a.postStage(cmd.ID, protocol.StageRequest{
+		AgentID: a.cfg.AgentID, Stage: protocol.StageDownloading,
+		Message: "下载 Agent 二进制",
+	})
 
 	binPath, _ := os.Executable()
 	if err := selfupdate.Execute(ctx, cmd, binPath, downloadAuth); err != nil {
 		log.Printf("自升级失败: %v", err)
+		a.postStage(cmd.ID, protocol.StageRequest{
+			AgentID: a.cfg.AgentID, Stage: protocol.StageFailed,
+			Message: fmt.Sprintf("自升级失败: %v", err),
+		})
 		report := protocol.ReportRequest{
-			AgentID: a.cfg.AgentID, Status: protocol.CmdFailed,
-			Log: fmt.Sprintf("自升级失败: %v", err),
+			AgentID: a.cfg.AgentID, Status: protocol.CmdFailed, Stage: protocol.StageFailed,
+			Log: fmt.Sprintf("[%s] 自升级失败: %v\n", time.Now().Format("2006-01-02 15:04:05"), err),
 		}
-		_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/report", report, nil)
+		_ = a.postReportWithRetry(cmd.ID, report)
 	}
 	// 成功则 exit(75) 不会执行到这里
 }
@@ -281,29 +317,179 @@ func (a *Agent) executeUpgrade(ctx context.Context, cmd protocol.Command) {
 	cmd.Payload.Artifact.URL = artifactURL
 
 	// 进入维护窗口（申请租约，避免升级期间被判掉线）
-	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
-		protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: protocol.StageMaintenance, ExpectedSeconds: 600}, nil)
-
-	res, err := executor.Execute(ctx, cmd, a.svcMgr, downloadAuth, func(stage string) {
-		_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/stage",
-			protocol.StageRequest{AgentID: a.cfg.AgentID, Stage: stage}, nil)
+	a.postStage(cmd.ID, protocol.StageRequest{
+		AgentID: a.cfg.AgentID, Stage: protocol.StageMaintenance,
+		Message: "进入维护窗口", ExpectedSeconds: 600,
 	})
 
-	report := protocol.ReportRequest{AgentID: a.cfg.AgentID, ToVersion: cmd.Payload.ToVersion}
+	res, err := executor.Execute(ctx, cmd, a.svcMgr, downloadAuth, func(stage, message string) {
+		// 每个阶段都带详情上报，任务详情页无需等最终结果才能看到失败原因/脚本输出。
+		a.postStage(cmd.ID, protocol.StageRequest{
+			AgentID: a.cfg.AgentID, Stage: stage, Message: message,
+		})
+	})
+
+	report := protocol.ReportRequest{
+		AgentID: a.cfg.AgentID, ToVersion: cmd.Payload.ToVersion,
+	}
 	if res != nil {
 		report.Stage = res.Stage
 		report.Log = res.Log
 		report.ExitCode = res.ExitCode
 		report.ToVersion = res.ToVersion
 	}
-	if err != nil || (res != nil && !res.Success) {
+	if err != nil || res == nil || !res.Success {
 		report.Status = protocol.CmdFailed
-		log.Printf("升级失败: %v", err)
+		// 错误不一定经过 executor 的 logf（例如 install_path 校验直接 return），
+		// 保证最终状态和日志都能说明失败原因，而不是停在 done。
+		report.Stage = protocol.StageFailed
+		if err != nil {
+			report.Log += fmt.Sprintf("[%s] 升级失败: %v\n", time.Now().Format("2006-01-02 15:04:05"), err)
+			log.Printf("升级失败: %v", err)
+		} else {
+			report.Log += fmt.Sprintf("[%s] 升级失败: 执行器未返回成功结果\n", time.Now().Format("2006-01-02 15:04:05"))
+			log.Printf("升级失败: 执行器未返回成功结果")
+		}
 	} else {
 		report.Status = protocol.CmdSuccess
+		report.Stage = protocol.StageDone
 		log.Printf("升级成功: → %s", report.ToVersion)
 	}
-	_ = a.postJSON("/api/agent/commands/"+cmd.ID+"/report", report, nil)
+	_ = a.postReportWithRetry(cmd.ID, report)
+}
+
+// postStage 上报阶段与详情。阶段失败不影响升级执行，但会记录日志便于排查。
+func (a *Agent) postStage(cmdID string, req protocol.StageRequest) {
+	req.AgentID = a.cfg.AgentID
+	req.Message = truncateText(req.Message, 4*1024)
+	if err := a.postJSON("/api/agent/commands/"+cmdID+"/stage", req, nil); err != nil {
+		log.Printf("⚠️ 阶段上报失败 cmd=%s stage=%s: %v", cmdID, req.Stage, err)
+	}
+}
+
+// postReportWithRetry 上报最终结果：先重试，仍失败则写入 state，由心跳继续补报。
+//
+// 服务端按 cmdID + agentID 落库并对终态做幂等保护，重复上报不会把成功改成失败。
+func (a *Agent) postReportWithRetry(cmdID string, report protocol.ReportRequest) error {
+	report.AgentID = a.cfg.AgentID
+	report.Log = truncateText(report.Log, maxAgentReportLogBytes)
+	if a.cfg.PendingReports == nil {
+		a.cfg.PendingReports = map[string]protocol.ReportRequest{}
+	}
+	// 极端情况下服务端长时间不可达，限制本地队列大小，避免 state 无限增长。
+	for len(a.cfg.PendingReports) >= maxPendingReports {
+		dropped := false
+		for id := range a.cfg.PendingReports {
+			if id != cmdID {
+				delete(a.cfg.PendingReports, id)
+				dropped = true
+				break
+			}
+		}
+		if !dropped {
+			break
+		}
+	}
+	a.cfg.PendingReports[cmdID] = report
+	if err := a.saveState(); err != nil {
+		log.Printf("⚠️ 保存待补报结果失败: %v", err)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := a.postJSON("/api/agent/commands/"+cmdID+"/report", report, nil); err == nil {
+			delete(a.cfg.PendingReports, cmdID)
+			_ = a.saveState()
+			return nil
+		} else {
+			lastErr = err
+			log.Printf("⚠️ 结果上报失败 cmd=%s（第 %d 次）: %v", cmdID, attempt+1, err)
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(1<<attempt) * time.Second)
+		}
+	}
+	log.Printf("⚠️ 结果已写入本地待补报队列，心跳将继续重试 cmd=%s", cmdID)
+	return lastErr
+}
+
+// flushPendingReports 补报本地队列中的最终结果；心跳与启动时调用。
+func (a *Agent) flushPendingReports() {
+	if len(a.cfg.PendingReports) == 0 {
+		return
+	}
+	changed := false
+	flushed := 0
+	for cmdID, report := range a.cfg.PendingReports {
+		if flushed >= 5 {
+			break
+		}
+		err := a.postJSON("/api/agent/commands/"+cmdID+"/report", report, nil)
+		if err != nil {
+			// 4xx 通常是服务端已删除指令或请求非法，继续重试没有意义。
+			if strings.Contains(err.Error(), "HTTP 4") {
+				log.Printf("⚠️ 放弃补报 cmd=%s: %v", cmdID, err)
+				delete(a.cfg.PendingReports, cmdID)
+				changed = true
+				continue
+			}
+			log.Printf("⚠️ 补报结果失败 cmd=%s: %v", cmdID, err)
+			break
+		}
+		delete(a.cfg.PendingReports, cmdID)
+		changed = true
+		flushed++
+	}
+	if changed {
+		if err := a.saveState(); err != nil {
+			log.Printf("⚠️ 保存待补报状态失败: %v", err)
+		}
+	}
+}
+
+// wasExecuted 判断本进程是否已执行过指定指令。
+func (a *Agent) wasExecuted(cmdID string) bool {
+	now := time.Now()
+	for id, at := range a.executed {
+		if now.Sub(at) > 24*time.Hour {
+			delete(a.executed, id)
+		}
+	}
+	_, ok := a.executed[cmdID]
+	return ok
+}
+
+// markExecuted 记录已执行指令，避免至少一次投递导致重复升级。
+func (a *Agent) markExecuted(cmdID string) {
+	if a.executed == nil {
+		a.executed = map[string]time.Time{}
+	}
+	a.executed[cmdID] = time.Now()
+	if len(a.executed) > 1000 {
+		// 简单限界：删除最早的一批，避免长期运行无限增长。
+		cutoff := time.Now().Add(-24 * time.Hour)
+		for id, at := range a.executed {
+			if at.Before(cutoff) {
+				delete(a.executed, id)
+			}
+		}
+	}
+}
+
+// truncateText 在 UTF-8 字符边界上截断文本，避免把多字节字符切成乱码。
+func truncateText(s string, maxBytes int) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 {
+		if s[cut]&0xC0 != 0x80 {
+			break
+		}
+		cut--
+	}
+	return s[:cut]
 }
 
 func (a *Agent) postJSON(path string, req, resp any) error {

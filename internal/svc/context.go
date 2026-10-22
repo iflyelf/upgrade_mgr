@@ -77,6 +77,9 @@ func New(c *config.Config) *ServiceContext {
 
 	compRepo := component.NewRepo(db)
 	artRepo := initArtifactRepo(db, &c.Artifact)
+	gw := agentgw.New(db)
+	taskSvc := task.NewService(db, compRepo, artRepo, func() bool { return c.Agent.AllowExecMode })
+	taskSvc.SetReconciler(gw.ReconcileTasks)
 	svc := &ServiceContext{
 		Config:     c,
 		DB:         db,
@@ -84,8 +87,8 @@ func New(c *config.Config) *ServiceContext {
 		Syncer:     synclogic.NewSyncer(db),
 		Component:  compRepo,
 		Artifact:   artRepo,
-		Task:       task.NewService(db, compRepo, artRepo, func() bool { return c.Agent.AllowExecMode }),
-		AgentGW:    agentgw.New(db),
+		Task:       taskSvc,
+		AgentGW:    gw,
 		Metrics:    metrics.NewCollector(db),
 		Maintainer: maintenance.New(db),
 		RBAC:       rbac.NewService(db),

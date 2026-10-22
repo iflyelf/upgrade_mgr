@@ -78,10 +78,10 @@ func TestUpdateStageLogsAndTaskHostStage(t *testing.T) {
 	})
 
 	cmdIDStr := strconv.FormatInt(cmdID, 10)
-	if err := g.UpdateStage(ctx, agentID, cmdIDStr, "downloading"); err != nil {
+	if err := g.UpdateStage(ctx, agentID, cmdIDStr, "downloading", "下载制品"); err != nil {
 		t.Fatalf("阶段上报失败: %v", err)
 	}
-	var cmdStatus, cmdLog, thStage, hostStage string
+	var cmdStatus, cmdLog, thStatus, thStage, hostStage string
 	if err := db.QueryRow(`SELECT status, log FROM commands WHERE id=$1`, cmdID).
 		Scan(&cmdStatus, &cmdLog); err != nil {
 		t.Fatal(err)
@@ -95,19 +95,25 @@ func TestUpdateStageLogsAndTaskHostStage(t *testing.T) {
 		t.Fatalf("阶段未同步到逐机/主机: task_host=%q host=%q", thStage, hostStage)
 	}
 
-	if err := g.UpdateStage(ctx, agentID, cmdIDStr, "done"); err != nil {
+	if err := g.UpdateStage(ctx, agentID, cmdIDStr, "done", "升级成功"); err != nil {
 		t.Fatalf("完成阶段上报失败: %v", err)
 	}
 	db.QueryRow(`SELECT log FROM commands WHERE id=$1`, cmdID).Scan(&cmdLog)
 	if !strings.Contains(cmdLog, "下载制品") || !strings.Contains(cmdLog, "完成") {
 		t.Fatalf("阶段日志应累加: %q", cmdLog)
 	}
+	// 新 Agent 的成功阶段带明确语义：即使最终 report 丢失，也应先落终态。
+	db.QueryRow(`SELECT status FROM commands WHERE id=$1`, cmdID).Scan(&cmdStatus)
+	db.QueryRow(`SELECT status FROM task_hosts WHERE id=$1`, thID).Scan(&thStatus)
+	if cmdStatus != "success" || thStatus != "success" {
+		t.Fatalf("完成阶段应自动落终态: command=%s task_host=%s", cmdStatus, thStatus)
+	}
 
 	// 终态指令不再追加日志，但主机当前阶段仍更新。
 	if _, err := db.Exec(`UPDATE commands SET status='success' WHERE id=$1`, cmdID); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.UpdateStage(ctx, agentID, cmdIDStr, "backup"); err != nil {
+	if err := g.UpdateStage(ctx, agentID, cmdIDStr, "backup", "备份当前版本"); err != nil {
 		t.Fatalf("终态阶段上报失败: %v", err)
 	}
 	var logAfter string

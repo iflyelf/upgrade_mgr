@@ -64,6 +64,9 @@ type Service struct {
 	// allowExecMode 是否允许下发 exec/replace_exec/script 模式（默认 false，安全）。
 	// 用函数在下发时读取，页面修改设置后无需重启即可生效。
 	allowExecMode func() bool
+	// reconcile 在每轮编排前回收超时指令、同步 task_hosts 终态。
+	// 由 svc 注入 agentgw.Gateway.ReconcileTasks；单元测试可不设置。
+	reconcile func(context.Context) (int, error)
 }
 
 // NewService 创建任务服务。allowExecMode 为 nil 时视为禁止。
@@ -72,6 +75,11 @@ func NewService(db *sql.DB, compRepo *component.Repo, artRepo *artifact.Repo, al
 		allowExecMode = func() bool { return false }
 	}
 	return &Service{db: db, compRepo: compRepo, artRepo: artRepo, allowExecMode: allowExecMode}
+}
+
+// SetReconciler 注入指令/逐机状态对账函数（由服务端启动时设置）。
+func (s *Service) SetReconciler(fn func(context.Context) (int, error)) {
+	s.reconcile = fn
 }
 
 // PreviewResult 预览命中主机与分批。

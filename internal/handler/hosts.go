@@ -36,6 +36,8 @@ type Host struct {
 	AgentBuildVariant string     `json:"agent_build_variant"`
 	AgentStatus       string     `json:"agent_status"`
 	AgentUpdateStatus string     `json:"agent_update_status,omitempty"`
+	AgentUpdateStage  string     `json:"agent_update_stage,omitempty"`
+	AgentUpdateLog    string     `json:"agent_update_log,omitempty"`
 	AgentUpdateAt     *time.Time `json:"agent_update_at,omitempty"`
 	Source            string     `json:"source"`
 }
@@ -140,26 +142,29 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 				agentIDs = append(agentIDs, h.AgentID)
 			}
 		}
-		statuses := map[string]struct {
+		type updateInfo struct {
 			Status string
+			Stage  string
+			Log    string
 			At     time.Time
-		}{}
+		}
+		statuses := map[string]updateInfo{}
 		if len(agentIDs) > 0 {
 			srows, err := s.DB.QueryContext(r.Context(), `
-				SELECT DISTINCT ON (agent_id) agent_id, status, created_at
+				SELECT DISTINCT ON (agent_id) agent_id, status,
+				       COALESCE(last_stage,''),
+				       left(COALESCE(log,''), 4096),
+				       COALESCE(finished_at, last_stage_at, created_at)
 				FROM commands
 				WHERE agent_id = ANY($1) AND type='self_update'
 				ORDER BY agent_id, id DESC`, pq.Array(agentIDs))
 			if err == nil {
 				defer srows.Close()
 				for srows.Next() {
-					var id, st string
-					var at time.Time
-					if err := srows.Scan(&id, &st, &at); err == nil {
-						statuses[id] = struct {
-							Status string
-							At     time.Time
-						}{Status: st, At: at}
+					var id string
+					var info updateInfo
+					if err := srows.Scan(&id, &info.Status, &info.Stage, &info.Log, &info.At); err == nil {
+						statuses[id] = info
 					}
 				}
 				// 自升级状态属于附加信息，查询失败不影响主机列表返回。
@@ -170,6 +175,8 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			if v, ok := statuses[list[idx].AgentID]; ok {
 				at := v.At
 				list[idx].AgentUpdateStatus = v.Status
+				list[idx].AgentUpdateStage = v.Stage
+				list[idx].AgentUpdateLog = v.Log
 				list[idx].AgentUpdateAt = &at
 			}
 		}
