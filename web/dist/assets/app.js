@@ -1688,9 +1688,10 @@
         if (comp) break;
       }
       if (!comp) {
-        alert('请先到“组件”页点“填入示例：只执行命令（' +
-          (action === 'install' ? '安装' : action === 'update' ? '更新' : '卸载') +
-          '）”并保存');
+        alert('请先到“组件”页点“填入示例：' +
+          (action === 'install' ? '只执行命令（安装）或 node_exporter_script（脚本安装）'
+            : action === 'update' ? '只执行命令（更新）' : '只执行命令（卸载）') +
+          '”并保存');
         return;
       }
       f.kind = 'upgrade';
