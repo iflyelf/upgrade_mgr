@@ -118,7 +118,12 @@ button.btn.danger {
 }
 button.btn.danger:hover { background: color-mix(in srgb, var(--err-color) 10%, transparent); }
 button.btn.small { padding: 4px 8px; font-size: 12px; }
+button.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.pager {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color);
+}
 .row-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }

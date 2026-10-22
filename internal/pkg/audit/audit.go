@@ -39,7 +39,7 @@ func (l *Logger) Log(ctx context.Context, event Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
-	
+
 	status := "success"
 	if !event.Success {
 		status = "failed"
@@ -98,6 +98,8 @@ const (
 	ActionComponentCreate = "component.create"
 	ActionComponentUpdate = "component.update"
 	ActionComponentDelete = "component.delete"
+	ActionHostUpdate      = "host.update"
+	ActionHostDelete      = "host.delete"
 	ActionTaskStart       = "task.start"
 	ActionTaskPause       = "task.pause"
 	ActionTaskPromote     = "task.promote"

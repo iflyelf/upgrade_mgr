@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -87,6 +88,41 @@ func TestServerIntegration(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("hosts json: %v (%s)", err, body)
+	}
+
+	// 主机编辑/删除路由（含中间件与租户作用域）
+	testIP := "route-test-host"
+	sc.DB.Exec(`DELETE FROM agents WHERE ip=$1`, testIP)
+	sc.DB.Exec(`DELETE FROM hosts WHERE ip=$1`, testIP)
+	var hostID int64
+	if err := sc.DB.QueryRow(`
+		INSERT INTO hosts (ip, hostname, tenant_id, source)
+		VALUES ($1, 'route-orig', 1, 'manual') RETURNING id`, testIP).Scan(&hostID); err != nil {
+		t.Fatalf("插入路由测试主机失败: %v", err)
+	}
+	defer sc.DB.Exec(`DELETE FROM agents WHERE ip=$1`, testIP)
+	defer sc.DB.Exec(`DELETE FROM hosts WHERE id=$1`, hostID)
+
+	hostURL := ts.URL + "/api/hosts/" + strconv.FormatInt(hostID, 10)
+	doJSON(t, client, http.MethodPut, hostURL, map[string]any{
+		"hostname": "route-updated", "app_code": "ROUTE",
+	}, nil)
+	var hostname, appCode string
+	if err := sc.DB.QueryRow(`SELECT hostname, app_code FROM hosts WHERE id=$1`, hostID).
+		Scan(&hostname, &appCode); err != nil {
+		t.Fatalf("读取更新后的主机失败: %v", err)
+	}
+	if hostname != "route-updated" || appCode != "ROUTE" {
+		t.Fatalf("主机更新未生效: hostname=%q app_code=%q", hostname, appCode)
+	}
+
+	doJSON(t, client, http.MethodDelete, hostURL, nil, nil)
+	var hostCnt int
+	if err := sc.DB.QueryRow(`SELECT COUNT(1) FROM hosts WHERE id=$1`, hostID).Scan(&hostCnt); err != nil {
+		t.Fatal(err)
+	}
+	if hostCnt != 0 {
+		t.Fatal("DELETE /api/hosts/{id} 未删除主机")
 	}
 
 	// settings（管理员）

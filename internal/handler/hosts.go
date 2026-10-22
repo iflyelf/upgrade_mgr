@@ -72,7 +72,10 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 		if size > 500 {
 			size = 500
 		}
-		offset := (page - 1) * size
+		// 防止 page 极大时 (page-1)*size 溢出；count 之后再按实际总页数夹紧。
+		if page > 10_000_000 {
+			page = 10_000_000
+		}
 
 		var total int
 		if err := s.DB.QueryRowContext(r.Context(),
@@ -80,6 +83,15 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}
+		pages := (total + size - 1) / size
+		if pages < 1 {
+			pages = 1
+		}
+		if page > pages {
+			// 删除最后一页数据或用户直接改 URL 时，落到最后一页而不是返回空列表。
+			page = pages
+		}
+		offset := (page - 1) * size
 
 		listArgs := append(append([]any{}, args...), size, offset)
 		rows, err := s.DB.QueryContext(r.Context(),
@@ -104,7 +116,9 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			}
 			list = append(list, h)
 		}
-		httpx.OK(w, map[string]any{"total": total, "list": list, "page": page, "size": size})
+		httpx.OK(w, map[string]any{
+			"total": total, "list": list, "page": page, "size": size, "pages": pages,
+		})
 	}
 }
 

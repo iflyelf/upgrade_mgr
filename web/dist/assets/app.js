@@ -30,6 +30,7 @@
   }
 
   var state = { user: null, view: 'hosts', hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
+    hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
     guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '' };
 
   function h(tag, attrs, children) {
@@ -501,29 +502,181 @@
 
   function hostsView() {
     var qEl;
+    var doSearch = function () {
+      state.q = qEl.value;
+      state.hostPage = 1;
+      loadHosts();
+    };
     var toolbar = h('div', { class: 'toolbar' }, [
       (qEl = h('input', { value: state.q, placeholder: 'IP/主机名/业务组' }, [])),
-      h('button', { class: 'btn', onclick: function () { state.q = qEl.value; loadHosts(); } }, ['搜索']),
-      h('button', { class: 'btn', onclick: syncHosts }, ['同步 Consul']),
-      h('span', { class: 'muted' }, ['共 ' + state.total + ' 台'])
+      h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
+      state.q ? h('button', { class: 'btn ghost', onclick: function () { state.q = ''; state.hostPage = 1; loadHosts(); } }, ['清除']) : null,
+      h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']),
+      state.hostsLoading ? h('span', { class: 'muted' }, ['加载中…']) : null
     ]);
-    var head = h('tr', {}, ['IP', '主机名', 'OS', 'ARCH', '业务组', 'app_code', 'Agent', '来源'].map(function (t) { return h('th', {}, [t]); }));
+    qEl.onkeydown = function (ev) { if (ev.key === 'Enter') doSearch(); };
+
+    var cols = ['IP', '主机名', 'OS', 'ARCH', '业务组', 'app_code', 'Agent', '来源'];
+    if (isAdmin()) cols.push('操作');
+    var head = h('tr', {}, cols.map(function (t) { return h('th', {}, [t]); }));
     var rows = state.hosts.map(function (x) {
-      return h('tr', {}, [
+      var cells = [
         h('td', {}, [x.ip]), h('td', {}, [x.hostname || '-']),
         h('td', {}, [x.os_type || x.os_family || '-']), h('td', {}, [x.arch || '-']),
         h('td', {}, [x.biz_group || '-']), h('td', {}, [x.app_code || '-']),
         h('td', {}, [h('span', { class: 'tag' }, [x.agent_status || 'unknown'])]),
         h('td', {}, [x.source])
-      ]);
+      ];
+      if (isAdmin()) {
+        cells.push(h('td', {}, [h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              state.editingHost = Object.assign({}, x);
+              state.hostErr = '';
+              render();
+            }
+          }, ['编辑']),
+          h('button', {
+            class: 'btn danger small', onclick: function () { deleteHost(x); }
+          }, ['删除'])
+        ])]));
+      }
+      return h('tr', {}, cells);
     });
-    var empty = state.hosts.length === 0
-      ? h('div', { class: 'muted empty' }, ['还没有主机。在上方“接入主机”生成命令，到目标机器上用 root 执行即可。'])
+    var empty = !state.hostsLoading && !state.hostErr && state.hosts.length === 0
+      ? h('div', { class: 'muted empty' }, [
+        state.q ? '没有匹配的主机。' : '还没有主机。在上方“接入主机”生成命令，到目标机器上用 root 执行即可。'
+      ])
       : null;
     return h('div', {}, [
       isAdmin() ? enrollCard() : null,
-      h('div', { class: 'card' }, [toolbar, h('div', { class: 'table-wrap' }, [h('table', {}, [h('thead', {}, [head]), h('tbody', {}, rows)])]), empty])
+      state.hostErr ? h('div', { class: 'card' }, [h('div', { class: 'err', role: 'alert' }, [state.hostErr])]) : null,
+      isAdmin() ? hostForm() : null,
+      h('div', { class: 'card' }, [
+        toolbar,
+        h('div', { class: 'table-wrap' }, [h('table', {}, [h('thead', {}, [head]), h('tbody', {}, rows)])]),
+        empty,
+        state.total > 0 ? hostsPager() : null
+      ])
     ]);
+  }
+
+  // hostsPager 服务端分页控件：主机可能达到几万台，页面只按当前页拉取。
+  function hostsPager() {
+    var pages = state.hostPages || 1;
+    var jumpEl = h('input', {
+      type: 'number', min: '1', max: String(pages), value: String(state.hostPage),
+      style: 'width:76px', 'aria-label': '跳转页码'
+    }, []);
+    var doJump = function () {
+      var p = parseInt(jumpEl.value, 10);
+      if (!p || p < 1) p = 1;
+      if (p > pages) p = pages;
+      loadHosts(p);
+    };
+    jumpEl.onkeydown = function (ev) { if (ev.key === 'Enter') doJump(); };
+    var sizeEl = h('select', {
+      value: String(state.hostSize), 'aria-label': '每页条数'
+    }, [20, 50, 100, 200, 500].map(function (n) {
+      return h('option', { value: String(n) }, [n + ' 条/页']);
+    }));
+    sizeEl.onchange = function () {
+      state.hostSize = parseInt(sizeEl.value, 10) || 50;
+      state.hostPage = 1;
+      loadHosts();
+    };
+    return h('div', { class: 'pager' }, [
+      h('span', { class: 'muted' }, ['第 ' + state.hostPage + ' / ' + pages + ' 页 · 共 ' + state.total + ' 台']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.hostPage <= 1 ? '' : null,
+        onclick: function () { loadHosts(state.hostPage - 1); }
+      }, ['上一页']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.hostPage >= pages ? '' : null,
+        onclick: function () { loadHosts(state.hostPage + 1); }
+      }, ['下一页']),
+      h('span', { class: 'muted' }, ['跳至']), jumpEl,
+      h('button', { class: 'btn ghost small', onclick: doJump }, ['跳转']),
+      h('span', { class: 'spacer' }, []),
+      sizeEl
+    ]);
+  }
+
+  // hostForm 编辑主机可人工维护字段；IP/OS/ARCH/Agent 状态保持 Agent 上报值。
+  function hostForm() {
+    var host = state.editingHost;
+    if (!host) return null;
+    var nameEl = h('input', { value: host.hostname || '' }, []);
+    var accountEl = h('input', { value: host.account || '' }, []);
+    var appCodeEl = h('input', { value: host.app_code || '' }, []);
+    var bizEl = h('input', { value: host.biz_group || '' }, []);
+    var deptEl = h('input', { value: host.department || '' }, []);
+    var vendorEl = h('input', { value: host.vendor || '' }, []);
+    var typeEl = h('input', { value: host.host_type || '' }, []);
+
+    var save = function () {
+      var payload = {
+        hostname: nameEl.value,
+        account: accountEl.value,
+        app_code: appCodeEl.value,
+        biz_group: bizEl.value,
+        department: deptEl.value,
+        vendor: vendorEl.value,
+        host_type: typeEl.value
+      };
+      api('/api/hosts/' + host.id, { method: 'PUT', body: JSON.stringify(payload) })
+        .then(function () {
+          state.editingHost = null;
+          state.hostErr = '';
+          loadHosts();
+        })
+        .catch(function (e) { state.hostErr = '保存失败: ' + e.message; render(); });
+    };
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['编辑主机 ' + host.ip]),
+      hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。'),
+      h('div', { class: 'grid2' }, [
+        field('主机名 (hostname)', nameEl),
+        field('账号 (account)', accountEl)
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('app_code', appCodeEl),
+        field('业务组 (biz_group)', bizEl)
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('部门 (department)', deptEl),
+        field('厂商 (vendor)', vendorEl)
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('主机类型 (host_type)', typeEl),
+        h('div', {}, [])
+      ]),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', onclick: save }, ['保存']),
+        h('button', {
+          class: 'btn ghost', onclick: function () {
+            state.editingHost = null;
+            state.hostErr = '';
+            render();
+          }
+        }, ['取消'])
+      ])
+    ]);
+  }
+
+  function deleteHost(host) {
+    var msg = '确定删除主机 ' + host.ip + ' 吗？\n\n' +
+      '删除后将级联删除该主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n' +
+      '如果主机存在未完成任务或指令，删除会被拒绝。';
+    if (!confirm(msg)) return;
+    api('/api/hosts/' + host.id, { method: 'DELETE' })
+      .then(function () {
+        state.hostErr = '';
+        if (state.hosts.length === 1 && state.hostPage > 1) state.hostPage--;
+        loadHosts();
+      })
+      .catch(function (e) { state.hostErr = '删除失败: ' + e.message; render(); });
   }
 
   var AGENT_ARCHES = [
@@ -1209,11 +1362,35 @@
     app.appendChild(h('div', { class: 'container' }, [tabs(), body]));
   }
 
-  function loadHosts() {
+  var hostsReqSeq = 0;
+  function loadHosts(page) {
     state.view = 'hosts';
-    api('/api/hosts?q=' + encodeURIComponent(state.q) + '&size=100')
-      .then(function (d) { state.hosts = d.list || []; state.total = d.total || 0; render(); })
-      .catch(function (e) { state.err = e.message; state.hosts = []; render(); });
+    if (page != null) {
+      var p = parseInt(page, 10);
+      if (p > 0) state.hostPage = p;
+    }
+    state.hostsLoading = true;
+    var seq = ++hostsReqSeq;
+    api('/api/hosts?q=' + encodeURIComponent(state.q) +
+        '&page=' + state.hostPage + '&size=' + state.hostSize)
+      .then(function (d) {
+        // 快速翻页/搜索时只接受最后一次请求，避免慢响应覆盖新结果。
+        if (seq !== hostsReqSeq) return;
+        state.hosts = d.list || [];
+        state.total = d.total || 0;
+        state.hostPage = d.page || 1;
+        state.hostSize = d.size || state.hostSize;
+        state.hostPages = d.pages || Math.max(1, Math.ceil(state.total / state.hostSize));
+        state.hostsLoading = false;
+        state.hostErr = '';
+        render();
+      })
+      .catch(function (e) {
+        if (seq !== hostsReqSeq) return;
+        state.hostsLoading = false;
+        state.hostErr = '加载主机失败: ' + e.message;
+        render();
+      });
   }
   function loadSettings() {
     api('/api/settings').then(function (d) { state.settings = d || []; render(); }).catch(function (e) { alert(e.message); });

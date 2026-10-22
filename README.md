@@ -32,6 +32,7 @@
 - **Consul Meta 回写**：升级成功后回写服务实例 Meta（`upgraded_version`），供 consul_mgr 展示最新版本
 - **enroll-token 生成**：管理员生成一次性注册令牌 + 一键安装命令（`GET /api/agent/enroll-token`）
 - **主机升级历史**：`GET /api/hosts/{ip}/upgrade-history`，展示逐机升级记录
+- **主机管理**：服务端分页（几万台主机不一次性加载）、编辑业务字段、删除主机（未完成任务保护 + Agent 凭据撤销）
 
 **P5 企业级增强**
 - **Prometheus 指标**：`/metrics` 端点暴露关键指标（Agent 在线数/心跳延迟/任务进度/失败率/指令执行时间），支持 Grafana 监控大盘
@@ -815,10 +816,31 @@ GET /api/agent/enroll-token           # 生成注册令牌（管理员）
 ### 主机管理
 
 ```http
-GET /api/hosts                         # 列出主机
-GET /api/hosts/{ip}/upgrade-history    # 主机升级历史
-POST /api/hosts/sync                   # 从 Consul 同步主机
+GET /api/hosts?page=1&size=50           # 分页列出主机（size 最大 500，返回 total/pages）
+PUT /api/hosts/{id}                     # 编辑主机业务字段（管理员）
+DELETE /api/hosts/{id}                  # 删除主机（管理员）
+GET /api/hosts/{ip}/upgrade-history     # 主机升级历史
+POST /api/hosts/sync                    # 从 Consul 同步主机
 ```
+
+**主机编辑**
+
+- 可维护字段：`hostname`、`account`、`app_code`、`biz_group`、`department`、`vendor`、`host_type`。
+- 未提交的字段保持原值，传空字符串表示清空。
+- `ip`、`os_family`、`arch`、`agent_status` 等由 Agent 上报，不允许页面修改。
+- Agent 重新注册会覆盖 `hostname`；Consul 同步返回非空业务字段时会覆盖对应字段。
+
+**主机删除**
+
+- 存在 `pending` / `running` 的任务或指令时返回 `409`，避免编排中的主机被抽走。
+- 删除主机会级联删除 `task_hosts`、`commands` 历史，并删除关联 `agents` 记录以撤销 Agent 凭据。
+- 编辑/删除均带租户隔离；`superadmin` 可跨租户操作。
+
+**几万台主机的分页**
+
+- 列表由后端分页，页面默认 50 条/页，可选 20/50/100/200/500，支持页码跳转。
+- 后端按 `tenant_id + ip`、`tenant_id + app_code` 等复合索引（迁移 010）排序/过滤。
+- 关键字搜索使用 `ILIKE '%kw%'`，会扫描当前租户的数据；几万台规模可用，达到百万级建议引入 `pg_trgm` 或外部检索。
 
 ---
 
@@ -1053,6 +1075,14 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
+
+### 2026-10-22 主机管理：分页、编辑、删除
+
+- 主机列表改为服务端分页（默认 50 条/页，可选 20/50/100/200/500），支持页码跳转；后端返回 `total/pages`，页码越界自动落到最后一页。
+- 新增 `PUT /api/hosts/{id}`：管理员可维护 `hostname/account/app_code/biz_group/department/vendor/host_type`；IP/OS/ARCH/Agent 状态仍由 Agent 上报。
+- 新增 `DELETE /api/hosts/{id}`：存在未完成任务/指令时返回 `409`；否则删除主机、级联清理 `task_hosts/commands`，并撤销关联 Agent 凭据。
+- 编辑/删除均走租户作用域，只能操作本租户主机；`superadmin` 可跨租户。
+- 迁移 010 增加 `(tenant_id, ip)` 等复合索引，优化几万台主机的分页排序与常用过滤。
 
 ### 2026-10-21 修复：Agent 注册 401 与空 state
 
