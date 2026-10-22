@@ -591,7 +591,7 @@
       ]),
       step('2', '组件 定义装什么、装到哪', 'components', [
         '组件示例提供「只执行命令」三种动作，与「任务」页的示例按钮一一对应：安装（exec_args=["install"]）、更新（["update"]，备份旧二进制并在启动失败时自动回滚）、卸载（["uninstall","-y"]，跳过交互确认）。三者都只需 script_url + 一个动作参数，Agent 下载 install.sh 后按参数执行，不再需要把整段 shell 写进 exec_args。',
-        '任务页在组件升级模式下也提供「填入示例：安装组件 / 更新组件 / 卸载组件」，会选中对应组件；动作由组件自身配置决定。',
+        '任务页在组件模式下也提供「填入示例：安装组件 / 更新组件 / 卸载组件」，会选中对应组件；动作由组件自身配置决定。',
         '卸载示例不带服务名、health_cmd、version_cmd：exec 模式没有 stdin，因此传 -y；卸载后服务已不存在，保留健康检查会让任务必然失败。',
         '脚本模式同样提供「脚本安装 / 脚本更新 / 脚本卸载」三个示例：都只填 script_url，用 exec_args 区分动作（install / update / uninstall -y）。脚本更新会备份旧二进制并在启动失败时自动回滚；脚本卸载不带服务名与 health/version 检查，避免卸载后平台又去启服或做健康检查。',
         '点“填入示例：脚本安装”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
@@ -624,7 +624,7 @@
         '# 备用流程：删除 script_url 后，在制品页上传 install.sh（版本 latest，架构 all）'
       ].join('\n'))),
       step('4', '任务 选择主机并执行', 'tasks', [
-        '组件升级模式：点“填入示例：安装组件 / 更新组件 / 卸载组件”可直接选中对应示例组件，动作由组件的 script_url + exec_args 决定。',
+        '组件模式：点“填入示例：安装组件 / 更新组件 / 卸载组件”可直接选中对应示例组件，动作由组件的 script_url + exec_args 决定。',
         '组件选 node_exporter_cmd（安装）、node_exporter_update（更新）或 node_exporter_uninstall（卸载），版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
         '先点“预览”确认命中的主机数和分批，再点“创建任务”，最后在列表里点“启动”。',
         '想先装一台观察：策略选“金丝雀”、首批 1 台并取消“自动推进”，首批成功后任务暂停，确认无误再点“推进”。',
@@ -1456,7 +1456,7 @@
 
     modal.appendChild(h('div', { class: 'detail-summary' }, [
       h('div', { class: 'detail-stat' }, ['状态: ', h('span', { class: 'tag status-' + d.status }, [statusText(d.status)])]),
-      h('div', { class: 'detail-stat' }, ['类型: ', d.kind === 'command' ? '执行命令/脚本' : '组件升级']),
+      h('div', { class: 'detail-stat' }, ['类型: ', d.kind === 'command' ? '执行命令/脚本' : '组件']),
       d.kind === 'command' ? null : h('div', { class: 'detail-stat' }, ['组件: ', d.component_display_name || d.component_name || ('#' + d.component_id)]),
       h('div', { class: 'detail-stat' }, ['目标版本: ', d.version || '-']),
       h('div', { class: 'detail-stat' }, ['进度: ', done + ' / ' + total + '（' + percent + '%）']),
@@ -1622,7 +1622,7 @@
     }));
 
     var nameEl = h('input', {
-      value: f.name, placeholder: '如 node_exporter 升级示例',
+      value: f.name, placeholder: '如 node_exporter 组件示例',
       oninput: function () { f.name = nameEl.value; }
     }, []);
     var ipEl = h('input', {
@@ -1642,7 +1642,7 @@
       value: f.kind,
       onchange: function () { f.kind = kindEl.value; state.preview = null; render(); }
     }, [
-      h('option', { value: 'upgrade' }, ['组件升级（upgrade）']),
+      h('option', { value: 'upgrade' }, ['组件（upgrade）']),
       h('option', { value: 'command' }, ['执行命令/脚本（command）'])
     ]);
     var scriptEl = h('textarea', {
@@ -1689,7 +1689,7 @@
         kind: f.kind,
         name: f.name.trim() || (f.kind === 'command'
           ? ('执行命令 ' + (new Date()).toLocaleString())
-          : ('升级 ' + (compMap[f.component_id] ? compMap[f.component_id].name : '组件') + ' ' + f.version)),
+          : ('组件 ' + (compMap[f.component_id] ? compMap[f.component_id].name : '组件') + ' ' + f.version)),
         selector: { ip_expr: f.ip_expr.trim() },
         strategy: {
           mode: f.mode,
@@ -1876,7 +1876,7 @@
     var form = h('div', { class: 'card' }, [
       h('h3', {}, ['创建任务']),
       state.err ? h('div', { class: 'err field', role: 'alert' }, [state.err]) : null,
-      field('任务类型', kindEl, '组件升级走 script_url/制品与健康检查流程；执行命令/脚本用于卸载、清理等一次性操作。'),
+      field('任务类型', kindEl, '组件任务走 script_url/制品与健康检查流程（安装/更新/卸载由组件的 exec_args 决定）；执行命令/脚本用于卸载、清理等一次性操作。'),
       h('div', { class: 'grid2' }, [
         field('任务名', nameEl, '留空会自动生成。'),
         f.kind === 'command'
@@ -1947,7 +1947,7 @@
       }
     }, [
       h('option', { value: '' }, ['全部类型']),
-      h('option', { value: 'upgrade' }, ['组件升级']),
+      h('option', { value: 'upgrade' }, ['组件']),
       h('option', { value: 'command' }, ['执行命令'])
     ]);
 
@@ -1978,7 +1978,7 @@
           var pct = x.total ? Math.round(x.success * 100 / x.total) : 0;
           var isCmd = x.kind === 'command';
           return [x.id,
-            isCmd ? '命令' : '升级',
+            isCmd ? '命令' : '组件',
             h('a', {
               href: '#', class: 'link',
               onclick: function (e) { e.preventDefault(); openTaskDetail(x.id); }
@@ -2002,7 +2002,7 @@
 
     return h('div', {}, [
       isAdmin() ? form : h('div', { class: 'card' }, [
-        h('h3', {}, ['创建升级任务']),
+        h('h3', {}, ['创建任务']),
         hint('当前账号不是管理员，只能查看任务列表；创建、启动、暂停等操作需要管理员权限。')
       ]),
       list
