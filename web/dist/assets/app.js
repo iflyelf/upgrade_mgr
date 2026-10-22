@@ -413,7 +413,7 @@
     {
       key: 'node_exporter_exec',
       label: '只执行命令（exec，无需制品：安装/更新 node_exporter）',
-      desc: '演示“只执行命令”模式：不下载制品、不替换二进制，直接以 /bin/bash -c 运行一条命令。示例调用本仓库 install.sh 的 install 动作，脚本会自行下载二进制并注册服务；把命令末尾的 install 改成 update 即可完成升级，改成 uninstall -y 即可卸载。Agent 只负责执行命令并回收输出，服务启停与回滚由脚本自行处理（本示例不填服务名，避免平台重复启停）。命令数组在 Agent 侧直接 exec，不经过 sh；需要 shell 特性时显式使用 bash -c。',
+      desc: '演示“只执行命令”模式：不下载制品、不替换二进制，直接以 /bin/bash -c 运行一条命令。示例调用本仓库 install.sh 的 install 动作，脚本会自行下载二进制并注册服务；把命令末尾的 install 改成 update 即可完成升级，改成 status 可查看状态。Agent 只负责执行命令并回收输出，服务启停与回滚由脚本自行处理（本示例不填服务名，避免平台重复启停）。命令数组在 Agent 侧直接 exec，不经过 sh；需要 shell 特性时显式使用 bash -c。注意：若要改成 uninstall -y 卸载，请同时删除高级 JSON 里的 health_cmd / version_cmd，否则卸载后健康检查必然失败，任务会被标记为失败。',
       comp: {
         name: 'node_exporter_cmd', display_name: 'Node Exporter（只执行命令）',
         deploy_mode: 'exec',
@@ -496,7 +496,7 @@
         '“同步 Consul”也能导入主机，但没装 Agent 的主机在任务下发时会被跳过。'
       ]),
       step('2', '组件 定义装什么、装到哪', 'components', [
-        '点“新建组件”，再点“填入示例：只执行命令”：部署模式 exec，不依赖制品，直接运行 /bin/bash -c 调用 install.sh 的 install 动作；把命令里的 install 改成 update 即升级、改成 uninstall -y 即卸载。适合只执行命令、不需要平台备份/替换二进制的场景。',
+        '点“新建组件”，再点“填入示例：只执行命令”：部署模式 exec，不依赖制品，直接运行 /bin/bash -c 调用 install.sh 的 install 动作；把命令里的 install 改成 update 即升级、改成 status 即查看状态。适合只执行命令、不需要平台备份/替换二进制的场景。若改成 uninstall -y 卸载，记得同时删除高级 JSON 中的 health_cmd / version_cmd，否则卸载后健康检查必然失败。',
         '点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
         '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
         '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',

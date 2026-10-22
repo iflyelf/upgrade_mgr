@@ -655,9 +655,12 @@ Agent 会在 `post_install` 命令之后把脚本写入
 | 版本确认 | `/opt/monitor/exporter/node_exporter --version` |
 
 纯 `exec` 模式不会下载制品、不会备份/替换二进制，也不会执行平台回滚；Agent 只负责
-运行命令并回收输出。把命令末尾的 `install` 换成 `update` 即升级，换成
-`uninstall -y` 即卸载，换成 `status` 即查看状态。需要平台侧备份与自动回滚时，改用
-`replace` / `replace_exec` 模式，或使用上面的 `script` 模式让脚本自行处理。
+运行命令并回收输出。把命令末尾的 `install` 换成 `update` 即升级，换成 `status` 即查看
+状态。需要平台侧备份与自动回滚时，改用 `replace` / `replace_exec` 模式，或使用上面的
+`script` 模式让脚本自行处理。
+
+> 若要改成 `uninstall -y` 卸载，请同时删除示例中的 `health_cmd` / `version_cmd`，
+> 否则卸载后健康检查必然失败，任务会被标记为失败。
 
 > 注意：`exec_args` 直接由 Agent `exec`，不经过 shell；需要管道、重定向、进程替换时
 > 必须显式使用 `/bin/bash -c "..."`。该模式同样受 `agent.allow_exec_mode` 控制。
