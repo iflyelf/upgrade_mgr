@@ -81,16 +81,17 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) register() error {
 	hostname, _ := os.Hostname()
 	req := protocol.RegisterRequest{
-		EnrollToken:  a.cfg.EnrollToken,
-		Hostname:     hostname,
-		IP:           a.getLocalIP(),
-		OS:           a.info.OSFamily,
-		OSVersion:    a.info.OSVersion,
-		Arch:         a.info.Arch,
-		Kernel:       a.info.Kernel,
-		Supervisor:   a.info.Init,
-		AgentVersion: "0.1.0",
-		Components:   map[string]string{},
+		EnrollToken:    a.cfg.EnrollToken,
+		Hostname:       hostname,
+		IP:             a.getLocalIP(),
+		OS:             a.info.OSFamily,
+		OSVersion:      a.info.OSVersion,
+		Arch:           a.info.Arch,
+		Kernel:         a.info.Kernel,
+		Supervisor:     a.info.Init,
+		AgentVersion:   "0.1.0",
+		Components:     map[string]string{},
+		SignatureModes: protocol.SupportedSignatureModes(),
 	}
 	var resp protocol.RegisterResponse
 	if err := a.postJSON("/api/agent/register", req, &resp); err != nil {
@@ -104,9 +105,10 @@ func (a *Agent) register() error {
 
 func (a *Agent) heartbeat() {
 	req := protocol.HeartbeatRequest{
-		AgentID: a.cfg.AgentID,
-		Busy:    false,
-		Status:  "online",
+		AgentID:        a.cfg.AgentID,
+		Busy:           false,
+		Status:         "online",
+		SignatureModes: protocol.SupportedSignatureModes(),
 	}
 	_ = a.postJSON("/api/agent/heartbeat", req, nil)
 	a.cfg.LastHeartbeat = time.Now()

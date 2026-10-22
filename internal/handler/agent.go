@@ -53,10 +53,17 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		token := randHex(32)
 		secret := randHex(32)
 
+		// 未上报签名能力的旧 Agent 默认 id，保持“服务端升级不要求重装 Agent”。
+		signatureModes := protocol.NormalizeSignatureModes(req.SignatureModes)
+		if len(signatureModes) == 0 {
+			signatureModes = []string{protocol.SignatureModeID}
+		}
+
 		// 安全：token 仅存哈希（SHA-256，token 为 256bit 随机，抗爆破）；明文只回给 Agent 一次。
-		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO agents (agent_id, ip, token_hash, secret, arch, os, agent_version, supervisor, status, last_heartbeat_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'online',NOW())`,
-			agentID, ip, agentgw.HashToken(token), secret, req.Arch, req.OS, req.AgentVersion, req.Supervisor)
+		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO agents (agent_id, ip, token_hash, secret, arch, os, agent_version, supervisor, signature_modes, status, last_heartbeat_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'online',NOW())`,
+			agentID, ip, agentgw.HashToken(token), secret, req.Arch, req.OS, req.AgentVersion, req.Supervisor,
+			strings.Join(signatureModes, ","))
 		if err != nil {
 			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
@@ -96,6 +103,15 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 		status := req.Status
 		if status == "" {
 			status = "online"
+		}
+		// 新 Agent 会在心跳中持续上报签名能力，支持原地升级后无需重新注册即可生效。
+		// 旧 Agent 不发送该字段（nil），不会覆盖数据库中的默认 id。
+		if len(req.SignatureModes) > 0 {
+			if modes := protocol.NormalizeSignatureModes(req.SignatureModes); len(modes) > 0 {
+				_, _ = s.DB.Exec(`UPDATE agents SET signature_modes=$2
+					WHERE agent_id=$1 AND signature_modes IS DISTINCT FROM $2`,
+					agentID, strings.Join(modes, ","))
+			}
 		}
 		_, _ = s.DB.Exec(`UPDATE agents SET last_heartbeat_at=NOW(), status=$2 WHERE agent_id=$1`, agentID, status)
 		// 维护窗口内不覆盖 upgrading 状态

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +73,27 @@ func (g *Gateway) AgentSecret(ctx context.Context, agentID string) (string, erro
 	return secret, err
 }
 
+// AgentSigning 返回签名密钥与旧版 signature 应使用的签名路径。
+type AgentSigning struct {
+	Secret              string
+	LegacySignatureMode string
+}
+
+// AgentSigningInfo 查询 Agent 的签名能力，决定 legacy signature 使用 ID 还是 SignedPath。
+// 未上报能力（旧 Agent / 历史数据）默认 id，保持向后兼容。
+func (g *Gateway) AgentSigningInfo(ctx context.Context, agentID string) (AgentSigning, error) {
+	var info AgentSigning
+	var storedModes string
+	err := g.db.QueryRowContext(ctx,
+		`SELECT secret, COALESCE(signature_modes,'') FROM agents WHERE agent_id=$1`,
+		agentID).Scan(&info.Secret, &storedModes)
+	if err != nil {
+		return info, err
+	}
+	info.LegacySignatureMode = protocol.PreferredLegacySignatureMode(strings.Split(storedModes, ","))
+	return info, nil
+}
+
 // Dequeue 原子取出一条待下发指令（FOR UPDATE SKIP LOCKED，避免并发重复取件）。
 //
 // 返回签名后的指令；无指令时返回 (nil, nil)。
@@ -112,11 +134,12 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 		return nil, err
 	}
 
-	// 获取密钥并签名
-	secret, err := g.AgentSecret(ctx, agentID)
+	// 获取密钥与 Agent 上报的签名能力
+	signing, err := g.AgentSigningInfo(ctx, agentID)
 	if err != nil {
 		return nil, err
 	}
+	secret := signing.Secret
 	var pl protocol.CommandPayload
 	_ = json.Unmarshal(payload, &pl)
 
@@ -137,10 +160,15 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
 	}
 	// 双签名兼容：
-	//   - signature   使用旧 Path（仅 ID），供尚未升级的旧 Agent 校验；
-	//   - signature_v2 使用 SignedPath（ID|类型|过期时间），新 Agent 优先校验。
-	// 这样服务端滚动升级不会强制所有主机重装 Agent。
-	env.Path = cmd.ID
+	//   - signature    按 Agent 上报的能力选择 Path：旧 Agent 用 id，
+	//                  支持 signed_path 的 Agent 用 SignedPath；
+	//   - signature_v2 始终使用 SignedPath，新 Agent 优先校验。
+	// 能力标识让服务端不再依赖 Agent 版本推断，也无需强制重装。
+	if signing.LegacySignatureMode == protocol.SignatureModeSignedPath {
+		env.Path = cmd.SignedPath()
+	} else {
+		env.Path = cmd.ID
+	}
 	cmd.Signature = signer.Sign(secret, env)
 	env.Path = cmd.SignedPath()
 	cmd.SignatureV2 = signer.Sign(secret, env)

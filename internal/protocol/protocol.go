@@ -6,8 +6,62 @@ package protocol
 
 import (
 	"strconv"
+	"strings"
 	"time"
 )
+
+// ---- Agent 指令签名能力 ----
+//
+// Agent 注册/心跳时上报自己可校验的签名方式，服务端据此选择旧版 signature
+// 使用哪条 HMAC Path，避免依赖版本号推断。未上报的旧 Agent 默认只支持 id。
+const (
+	// SignatureModeID 旧版 legacy 签名：Path 仅指令 ID。
+	SignatureModeID = "id"
+	// SignatureModeSignedPath 新版 legacy 签名：Path 为 ID|类型|过期时间。
+	SignatureModeSignedPath = "signed_path"
+	// SignatureModeV2 支持 signature_v2 字段（Path 为 SignedPath，优先校验）。
+	SignatureModeV2 = "v2"
+)
+
+// SupportedSignatureModes 返回当前 Agent 支持的签名能力（按稳定顺序）。
+func SupportedSignatureModes() []string {
+	return []string{SignatureModeID, SignatureModeSignedPath, SignatureModeV2}
+}
+
+// NormalizeSignatureModes 过滤未知值、去重并按稳定顺序返回。
+// 未知能力直接忽略，避免新 Agent 上报未来能力时影响旧服务端解析。
+func NormalizeSignatureModes(modes []string) []string {
+	set := make(map[string]bool, len(modes))
+	for _, raw := range modes {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case SignatureModeID:
+			set[SignatureModeID] = true
+		case SignatureModeSignedPath:
+			set[SignatureModeSignedPath] = true
+		case SignatureModeV2:
+			set[SignatureModeV2] = true
+		}
+	}
+	out := make([]string, 0, 3)
+	for _, mode := range SupportedSignatureModes() {
+		if set[mode] {
+			out = append(out, mode)
+		}
+	}
+	return out
+}
+
+// PreferredLegacySignatureMode 从能力列表中选择旧版 signature 的签名路径。
+// 同时支持两种旧路径时优先 SignedPath（覆盖类型/过期时间，强度更高）。
+// 未上报能力时回退到 id，兼容早期只认 ID 签名的 Agent。
+func PreferredLegacySignatureMode(modes []string) string {
+	for _, mode := range NormalizeSignatureModes(modes) {
+		if mode == SignatureModeSignedPath {
+			return SignatureModeSignedPath
+		}
+	}
+	return SignatureModeID
+}
 
 // ---- 指令类型 ----
 
@@ -77,6 +131,9 @@ type RegisterRequest struct {
 	Supervisor   string            `json:"supervisor"` // systemd/upstart/cron/bare
 	AgentVersion string            `json:"agent_version"`
 	Components   map[string]string `json:"components"` // 组件名 → 当前版本
+	// SignatureModes 声明可校验的指令签名能力，取值见 SignatureMode*。
+	// 旧 Agent 不发送该字段，服务端按 id 兼容处理。
+	SignatureModes []string `json:"signature_modes,omitempty"`
 }
 
 // RegisterResponse 注册结果，返回长期 agent 凭据。
@@ -94,6 +151,8 @@ type HeartbeatRequest struct {
 	Stage      string            `json:"stage,omitempty"`
 	Status     string            `json:"status,omitempty"` // online/upgrading/...
 	Components map[string]string `json:"components,omitempty"`
+	// SignatureModes 与注册时一致；用于 Agent 原地升级后刷新签名能力。
+	SignatureModes []string `json:"signature_modes,omitempty"`
 }
 
 // PollRequest 长轮询取指令。

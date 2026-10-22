@@ -816,6 +816,9 @@ POST /api/agent/commands/{id}/report  # 结果上报
 GET /api/agent/enroll-token           # 生成注册令牌（管理员）
 ```
 
+注册与心跳请求可携带 `signature_modes`（`id` / `signed_path` / `v2`），服务端据此选择
+legacy `signature` 的 Path；旧 Agent 不传该字段时按 `id` 处理。
+
 ### 主机管理
 
 ```http
@@ -1101,12 +1104,14 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 ### 2026-10-22 Agent 指令签名兼容：服务端升级不再要求重装 Agent
 
 - 服务端同时下发两套签名：
-  - `signature`：旧版，Path 仅含指令 ID，供尚未升级的旧 Agent 校验；
+  - `signature`：legacy 签名，Path 按 Agent 上报的能力选择 `id` 或 `signed_path`；
   - `signature_v2`：新版，Path 为 `ID|类型|过期时间`，新 Agent 优先校验。
-- **此前只校验指令 ID 的旧 Agent 无需重装**即可执行新服务端下发的指令；服务端滚动升级不再要求全量替换 Agent。
+- Agent 注册与心跳新增 `signature_modes` 能力标识（`id` / `signed_path` / `v2`），服务端据此自动选择 legacy 签名路径，不再依赖 Agent 版本推断；能力在心跳中刷新，Agent 原地升级后也无需重新注册。
+- 未上报 `signature_modes` 的旧 Agent 默认按 `id` 处理。**此前只校验指令 ID 的旧 Agent 无需重装**即可执行新服务端下发的指令；服务端滚动升级不再要求全量替换 Agent。
 - 新 Agent 同时兼容旧服务端：`signature_v2` 缺失时，依次尝试新版 `SignedPath` 与旧版 ID 签名。
 - `signature_v2` 存在但校验失败时**不会回退**到旧签名；只有字段缺失时才进入旧服务端兼容路径（篡改 `signature_v2` 会被拒绝）。
 - 新 Agent 仍保留强校验：篡改类型、延长过期时间都会被拒绝。旧服务端/旧 Agent 链路的安全强度仍取决于传输层，建议启用 HTTPS，并建议新装或后续轮换时升级 Agent；但 Agent 升级不再是服务端升级的前置条件。
+- 新增迁移 `012_agent_signature_modes`：`agents.signature_modes VARCHAR(128) NOT NULL DEFAULT 'id'`。旧数据自动回填 `id`，旧服务端可忽略该列，支持滚动升级/回滚。
 
 ### 2026-10-22 Consul 同步自动清理
 
