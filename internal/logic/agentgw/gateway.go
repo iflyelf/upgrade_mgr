@@ -296,6 +296,7 @@ var stageLabels = map[string]string{
 	protocol.StageStopping:    "停止服务",
 	protocol.StageReplacing:   "替换文件",
 	protocol.StageExec:        "执行安装",
+	protocol.StageRunCommand:  "执行命令",
 	protocol.StageStarting:    "启动服务",
 	protocol.StageVerifying:   "验证版本",
 	protocol.StagePostInstall: "安装后处理",
@@ -375,11 +376,19 @@ func (g *Gateway) UpdateStage(ctx context.Context, agentID, cmdID, stage, messag
 		return tx.Commit()
 	}
 
-	line := fmt.Sprintf("[%s] 阶段: %s", time.Now().Format("2006-01-02 15:04:05"), stageLabel(stage))
-	if message != "" {
-		line += " - " + message
+	// 命令任务输出按块上报，日志直接保留原始脚本文本（不逐行加阶段前缀），
+	// 否则每 2KB 一块的输出会被时间戳/阶段名切割，难以阅读。
+	rawOutput := stage == protocol.StageRunCommand
+	line := ""
+	if rawOutput {
+		line = message
+	} else {
+		line = fmt.Sprintf("[%s] 阶段: %s", time.Now().Format("2006-01-02 15:04:05"), stageLabel(stage))
+		if message != "" {
+			line += " - " + message
+		}
+		line += "\n"
 	}
-	line += "\n"
 
 	// 锁顺序与 Cancel/Report 一致：先 task_hosts，再 commands。
 	// 避免取消事务与阶段上报因加锁顺序相反而互相等待。
@@ -416,7 +425,7 @@ func (g *Gateway) UpdateStage(ctx context.Context, agentID, cmdID, stage, messag
 	// 最终 report 仍会重试并携带完整日志；这里先保证任务不会永久停在执行中。
 	var finalStatus string
 	switch {
-	case stage == protocol.StageDone && strings.Contains(message, "升级成功"):
+	case stage == protocol.StageDone && (strings.Contains(message, "升级成功") || strings.Contains(message, "命令执行完成")):
 		finalStatus = protocol.CmdSuccess
 	case stage == protocol.StageFailed:
 		finalStatus = protocol.CmdFailed
@@ -646,9 +655,15 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 	// 成功结果可能先由 UpdateStage 的终态阶段自动落库，最终 report 到达时
 	// 指令已是 success；上面的活动指令检查已排除“旧上报碰到新一轮执行”，
 	// 这里仍需补写 Consul 版本，否则新 Agent 的 upgraded_version 不会更新。
+	// 一次性命令任务不涉及组件版本，不能写入 Consul Meta。
 	consulEligible := false
 	if final && req.Status == protocol.CmdSuccess {
 		consulEligible = true
+		var cmdType string
+		_ = tx.QueryRowContext(ctx, `SELECT type FROM commands WHERE id=$1`, cmdID.Int64).Scan(&cmdType)
+		if cmdType == protocol.CmdRunCommand {
+			consulEligible = false
+		}
 		_ = tx.QueryRowContext(ctx, `SELECT ip FROM hosts WHERE agent_id=$1`, agentID).Scan(&hostIP)
 	}
 

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -27,6 +28,10 @@ type Spec struct {
 	Env []string
 	// Timeout 超时；<=0 表示不限制（不建议，升级场景务必设置）。
 	Timeout time.Duration
+	// Stdin 标准输入内容；空表示不提供输入（/dev/null 语义由 exec 决定）。
+	Stdin string
+	// Stream 非空时，stdout/stderr 同时写入该 Writer，用于实时回传脚本输出。
+	Stream io.Writer
 	// LangC 为 true 时强制 LANG=C/LC_ALL=C，稳定命令输出（CentOS6 中文环境解析）。
 	LangC bool
 }
@@ -71,8 +76,17 @@ func Run(ctx context.Context, spec Spec) (*Result, error) {
 	cmd.Env = env
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if spec.Stream != nil {
+		// 实时流式输出：同时保留完整缓冲，供调用方拼装最终日志。
+		cmd.Stdout = io.MultiWriter(&stdout, spec.Stream)
+		cmd.Stderr = io.MultiWriter(&stderr, spec.Stream)
+	} else {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+	}
+	if spec.Stdin != "" {
+		cmd.Stdin = strings.NewReader(spec.Stdin)
+	}
 
 	start := time.Now()
 	err := cmd.Run()

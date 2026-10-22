@@ -59,7 +59,7 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		// 租户隔离：只列出当前租户的任务（superadmin 跨租户）
 		tCond, tArgs := reqScope(r).Where("t", 1)
 		rows, err := s.DB.QueryContext(r.Context(), `
-			SELECT t.id, t.name, t.component_id, t.version, t.status, t.created_at,
+			SELECT t.id, COALESCE(t.kind,'upgrade'), t.name, COALESCE(t.component_id,0), t.version, t.status, t.created_at,
 			       COUNT(th.id) AS total,
 			       COUNT(th.id) FILTER (WHERE th.status='success') AS success,
 			       COUNT(th.id) FILTER (WHERE th.status='failed') AS failed
@@ -74,15 +74,15 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		list := []map[string]any{}
 		for rows.Next() {
 			var id, cid int64
-			var name, version, status string
+			var kind, name, version, status string
 			var createdAt any
 			var total, success, failed int
-			if err := rows.Scan(&id, &name, &cid, &version, &status, &createdAt, &total, &success, &failed); err != nil {
+			if err := rows.Scan(&id, &kind, &name, &cid, &version, &status, &createdAt, &total, &success, &failed); err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
 			}
 			list = append(list, map[string]any{
-				"id": id, "name": name, "component_id": cid, "version": version,
+				"id": id, "kind": kind, "name": name, "component_id": cid, "version": version,
 				"status": status, "created_at": createdAt,
 				"total": total, "success": success, "failed": failed,
 			})
@@ -157,22 +157,24 @@ func TaskDetail(s *svc.ServiceContext) http.HandlerFunc {
 
 		var (
 			name, version, status, createdBy, compName, compDisplay string
+			kind                                                    string
 			componentID                                             int64
+			commandRaw                                              []byte
 			createdAt, updatedAt                                    sql.NullTime
 			selectorRaw, strategyRaw                                []byte
 		)
 		// 租户隔离：非本租户任务一律视为不存在（不泄露存在性）
 		tCond, tArgs := reqScope(r).Where("t", 2)
 		err := s.DB.QueryRowContext(ctx, `
-			SELECT t.name, t.component_id, t.version, t.status, COALESCE(t.created_by,''),
-			       t.created_at, t.updated_at, t.selector, t.strategy,
+			SELECT COALESCE(t.kind,'upgrade'), t.name, COALESCE(t.component_id,0), t.version, t.status, COALESCE(t.created_by,''),
+			       t.created_at, t.updated_at, t.selector, t.strategy, COALESCE(t.command,'{}'::jsonb),
 			       COALESCE(c.name,''), COALESCE(c.display_name,'')
 			FROM upgrade_tasks t
 			LEFT JOIN components c ON c.id=t.component_id
 			WHERE t.id=$1 AND `+tCond,
 			append([]any{id}, tArgs...)...).
-			Scan(&name, &componentID, &version, &status, &createdBy,
-				&createdAt, &updatedAt, &selectorRaw, &strategyRaw, &compName, &compDisplay)
+			Scan(&kind, &name, &componentID, &version, &status, &createdBy,
+				&createdAt, &updatedAt, &selectorRaw, &strategyRaw, &commandRaw, &compName, &compDisplay)
 		if err == sql.ErrNoRows {
 			httpx.Fail(w, http.StatusNotFound, "任务不存在")
 			return
@@ -327,13 +329,17 @@ func TaskDetail(s *svc.ServiceContext) http.HandlerFunc {
 		if len(strategyRaw) == 0 {
 			strategyRaw = []byte("{}")
 		}
+		if len(commandRaw) == 0 {
+			commandRaw = []byte("{}")
+		}
 		httpx.OK(w, map[string]any{
-			"id": id, "name": name, "component_id": componentID,
+			"id": id, "kind": kind, "name": name, "component_id": componentID,
 			"component_name": compName, "component_display_name": compDisplay,
 			"version": version, "status": status, "created_by": createdBy,
 			"created_at": nullableTime(createdAt), "updated_at": nullableTime(updatedAt),
 			"selector": json.RawMessage(selectorRaw), "strategy": json.RawMessage(strategyRaw),
-			"total": total, "success": success, "failed": failed, "done": done, "active": active,
+			"command": json.RawMessage(commandRaw),
+			"total":   total, "success": success, "failed": failed, "done": done, "active": active,
 			"batches": batches, "hosts": hosts,
 			"host_total": total, "host_page": page, "host_size": size, "host_pages": pages,
 			"commands": commands,

@@ -148,7 +148,9 @@ type AgentConfig struct {
 	EnrollTokenTTL string `yaml:"enroll_token_ttl"`
 	// RequireEnrollToken 注册是否强制要求 enroll token（默认 true，内网可信可改 false）。
 	RequireEnrollToken bool `yaml:"require_enroll_token"`
-	// AllowExecMode 是否允许下发 exec/replace_exec/script 模式（默认 false，安全）。
+	// AllowExecMode 是否允许下发 exec/replace_exec/script 模式以及执行命令任务。
+	// 默认开启：平台核心场景就需要执行安装/卸载脚本；如仅做二进制替换，
+	// 可在设置页或配置文件中关闭以收紧权限。
 	AllowExecMode bool `yaml:"allow_exec_mode"`
 	// AutoUpdate 是否在 Agent 心跳发现旧版本时自动下发自升级（默认 false）。
 	// 开启后 Agent 会下载新二进制并重启，建议确认 dist 目录已放置目标版本再开启。
@@ -174,7 +176,7 @@ func Default() *Config {
 		Artifact: ArtifactConfig{Dir: "/var/lib/upgrade_mgr/artifacts"},
 		Agent: AgentConfig{
 			PollHold: 20, LeaseMax: "1h", ClockSkew: "5m",
-			EnrollTokenTTL: "15m", RequireEnrollToken: true, AllowExecMode: false,
+			EnrollTokenTTL: "15m", RequireEnrollToken: true, AllowExecMode: true,
 		},
 		Log: LogConfig{Level: "info"},
 	}

@@ -48,7 +48,7 @@ data:
 
     agent:
       poll_hold: 20
-      allow_exec_mode: false
+      allow_exec_mode: true
       auto_update: false  # 需 dist 中已有目标 Agent 二进制再开启
 
     consul:
