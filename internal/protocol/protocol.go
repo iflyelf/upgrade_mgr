@@ -51,6 +51,48 @@ func NormalizeSignatureModes(modes []string) []string {
 	return out
 }
 
+// ---- Agent 能力标识 ----
+//
+// Agent 注册/心跳时上报功能能力，服务端在下方指令前据此判断兼容性，
+// 避免旧 Agent 收到不认识的指令类型后静默丢弃、任务卡到租约超时。
+const (
+	// AgentCapabilityRunCommand 支持 run_command（一次性脚本/命令）指令。
+	AgentCapabilityRunCommand = "run_command"
+)
+
+// SupportedCapabilities 返回当前 Agent 支持的能力列表（按稳定顺序）。
+func SupportedCapabilities() []string {
+	return []string{AgentCapabilityRunCommand}
+}
+
+// NormalizeCapabilities 过滤未知能力、去重并按稳定顺序返回。
+func NormalizeCapabilities(caps []string) []string {
+	set := make(map[string]bool, len(caps))
+	for _, raw := range caps {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case AgentCapabilityRunCommand:
+			set[AgentCapabilityRunCommand] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for _, c := range SupportedCapabilities() {
+		if set[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// HasCapability 判断逗号分隔的能力字符串是否包含指定能力。
+func HasCapability(caps, want string) bool {
+	for _, raw := range strings.Split(caps, ",") {
+		if strings.EqualFold(strings.TrimSpace(raw), want) {
+			return true
+		}
+	}
+	return false
+}
+
 // PreferredLegacySignatureMode 从能力列表中选择旧版 signature 的签名路径。
 // 同时支持两种旧路径时优先 SignedPath（覆盖类型/过期时间，强度更高）。
 // 未上报能力时回退到 id，兼容早期只认 ID 签名的 Agent。
@@ -70,9 +112,11 @@ const (
 	CmdRollbackComponent  = "rollback_component"
 	CmdSelfUpdate         = "self_update"
 	CmdUninstallComponent = "uninstall_component"
-	CmdResync             = "resync"
-	CmdHealthCheck        = "health_check"
-	CmdRestartAgent       = "restart_agent"
+	// CmdRunCommand 执行一次性 Shell 脚本（不涉及制品、备份与回滚）。
+	CmdRunCommand   = "run_command"
+	CmdResync       = "resync"
+	CmdHealthCheck  = "health_check"
+	CmdRestartAgent = "restart_agent"
 )
 
 // ---- 部署模式 ----
@@ -112,6 +156,8 @@ const (
 	StageStopping    = "stopping"
 	StageReplacing   = "replacing"
 	StageExec        = "exec"
+	// StageRunCommand 一次性命令任务的执行阶段（与组件“执行安装”区分）。
+	StageRunCommand  = "run_command"
 	StageStarting    = "starting"
 	StageVerifying   = "verifying"
 	StagePostInstall = "post_install"
@@ -142,6 +188,8 @@ type RegisterRequest struct {
 	// SignatureModes 声明可校验的指令签名能力，取值见 SignatureMode*。
 	// 旧 Agent 不发送该字段，服务端按 id 兼容处理。
 	SignatureModes []string `json:"signature_modes,omitempty"`
+	// Capabilities 声明支持的功能能力（run_command 等），旧 Agent 不发送。
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // RegisterResponse 注册结果，返回长期 agent 凭据。
@@ -165,6 +213,8 @@ type HeartbeatRequest struct {
 	BuildVariant string `json:"build_variant,omitempty"`
 	// SignatureModes 与注册时一致；用于 Agent 原地升级后刷新签名能力。
 	SignatureModes []string `json:"signature_modes,omitempty"`
+	// Capabilities 与注册时一致；服务端据此刷新功能能力。
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // PollRequest 长轮询取指令。
@@ -216,12 +266,39 @@ type ComponentSpec struct {
 	ConsulMaint       bool       `json:"consul_maint,omitempty"`
 }
 
+// CommandSpec 一次性脚本指令规格（kind=command 任务下发）。
+//
+// 与组件升级不同：不下载制品、不做平台备份、不停服、不回滚；
+// 只把脚本写入临时文件后用 Shell 执行，并回传输出。
+type CommandSpec struct {
+	// Script 脚本内容（由服务端保存的任务定义下发）。
+	Script string `json:"script"`
+	// Interpreter 解释器，空则 bash/sh 自动选择。
+	Interpreter string `json:"interpreter,omitempty"`
+	// Args 传给脚本的参数（$1、$2…）。
+	Args []string `json:"args,omitempty"`
+	// Env 追加环境变量（KEY=VALUE）。
+	Env []string `json:"env,omitempty"`
+	// WorkDir 工作目录。
+	WorkDir string `json:"work_dir,omitempty"`
+	// Timeout 执行超时，如 "10m"；空则默认 10 分钟。
+	Timeout string `json:"timeout,omitempty"`
+	// Stdin 标准输入内容（如 "Y\n"），用于需要交互确认的安装/卸载脚本。
+	Stdin string `json:"stdin,omitempty"`
+	// TTY 为 true 时通过 script(1) 分配伪终端，兼容必须读取 /dev/tty 的脚本。
+	TTY bool `json:"tty,omitempty"`
+	// IgnoreError 为 true 时非零退出码也视为成功。
+	IgnoreError bool `json:"ignore_error,omitempty"`
+}
+
 // CommandPayload 指令载荷。
 type CommandPayload struct {
 	Component  ComponentSpec `json:"component"`
 	Artifact   Artifact      `json:"artifact"`
 	ToVersion  string        `json:"to_version"`
 	RollbackTo string        `json:"rollback_to,omitempty"`
+	// Command 仅 run_command 指令使用。
+	Command CommandSpec `json:"command,omitempty"`
 }
 
 // Command 下发给 Agent 的指令信封。
@@ -254,8 +331,8 @@ type PollResponse struct {
 
 // StageRequest 阶段上报（enter_maintenance 时申请维护租约）。
 type StageRequest struct {
-	AgentID         string `json:"agent_id"`
-	Stage           string `json:"stage"`
+	AgentID string `json:"agent_id"`
+	Stage   string `json:"stage"`
 	// Message 是阶段详情（下载地址、脚本输出、错误原因等）。
 	// 旧 Agent 不发送，服务端只能显示阶段名称；新 Agent 会携带以便任务详情排查。
 	Message         string `json:"message,omitempty"`

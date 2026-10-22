@@ -287,7 +287,7 @@ artifact:
 agent:
   poll_hold: 20
   require_enroll_token: true  # 生产环境强烈建议开启
-  allow_exec_mode: false      # 使用 script/exec/replace_exec 模式时改为 true（安全开关）
+  allow_exec_mode: true       # 允许 exec/script 模式与命令任务（默认开启；仅需二进制替换时可关闭）
   auto_update: false          # 心跳/注册发现旧 Agent 时自动自升级（需 dist 中已有目标二进制）
 
 consul:  # 可选：同步主机清单；编排器不依赖 Consul
@@ -525,13 +525,14 @@ GET  /api/agents/self-update           # 目标版本、可用二进制、最近
 `examples/node_exporter/install.sh` 是**单文件自包含**安装脚本，已内嵌
 systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 
-#### 5.1 先打开脚本执行开关
+#### 5.1 脚本执行开关（默认开启）
 
-`script` 模式会下载并执行上传的脚本，属于任意命令执行，默认关闭。管理员到
-「设置 → Agent」把 `agent.allow_exec_mode` 设为 `true` 并保存。单实例保存后即时生效；
+`script` 模式会下载并执行上传的脚本，属于任意命令执行。`agent.allow_exec_mode`
+默认开启，开箱即可使用；如需收紧权限，可到「设置 → Agent」把它设为 `false` 并保存，
+关闭后 `script/exec/replace_exec` 模式与命令任务都会被拒绝。单实例保存后即时生效；
 多副本环境需让各副本重新加载设置（滚动重启或刷新）。
 
-> 这是安全开关，不要在生产环境长期无条件开放；只给可信管理员上传/创建任务的权限。
+> 这是安全开关，仅建议在可信环境开启；必须配合 RBAC，只给可信管理员上传/创建任务的权限。
 
 #### 5.2 组件：填入脚本安装示例
 
@@ -713,8 +714,9 @@ sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
 
 注意：
 
-- `script` 模式执行下载的脚本，服务端被攻破时风险等同于任意命令执行；务必依赖
-  `agent.allow_exec_mode` 和 RBAC，只允许可信管理员操作。
+- `script` 模式执行下载的脚本（以及「命令任务」执行任意 Shell 命令），服务端被攻破时
+  风险等同于任意命令执行；务必依赖 `agent.allow_exec_mode` 和 RBAC，只允许可信管理员操作。
+  该开关默认开启，生产环境如需最小权限请主动关闭。
 - `script` 模式不做平台侧备份/自动回滚；需要平台备份和回滚时，改用
   「填入示例：node_exporter（二进制替换）」，按主机架构上传二进制。该示例把
   服务注册逻辑放在独立的 `post_install_script` 字段中，Agent 在 post_install
@@ -737,6 +739,64 @@ sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
   参数的更老版本，启动报 `unknown collector` 时删除这两个参数。
 - `examples/node_exporter/node_exporter.service` 和 `.init` 现在保留作参考；
   实际平台安装只需要上传 `install.sh`。
+
+### 6. 执行命令 / 脚本任务
+
+除了组件升级，「任务」页的「任务类型」还可以选 **执行命令/脚本（command）**：
+选中主机后下发一段 Shell 脚本，一次性执行并回收输出，适合卸载旧监控、清理残留、
+临时巡检等场景。命令任务复用同一套任务列表、批次灰度、暂停/取消/重试与实时日志。
+
+使用步骤：
+
+1. 「任务」页把「任务类型」切到「执行命令/脚本」。
+2. 填「命令脚本」（原样保存到目标机临时文件后执行，支持管道、重定向、进程替换）。
+3. 按需填写：
+   - **解释器**：留空自动 `bash`，缺失时回退 `sh`；只允许 `bash/sh/dash/ksh/zsh`。
+   - **脚本参数**：按空格分隔，作为 `$1`、`$2`… 传入。
+   - **标准输入**：如 `Y\n`，等价于 here-string，用于交互确认。
+   - **分配伪终端（PTY）**：脚本必须直接读写 `/dev/tty` 时勾选。
+   - **超时**：默认 `10m`，支持 `30m` 等 Go duration 格式。
+4. 填 IP 段，点「预览」→「创建任务」→ 列表里点「启动」。
+
+「填入示例：卸载旧监控」会预填一个可直接执行的交互式卸载示例：
+
+```bash
+script -q -c "bash <(curl -s http://qxbdown.iflytek.com/get/monitor/install-monitor.sh) uninstall" /dev/null
+```
+
+配合标准输入 `Y\n`：示例本身已用 `script(1)` 分配伪终端，因此无需再勾选「分配伪终端」。
+若脚本用 `read -e -p "[Y/N]:"` 确认后又用 `dd if=/dev/tty` 等待回车，这种
+「PTY + 标准输入」组合可以正常通过。
+
+执行日志会随阶段上报实时写入任务详情，页面每 4 秒自动刷新；执行完成后按退出码
+标记成功/失败，失败主机可以直接「重试」。
+
+前提与限制：
+
+- `agent.allow_exec_mode` 必须开启（**默认开启**）；关闭后创建与下发都会拒绝。
+- 需要新版 Agent（上报 `run_command` 能力）。旧 Agent 会被自动跳过，并在该主机日志里
+  写明「Agent 版本过低，不支持执行命令任务；请先升级 Agent」。
+- 命令任务不绑定组件/制品，版本固定记为 `command`，也不写 Consul Meta。
+
+API 创建示例：
+
+```json
+{
+  "kind": "command",
+  "name": "卸载旧监控",
+  "selector": { "ip_expr": "10.1.255.24-26" },
+  "strategy": { "mode": "count", "batch_size": 10, "auto_promote": true },
+  "version": "command",
+  "command": {
+    "script": "bash <(curl -s http://example.com/uninstall.sh) uninstall",
+    "interpreter": "/bin/bash",
+    "args": [],
+    "stdin": "Y\n",
+    "tty": true,
+    "timeout": "30m"
+  }
+}
+```
 
 ---
 
@@ -1148,6 +1208,15 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
+
+### 2026-10-22 执行命令/脚本任务
+
+- 新增 `kind=command` 一次性命令任务：不绑定组件/制品，选中主机后下发任意 Shell 脚本，复用任务列表、批次灰度、暂停/取消/重试与详情日志。
+- 迁移 `016_command_tasks`：`upgrade_tasks` 增加 `kind`、`command JSONB`，`component_id` 改为可空；`agents` 增加 `capabilities`，注册/心跳上报 `run_command` 能力。
+- Agent 新增 `run_command` 指令：脚本写入临时文件，按白名单（`bash/sh/dash/ksh/zsh`）执行；`tty=true` 用 `script -q -c` 分配伪终端，`stdin` 支持交互确认；输出按 2KB/800ms 分块经阶段上报实时回传。
+- 旧 Agent 缺少 `run_command` 能力时，下发阶段跳过主机并在日志写明「Agent 版本过低」；命令任务同样受 `agent.allow_exec_mode` 保护，创建和下发双重校验。
+- `agent.allow_exec_mode` 默认值改为 `true`：`script/exec/replace_exec` 模式与命令任务开箱可用，可在「设置 → Agent」关闭。
+- 前端任务页新增任务类型切换、命令脚本/解释器/参数/stdin/PTY/超时表单与「卸载旧监控」示例；任务列表显示类型，详情展示脚本内容，命令任务日志默认展开。
 
 ### 2026-10-22 任务执行详情、阶段日志与删除
 

@@ -6,12 +6,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/ipx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
+	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+)
+
+const (
+	// 命令脚本上限，避免 JSONB 行过大和超长指令。
+	// 200KB 足以覆盖安装/卸载脚本，同时小于 Agent 单次日志上限。
+	maxCommandScriptBytes = 200 * 1024
+	// 标准输入（交互确认）上限。
+	maxCommandStdinBytes = 4 * 1024
 )
 
 // Selector 目标选择器。
@@ -33,27 +43,40 @@ type Strategy struct {
 	AutoRollback     bool   `json:"auto_rollback"`
 }
 
+// 任务类型：组件升级 / 一次性命令（脚本）。
+const (
+	KindUpgrade = "upgrade"
+	KindCommand = "command"
+)
+
 // CreateRequest 创建任务请求。
+//
+// kind=upgrade（默认）走组件升级流水线；kind=command 直接执行 command.script，
+// 不要求 component_id 与制品。
 type CreateRequest struct {
-	Name        string   `json:"name"`
-	ComponentID int64    `json:"component_id"`
-	Version     string   `json:"version"`
-	Selector    Selector `json:"selector"`
-	Strategy    Strategy `json:"strategy"`
-	CreatedBy   string   `json:"created_by"`
+	Kind        string               `json:"kind"`
+	Name        string               `json:"name"`
+	ComponentID int64                `json:"component_id"`
+	Version     string               `json:"version"`
+	Command     protocol.CommandSpec `json:"command"`
+	Selector    Selector             `json:"selector"`
+	Strategy    Strategy             `json:"strategy"`
+	CreatedBy   string               `json:"created_by"`
 }
 
 // Task 任务视图。
 type Task struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	ComponentID int64     `json:"component_id"`
-	Version     string    `json:"version"`
-	Status      string    `json:"status"`
-	Selector    Selector  `json:"selector"`
-	Strategy    Strategy  `json:"strategy"`
-	TotalHosts  int       `json:"total_hosts"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int64                `json:"id"`
+	Kind        string               `json:"kind"`
+	Name        string               `json:"name"`
+	ComponentID int64                `json:"component_id"`
+	Version     string               `json:"version"`
+	Command     protocol.CommandSpec `json:"command,omitempty"`
+	Status      string               `json:"status"`
+	Selector    Selector             `json:"selector"`
+	Strategy    Strategy             `json:"strategy"`
+	TotalHosts  int                  `json:"total_hosts"`
+	CreatedAt   time.Time            `json:"created_at"`
 }
 
 // Service 任务服务。
@@ -108,12 +131,38 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 
 // Create 创建任务：落库 upgrade_tasks + task_hosts + task_batches。
 func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest) (int64, error) {
-	if req.ComponentID == 0 || req.Version == "" {
-		return 0, fmt.Errorf("component_id 与 version 必填")
+	kind := req.Kind
+	if kind == "" {
+		kind = KindUpgrade
 	}
-	// 校验组件存在
-	if _, err := s.compRepo.Get(ctx, sc, req.ComponentID); err != nil {
-		return 0, err
+	if kind != KindUpgrade && kind != KindCommand {
+		return 0, fmt.Errorf("不支持的任务类型 %q", kind)
+	}
+	if kind == KindUpgrade {
+		if req.ComponentID == 0 || req.Version == "" {
+			return 0, fmt.Errorf("component_id 与 version 必填")
+		}
+		// 校验组件存在
+		if _, err := s.compRepo.Get(ctx, sc, req.ComponentID); err != nil {
+			return 0, err
+		}
+	} else {
+		// 命令任务：脚本不能为空；版本仅作展示，统一记录为 command。
+		if !s.allowExecMode() {
+			return 0, fmt.Errorf("服务端已禁用命令执行（agent.allow_exec_mode=false）")
+		}
+		if len(strings.TrimSpace(req.Command.Script)) == 0 {
+			return 0, fmt.Errorf("命令脚本不能为空")
+		}
+		if req.Version == "" {
+			req.Version = "command"
+		}
+		if len(req.Command.Script) > maxCommandScriptBytes {
+			return 0, fmt.Errorf("命令脚本过长（最多 %d 字节）", maxCommandScriptBytes)
+		}
+		if len(req.Command.Stdin) > maxCommandStdinBytes {
+			return 0, fmt.Errorf("标准输入过长（最多 %d 字节）", maxCommandStdinBytes)
+		}
 	}
 	hosts, err := s.matchHosts(ctx, sc, req.Selector)
 	if err != nil {
@@ -125,6 +174,7 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 
 	selJSON, _ := json.Marshal(req.Selector)
 	stratJSON, _ := json.Marshal(req.Strategy)
+	cmdJSON, _ := json.Marshal(req.Command)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -132,11 +182,15 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 	}
 	defer tx.Rollback()
 
+	var componentID any
+	if kind == KindUpgrade {
+		componentID = req.ComponentID
+	}
 	var taskID int64
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO upgrade_tasks (name, component_id, version, selector, strategy, status, created_by, tenant_id)
-		VALUES ($1,$2,$3,$4,$5,'draft',$6,$7) RETURNING id`,
-		req.Name, req.ComponentID, req.Version, selJSON, stratJSON, req.CreatedBy,
+		INSERT INTO upgrade_tasks (kind, name, component_id, version, command, selector, strategy, status, created_by, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9) RETURNING id`,
+		kind, req.Name, componentID, req.Version, cmdJSON, selJSON, stratJSON, req.CreatedBy,
 		sc.TenantForWrite()).Scan(&taskID)
 	if err != nil {
 		return 0, err

@@ -165,6 +165,7 @@ func (a *Agent) register() error {
 		BuildVariant:   a.cfg.Variant,
 		Components:     map[string]string{},
 		SignatureModes: protocol.SupportedSignatureModes(),
+		Capabilities:   protocol.SupportedCapabilities(),
 	}
 	var resp protocol.RegisterResponse
 	if err := a.postJSON("/api/agent/register", req, &resp); err != nil {
@@ -185,6 +186,7 @@ func (a *Agent) heartbeat() {
 		BuildHash:      a.buildHash,
 		BuildVariant:   a.cfg.Variant,
 		SignatureModes: protocol.SupportedSignatureModes(),
+		Capabilities:   protocol.SupportedCapabilities(),
 	}
 	_ = a.postJSON("/api/agent/heartbeat", req, nil)
 	a.cfg.LastHeartbeat = time.Now()
@@ -231,11 +233,68 @@ func (a *Agent) poll(ctx context.Context) {
 	switch cmd.Type {
 	case protocol.CmdUpgradeComponent, protocol.CmdRollbackComponent:
 		a.executeUpgrade(ctx, cmd)
+	case protocol.CmdRunCommand:
+		a.executeRunCommand(ctx, cmd)
 	case protocol.CmdSelfUpdate:
 		a.executeSelfUpdate(ctx, cmd)
 	default:
 		log.Printf("暂不支持的指令类型: %s", cmd.Type)
 	}
+}
+
+// executeRunCommand 执行一次性脚本/命令（kind=command 任务）。
+//
+// 不进入组件升级流水线，也不做备份/停服/回滚；复用阶段上报，
+// 让任务详情页能实时看到执行输出。
+func (a *Agent) executeRunCommand(ctx context.Context, cmd protocol.Command) {
+	spec := cmd.Payload.Command
+	a.postStage(cmd.ID, protocol.StageRequest{
+		AgentID: a.cfg.AgentID, Stage: protocol.StageRunCommand,
+		Message: "开始执行命令\n",
+	})
+	res := executor.ExecuteCommand(ctx, spec, func(chunk string) {
+		// 实时输出：按块上报阶段消息，任务详情页无需等最终结果即可看到日志。
+		// 服务端对 run_command 阶段按原文拼接（不加时间戳前缀），保留脚本原始排版。
+		if chunk == "" {
+			return
+		}
+		a.postStage(cmd.ID, protocol.StageRequest{
+			AgentID: a.cfg.AgentID, Stage: protocol.StageRunCommand,
+			Message: chunk,
+		})
+	}, func(stage, message string) {
+		a.postStage(cmd.ID, protocol.StageRequest{
+			AgentID: a.cfg.AgentID, Stage: stage, Message: message,
+		})
+	})
+	if res == nil {
+		res = &executor.CommandResult{ExitCode: -1}
+	}
+	// 先上报终态阶段：即使最终 report 丢失，服务端也能据 done/failed 阶段闭环，
+	// 不会让命令任务永久停在执行中。
+	if res.Success {
+		a.postStage(cmd.ID, protocol.StageRequest{
+			AgentID: a.cfg.AgentID, Stage: protocol.StageDone, Message: "命令执行完成",
+		})
+	} else {
+		a.postStage(cmd.ID, protocol.StageRequest{
+			AgentID: a.cfg.AgentID, Stage: protocol.StageFailed,
+			Message: fmt.Sprintf("命令执行失败（exit %d）", res.ExitCode),
+		})
+	}
+	report := protocol.ReportRequest{
+		AgentID: a.cfg.AgentID, Stage: protocol.StageDone, ExitCode: res.ExitCode, Log: res.Log,
+	}
+	if res.Success {
+		report.Status = protocol.CmdSuccess
+	} else {
+		report.Status = protocol.CmdFailed
+		report.Stage = protocol.StageFailed
+		if res.Log == "" {
+			report.Log = "[exec] 命令执行失败\n"
+		}
+	}
+	_ = a.postReportWithRetry(cmd.ID, report)
 }
 
 func (a *Agent) executeSelfUpdate(ctx context.Context, cmd protocol.Command) {

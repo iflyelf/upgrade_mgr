@@ -58,13 +58,14 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		if len(signatureModes) == 0 {
 			signatureModes = []string{protocol.SignatureModeID}
 		}
+		capabilities := protocol.NormalizeCapabilities(req.Capabilities)
 		buildVersion, buildHash, buildVariant := normalizeAgentBuild(req.BuildVersion, req.BuildHash, req.BuildVariant)
 
 		// 安全：token 仅存哈希（SHA-256，token 为 256bit 随机，抗爆破）；明文只回给 Agent 一次。
-		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO agents (agent_id, ip, token_hash, secret, arch, os, agent_version, supervisor, signature_modes, build_version, build_hash, build_variant, status, last_heartbeat_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'online',NOW())`,
+		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO agents (agent_id, ip, token_hash, secret, arch, os, agent_version, supervisor, signature_modes, capabilities, build_version, build_hash, build_variant, status, last_heartbeat_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'online',NOW())`,
 			agentID, ip, agentgw.HashToken(token), secret, req.Arch, req.OS, req.AgentVersion, req.Supervisor,
-			strings.Join(signatureModes, ","), buildVersion, buildHash, buildVariant)
+			strings.Join(signatureModes, ","), strings.Join(capabilities, ","), buildVersion, buildHash, buildVariant)
 		if err != nil {
 			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
@@ -119,6 +120,14 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 				_, _ = s.DB.Exec(`UPDATE agents SET signature_modes=$2
 					WHERE agent_id=$1 AND signature_modes IS DISTINCT FROM $2`,
 					agentID, strings.Join(modes, ","))
+			}
+		}
+		// 能力：与签名能力一样支持原地升级后刷新，旧 Agent 不上报则不覆盖。
+		if len(req.Capabilities) > 0 {
+			if caps := protocol.NormalizeCapabilities(req.Capabilities); len(caps) > 0 {
+				_, _ = s.DB.Exec(`UPDATE agents SET capabilities=$2
+					WHERE agent_id=$1 AND capabilities IS DISTINCT FROM $2`,
+					agentID, strings.Join(caps, ","))
 			}
 		}
 		buildVersion, buildHash, buildVariant := normalizeAgentBuild(req.BuildVersion, req.BuildHash, req.BuildVariant)

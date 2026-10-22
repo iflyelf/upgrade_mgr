@@ -17,7 +17,7 @@ import (
 func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error {
 	tCond, tArgs := sc.Where("", 2)
 	var status string
-	var componentID int64
+	var componentID sql.NullInt64
 	var version string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT status, component_id, version FROM upgrade_tasks WHERE id=$1 AND `+tCond,
@@ -33,9 +33,11 @@ func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error
 		return fmt.Errorf("任务状态 %s 不可启动", status)
 	}
 
-	// 校验组件存在
-	if _, err := s.compRepo.Get(ctx, sc, componentID); err != nil {
-		return err
+	// 校验组件存在（命令任务没有组件）
+	if componentID.Valid {
+		if _, err := s.compRepo.Get(ctx, sc, componentID.Int64); err != nil {
+			return err
+		}
 	}
 	// 置为 running，实际的批次下发由 Orchestrator 按灰度策略逐批推进。
 	// 带状态条件并检查影响行数：防止检查后任务被取消/删除，或被并发操作改状态。

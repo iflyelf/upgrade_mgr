@@ -125,7 +125,8 @@
     downloading: '下载制品', downloaded: '下载完成', pre_install: '安装前检查',
     backup: '备份当前版本', stopping: '停止服务', replacing: '替换文件',
     exec: '执行安装', starting: '启动服务', verifying: '验证版本',
-    post_install: '安装后处理', rollback: '回滚', failed: '失败', done: '完成'
+    post_install: '安装后处理', rollback: '回滚', failed: '失败', done: '完成',
+    run_command: '执行命令'
   };
   var AGENT_STATUS = {
     online: '在线', upgrading: '升级中', restarting: '重启中',
@@ -412,7 +413,7 @@
     {
       key: 'node_exporter_script',
       label: 'node_exporter（上传安装脚本，Agent 下载后执行）',
-      desc: '直接使用真实可用的 script_url（通过 proxy.xiaonuo.live 代理本仓库 examples/node_exporter/install.sh），不需要上传制品。Agent 下载脚本后用 Shell 执行；脚本会自行从 iflyelf/node_exporter latest 下载静态二进制（当前 1.12.1，仅 amd64/arm64），并按目标机 init 写 systemd unit 或 SysV init。script 模式需要在“设置”里打开 agent.allow_exec_mode；高级配置 JSON 已预填 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd，post_install 脚本文本框也填入了一段可选的安装后检查示例，可直接修改参考。若不想依赖外链，删除高级 JSON 中的 script_url，改为上传 examples/node_exporter/install.sh 作为制品即可。',
+      desc: '直接使用真实可用的 script_url（通过 proxy.xiaonuo.live 代理本仓库 examples/node_exporter/install.sh），不需要上传制品。Agent 下载脚本后用 Shell 执行；脚本会自行从 iflyelf/node_exporter latest 下载静态二进制（当前 1.12.1，仅 amd64/arm64），并按目标机 init 写 systemd unit 或 SysV init。script 模式与命令任务默认可用（由 agent.allow_exec_mode 控制，默认开启，可在“设置”里关闭）；高级配置 JSON 已预填 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd，post_install 脚本文本框也填入了一段可选的安装后检查示例，可直接修改参考。若不想依赖外链，删除高级 JSON 中的 script_url，改为上传 examples/node_exporter/install.sh 作为制品即可。',
       comp: {
         name: 'node_exporter', display_name: 'Node Exporter', deploy_mode: 'script',
         binary_name: 'node_exporter',
@@ -482,7 +483,7 @@
         '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
         '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',
         'CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11：无 systemd，脚本自动写 /etc/init.d/node_exporter。',
-        'script 模式需要管理员在“设置”里打开 agent.allow_exec_mode：Agent 会下载安装脚本并以 Shell 执行（优先 bash，缺失时 sh）。',
+        'agent.allow_exec_mode 默认开启：Agent 会下载安装脚本并以 Shell 执行（优先 bash，缺失时 sh）；如需禁止可在“设置”里关闭。',
         '高级配置 JSON 的 exec_args / exec_env / exec_timeout / work_dir 会直接控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。',
         '安装脚本会自行下载 node_exporter 二进制、注册服务并启动，不需要在 post_install 里写大段 shell。',
         '需要平台备份/回滚时改用“填入二进制替换示例”：服务注册逻辑放在独立的 post_install 脚本文本框里，不再写进高级配置 JSON。',
@@ -1026,7 +1027,7 @@
           field('显示名称 (display_name)', dispEl, '页面上展示的名字。')
         ]),
         h('div', { class: 'grid2' }, [
-          field('部署模式 (deploy_mode)', modeEl, 'script / exec / replace_exec 需要在“设置”里打开 agent.allow_exec_mode。script 模式可用高级 JSON 的 script_url 自定义 HTTP(S) 下载地址（需新版 Agent）。'),
+          field('部署模式 (deploy_mode)', modeEl, 'script / exec / replace_exec 由 agent.allow_exec_mode 控制（默认开启，可在“设置”里关闭）。script 模式可用高级 JSON 的 script_url 自定义 HTTP(S) 下载地址（需新版 Agent）。'),
           field('服务名称 (service_name)', svcEl, 'systemd/sysv 服务名。首次安装时服务尚不存在，Agent 会跳过停服，安装后再启动。')
         ]),
         h('div', { class: 'grid2' }, [
@@ -1275,17 +1276,24 @@
 
     modal.appendChild(h('div', { class: 'detail-summary' }, [
       h('div', { class: 'detail-stat' }, ['状态: ', h('span', { class: 'tag status-' + d.status }, [statusText(d.status)])]),
-      h('div', { class: 'detail-stat' }, ['组件: ', d.component_display_name || d.component_name || ('#' + d.component_id)]),
+      h('div', { class: 'detail-stat' }, ['类型: ', d.kind === 'command' ? '执行命令/脚本' : '组件升级']),
+      d.kind === 'command' ? null : h('div', { class: 'detail-stat' }, ['组件: ', d.component_display_name || d.component_name || ('#' + d.component_id)]),
       h('div', { class: 'detail-stat' }, ['目标版本: ', d.version || '-']),
       h('div', { class: 'detail-stat' }, ['进度: ', done + ' / ' + total + '（' + percent + '%）']),
       h('div', { class: 'detail-stat' }, ['成功: ', success, ' 失败: ', failed, ' 执行中/待执行: ', active]),
       h('div', { class: 'detail-stat' }, ['创建人: ', d.created_by || '-']),
       h('div', { class: 'detail-stat' }, ['创建时间: ', fmtTime(d.created_at)])
     ]));
+    if (d.kind === 'command' && d.command && d.command.script) {
+      modal.appendChild(h('details', { class: 'log-details' }, [
+        h('summary', {}, ['查看命令脚本']),
+        h('pre', { class: 'code log-pre' }, [d.command.script])
+      ]));
+    }
     modal.appendChild(h('div', { class: 'progress', title: '完成 ' + done + ' / ' + total }, [
       h('div', { style: 'width:' + percent + '%' }, [])
     ]));
-    modal.appendChild(hint('运行中/已暂停任务每 4 秒自动刷新，终态任务停止刷新；日志来自 Agent 阶段上报和最终执行结果。'));
+    modal.appendChild(hint('运行中/已暂停任务每 4 秒自动刷新执行日志，终态任务停止刷新；日志来自 Agent 阶段上报和最终执行结果。'));
 
     var batches = d.batches || [];
     modal.appendChild(h('h4', { class: 'detail-subtitle' }, ['批次进度']));
@@ -1315,13 +1323,18 @@
         var logText = '';
         cmds.forEach(function (c) { if (c.log) logText += c.log; });
         if (!logText) logText = x.log || '';
+        // 命令任务默认展开执行中/失败主机的日志，轮询刷新时用户无需反复点击。
+        var expanded = state.taskDetailOpenLogs[x.id];
+        if (expanded === undefined) {
+          expanded = d.kind === 'command' &&
+            (x.status === 'running' || x.status === 'failed' || x.status === 'timeout');
+        }
         var logEl = logText
           ? h('details', {
               class: 'log-details',
-              open: state.taskDetailOpenLogs[x.id] ? 'open' : null,
+              open: expanded ? 'open' : null,
               ontoggle: function (e) {
-                if (e.target.open) state.taskDetailOpenLogs[x.id] = true;
-                else delete state.taskDetailOpenLogs[x.id];
+                state.taskDetailOpenLogs[x.id] = !!e.target.open;
               }
             }, [
               h('summary', {}, ['查看日志' + (latest ? '（' + cmdStatusText(latest.status) + '）' : '')]),
@@ -1387,9 +1400,11 @@
 
     // 表单值放在 state.taskForm 里：预览会触发 render，靠它保留用户输入。
     var f = state.taskForm || (state.taskForm = {
-      name: '', component_id: '', version: '', ip_expr: '',
+      kind: 'upgrade', name: '', component_id: '', version: '', ip_expr: '',
+      script: '', interpreter: '', args: '', stdin: '', tty: false, timeout: '10m',
       mode: 'count', batch_size: '10', canary_count: '1', auto_promote: true
     });
+    if (!f.kind) f.kind = 'upgrade';
 
     function versionsFor(cid) {
       var out = [];
@@ -1443,6 +1458,39 @@
       h('option', { value: 'canary' }, ['canary（金丝雀首批）']),
       h('option', { value: 'percent' }, ['percent（按百分比分批）'])
     ]);
+    var kindEl = h('select', {
+      value: f.kind,
+      onchange: function () { f.kind = kindEl.value; state.preview = null; render(); }
+    }, [
+      h('option', { value: 'upgrade' }, ['组件升级（upgrade）']),
+      h('option', { value: 'command' }, ['执行命令/脚本（command）'])
+    ]);
+    var scriptEl = h('textarea', {
+      rows: '8',
+      placeholder: '#!/bin/bash\n# 例如卸载旧监控：\nbash <(curl -s http://qxbdown.iflytek.com/get/monitor/install-monitor.sh) uninstall\n',
+      value: f.script || '',
+      oninput: function () { f.script = scriptEl.value; }
+    }, []);
+    var interpEl = h('input', {
+      value: f.interpreter || '', placeholder: '留空自动 bash/sh',
+      oninput: function () { f.interpreter = interpEl.value; }
+    }, []);
+    var argsEl = h('input', {
+      value: f.args || '', placeholder: '如 uninstall（多个用空格分隔）',
+      oninput: function () { f.args = argsEl.value; }
+    }, []);
+    var stdinEl = h('input', {
+      value: f.stdin || '', placeholder: '如 Y\\n（交互确认时必填）',
+      oninput: function () { f.stdin = stdinEl.value; }
+    }, []);
+    var ttyEl = h('input', {
+      type: 'checkbox', checked: !!f.tty,
+      onchange: function () { f.tty = ttyEl.checked; }
+    }, []);
+    var timeoutEl = h('input', {
+      value: f.timeout || '10m', placeholder: '如 10m、30m',
+      oninput: function () { f.timeout = timeoutEl.value; }
+    }, []);
     var batchEl = h('input', {
       type: 'number', min: '1', value: f.batch_size,
       oninput: function () { f.batch_size = batchEl.value; }
@@ -1457,10 +1505,11 @@
     }, []);
 
     function taskBody() {
-      return {
-        name: f.name.trim() || ('升级 ' + (compMap[f.component_id] ? compMap[f.component_id].name : '组件') + ' ' + f.version),
-        component_id: parseInt(f.component_id, 10) || 0,
-        version: f.version.trim(),
+      var body = {
+        kind: f.kind,
+        name: f.name.trim() || (f.kind === 'command'
+          ? ('执行命令 ' + (new Date()).toLocaleString())
+          : ('升级 ' + (compMap[f.component_id] ? compMap[f.component_id].name : '组件') + ' ' + f.version)),
         selector: { ip_expr: f.ip_expr.trim() },
         strategy: {
           mode: f.mode,
@@ -1469,9 +1518,38 @@
           auto_promote: !!f.auto_promote
         }
       };
+      if (f.kind === 'command') {
+        body.version = 'command';
+        body.command = {
+          script: f.script || '',
+          interpreter: (f.interpreter || '').trim(),
+          args: (f.args || '').split(/\s+/).filter(function (x) { return x; }),
+          stdin: unescapeInput(f.stdin || ''),
+          tty: !!f.tty,
+          timeout: (f.timeout || '10m').trim()
+        };
+      } else {
+        body.component_id = parseInt(f.component_id, 10) || 0;
+        body.version = f.version.trim();
+      }
+      return body;
+    }
+
+    // unescapeInput 把用户输入的 \n、\t 转成真实字符，便于填写交互确认内容。
+    function unescapeInput(s) {
+      return s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r');
     }
 
     function checkForm() {
+      if (f.kind === 'command') {
+        if (!(f.script || '').trim()) {
+          state.err = '请填写要执行的 Shell 脚本';
+          state.preview = null;
+          render();
+          return false;
+        }
+        return true;
+      }
       if (!f.component_id || !f.version.trim()) {
         state.err = '请先选择组件并填写目标版本（使用制品时需与制品版本一致；使用 script_url 时可填 latest）';
         state.preview = null;
@@ -1507,6 +1585,7 @@
         alert('请先到“组件”页点“填入示例：node_exporter（脚本安装）”并保存');
         return;
       }
+      f.kind = 'upgrade';
       var vers = versionsFor(comp.id);
       f.component_id = String(comp.id);
       f.version = comp.script_url ? 'latest' : (vers[0] || 'latest');
@@ -1516,6 +1595,25 @@
       f.batch_size = '10';
       f.canary_count = '1';
       f.auto_promote = false;
+      state.preview = null;
+      state.err = '';
+      render();
+    }
+
+    // fillCommandSample 预填“卸载旧监控”示例：
+    // 通过 script(1) 分配伪终端并喂 Y，兼容必须读取 /dev/tty 的交互脚本。
+    function fillCommandSample() {
+      f.kind = 'command';
+      f.name = '卸载旧监控（示例）';
+      f.ip_expr = '10.1.255.24-26';
+      f.script = 'script -q -c "bash <(curl -s http://qxbdown.iflytek.com/get/monitor/install-monitor.sh) uninstall" /dev/null';
+      f.interpreter = '/bin/bash';
+      f.stdin = 'Y\\n';
+      f.tty = false; // 脚本内部已通过 script(1) 分配伪终端
+      f.timeout = '30m';
+      f.mode = 'count';
+      f.batch_size = '10';
+      f.auto_promote = true;
       state.preview = null;
       state.err = '';
       render();
@@ -1536,17 +1634,34 @@
     }
 
     var form = h('div', { class: 'card' }, [
-      h('h3', {}, ['创建升级任务']),
+      h('h3', {}, ['创建任务']),
       state.err ? h('div', { class: 'err field', role: 'alert' }, [state.err]) : null,
+      field('任务类型', kindEl, '组件升级走制品/备份/回滚流程；执行命令/脚本用于卸载、清理等一次性操作。'),
       h('div', { class: 'grid2' }, [
         field('任务名', nameEl, '留空会自动生成。'),
-        field('组件', compEl, state.components.length ? '' : '还没有组件，请先到“组件”页创建。')
+        f.kind === 'command'
+          ? field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
+          : field('组件', compEl, state.components.length ? '' : '还没有组件，请先到“组件”页创建。')
       ]),
-      h('div', { class: 'grid2' }, [
+      f.kind === 'command' ? null : h('div', { class: 'grid2' }, [
         field('目标版本', verEl, '使用制品时从已上传制品中选择；使用 script_url 时可填 latest（仅作记录）。'),
         field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
       ]),
-      datalist,
+      f.kind === 'command' ? null : datalist,
+      f.kind === 'command' ? field('命令脚本', scriptEl,
+        '脚本会以文件形式交给解释器执行，支持管道、重定向与进程替换。需要交互确认时填写标准输入，必要时勾选伪终端。') : null,
+      f.kind === 'command' ? h('div', { class: 'grid2' }, [
+        field('解释器', interpEl, '留空自动选择 bash（缺失回退 sh）；仅允许 bash/sh/dash/ksh/zsh。'),
+        field('脚本参数', argsEl, '按空格分隔后作为 $1、$2… 传入。')
+      ]) : null,
+      f.kind === 'command' ? h('div', { class: 'grid2' }, [
+        field('标准输入 (stdin)', stdinEl, '输入 \\n 表示回车；如交互确认填 Y\\n。'),
+        field('超时', timeoutEl, '如 10m、30m；默认 10m。')
+      ]) : null,
+      f.kind === 'command' ? h('div', { class: 'field' }, [
+        h('label', { class: 'check' }, [ttyEl, ' 分配伪终端（PTY）']),
+        hint('脚本必须直接读写 /dev/tty 时勾选。命令脚本本身已用 script(1) 分配伪终端时无需勾选。')
+      ]) : null,
       h('div', { class: 'grid2' }, [
         field('灰度策略', modeEl, 'count 每批固定台数；canary 先发首批再按批推进；percent 每批按百分比。'),
         field('每批台数 / 百分比', batchEl, f.mode === 'percent' ? '百分比模式填 1-100。' : '数量模式填每批台数。')
@@ -1560,7 +1675,9 @@
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn ghost', onclick: doPreview }, ['预览']),
         h('button', { class: 'btn', onclick: doCreate }, ['创建任务']),
-        h('button', { class: 'btn ghost', onclick: fillSample }, ['填入示例'])
+        f.kind === 'command'
+          ? h('button', { class: 'btn ghost', onclick: fillCommandSample }, ['填入示例：卸载旧监控'])
+          : h('button', { class: 'btn ghost', onclick: fillSample }, ['填入示例'])
       ]),
       hint('创建后任务处于 draft 状态，需要在下方列表点“启动”才会开始下发。')
     ]);
@@ -1570,17 +1687,19 @@
         h('span', { class: 'muted' }, ['共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。']),
         h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
       ]),
-      simpleTable(['ID', '名称', '组件', '版本', '状态', '进度', '总数', '成功', '失败', '操作'], state.tasks,
+      simpleTable(['ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '操作'], state.tasks,
         function (x) {
           var c = compMap[x.component_id];
           var acts = [detailBtn(x)].concat(isAdmin() ? taskActions(x) : []);
           var pct = x.total ? Math.round(x.success * 100 / x.total) : 0;
+          var isCmd = x.kind === 'command';
           return [x.id,
+            isCmd ? '命令' : '升级',
             h('a', {
               href: '#', class: 'link',
               onclick: function (e) { e.preventDefault(); openTaskDetail(x.id); }
             }, [x.name]),
-            c ? c.name : x.component_id, x.version,
+            isCmd ? '执行脚本' : (c ? c.name : x.component_id), x.version,
             h('span', { class: 'tag status-' + x.status }, [statusText(x.status)]),
             h('div', { class: 'progress progress-sm', title: '成功 ' + x.success + ' / ' + x.total }, [
               h('div', { style: 'width:' + pct + '%' }, [])
