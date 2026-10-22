@@ -408,23 +408,80 @@
     'fi'
   ].join('\n');
 
+  // INSTALL_SCRIPT_URL：node_exporter 安装脚本（经 proxy 代理），组件示例与任务示例共用。
+  var INSTALL_SCRIPT_URL = 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh';
+
+  // installScript(action) 生成“先下载 install.sh 再执行指定动作”的脚本。
+  // 不使用 `bash <(curl ...)`：某些环境把 -c 字符串交给 /bin/sh（dash）解析，
+  // 进程替换 <(...) 是 bash 语法，会报 Syntax error: "(" unexpected。
+  // 组件 exec 模式与任务命令模式共用这段骨架，只改最后一个动作参数。
+  function installScript(action) {
+    return [
+      '#!/bin/bash',
+      'set -e',
+      'url=\'' + INSTALL_SCRIPT_URL + '\'',
+      'f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)',
+      'trap \'rm -f "$f"\' EXIT',
+      'if command -v curl >/dev/null 2>&1; then',
+      '  curl -fsSL "$url" -o "$f"',
+      'elif command -v wget >/dev/null 2>&1; then',
+      '  wget -qO "$f" "$url"',
+      'else',
+      '  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1',
+      'fi',
+      'bash "$f" ' + action
+    ].join('\n');
+  }
+
   // 组件模板：顶层字段对应表单，其余字段回填到“高级配置 JSON”。
   var COMP_TEMPLATES = [
     {
       key: 'node_exporter_exec',
-      label: '只执行命令（exec，无需制品：安装/更新 node_exporter）',
-      desc: '演示“只执行命令”模式：不下载制品、不替换二进制，直接以 /bin/bash -c 运行一条命令。示例调用本仓库 install.sh 的 install 动作，脚本会自行下载二进制并注册服务；把命令末尾的 install 改成 update 即可完成升级，改成 status 可查看状态。Agent 只负责执行命令并回收输出，服务启停与回滚由脚本自行处理（本示例不填服务名，避免平台重复启停）。命令数组在 Agent 侧直接 exec，不经过 sh；需要 shell 特性时显式使用 bash -c。注意：若要改成 uninstall -y 卸载，请同时删除高级 JSON 里的 health_cmd / version_cmd，否则卸载后健康检查必然失败，任务会被标记为失败。',
+      label: '只执行命令（exec，无需制品：安装 node_exporter）',
+      desc: '演示“只执行命令”模式：不下载制品、不替换二进制，直接以 /bin/bash -c 运行一段脚本。示例调用本仓库 install.sh 的 install 动作，脚本会自行下载二进制并注册服务。Agent 只负责执行命令并回收输出，服务启停与回滚由脚本自行处理（本示例不填服务名，避免平台重复启停）。命令数组在 Agent 侧直接 exec，不经过 sh；需要 shell 特性时显式使用 bash -c。需要升级请用“更新”示例，卸载请用“卸载”示例。',
       comp: {
-        name: 'node_exporter_cmd', display_name: 'Node Exporter（只执行命令）',
+        name: 'node_exporter_cmd', display_name: 'Node Exporter（只执行命令-安装）',
         deploy_mode: 'exec',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
         exec_path: '/bin/bash',
-        exec_args: ['-c', 'bash <(curl -fsSL "https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh") install'],
+        exec_args: ['-c', installScript('install')],
         exec_timeout: '30m',
         health_cmd: [['pgrep', '-x', 'node_exporter']],
         version_cmd: [['/opt/monitor/exporter/node_exporter', '--version']]
+      }
+    },
+    {
+      key: 'node_exporter_exec_update',
+      label: '只执行命令（exec，无需制品：更新 node_exporter）',
+      desc: '与“安装”示例同源，只是把 install.sh 的动作改成 update：脚本先备份旧二进制到 node_exporter.bak，重启服务后若启动失败会自动回滚。适合已安装过 node_exporter、只想升级版本的机器。组件名独立（node_exporter_update），避免与安装组件互相覆盖。',
+      comp: {
+        name: 'node_exporter_update', display_name: 'Node Exporter（只执行命令-更新）',
+        deploy_mode: 'exec',
+        binary_name: 'node_exporter',
+        install_path: '/opt/monitor/exporter/node_exporter',
+        service_name: '', service_mgr: 'auto', enabled: true,
+        exec_path: '/bin/bash',
+        exec_args: ['-c', installScript('update')],
+        exec_timeout: '30m',
+        health_cmd: [['pgrep', '-x', 'node_exporter']],
+        version_cmd: [['/opt/monitor/exporter/node_exporter', '--version']]
+      }
+    },
+    {
+      key: 'node_exporter_exec_uninstall',
+      label: '只执行命令（exec，无需制品：卸载 node_exporter）',
+      desc: '执行 install.sh 的 uninstall 动作，停止并删除服务、二进制与数据。这里用 -y 跳过交互确认（exec 模式没有 stdin，不能用 Y\\n 确认）。卸载后目标机上已无该服务，因此本示例不填 health_cmd / version_cmd——若保留会在卸载完成后做健康检查并必然失败，任务被标记为失败。',
+      comp: {
+        name: 'node_exporter_uninstall', display_name: 'Node Exporter（只执行命令-卸载）',
+        deploy_mode: 'exec',
+        binary_name: 'node_exporter',
+        install_path: '/opt/monitor/exporter/node_exporter',
+        service_name: '', service_mgr: 'auto', enabled: true,
+        exec_path: '/bin/bash',
+        exec_args: ['-c', installScript('uninstall -y')],
+        exec_timeout: '30m'
       }
     },
     {
@@ -496,7 +553,8 @@
         '“同步 Consul”也能导入主机，但没装 Agent 的主机在任务下发时会被跳过。'
       ]),
       step('2', '组件 定义装什么、装到哪', 'components', [
-        '点“新建组件”，再点“填入示例：只执行命令”：部署模式 exec，不依赖制品，直接运行 /bin/bash -c 调用 install.sh 的 install 动作；把命令里的 install 改成 update 即升级、改成 status 即查看状态。适合只执行命令、不需要平台备份/替换二进制的场景。若改成 uninstall -y 卸载，记得同时删除高级 JSON 中的 health_cmd / version_cmd，否则卸载后健康检查必然失败。',
+        '组件示例提供「只执行命令」三种动作，与「任务」页的命令脚本一一对应：安装（exec_args 执行 install.sh install）、更新（update，备份旧二进制并在启动失败时自动回滚）、卸载（uninstall -y，跳过交互确认）。三者都先下载 install.sh 到临时文件再执行，不依赖 bash 进程替换，dash/ash 环境也不会报语法错误。',
+        '卸载示例不带服务名、health_cmd、version_cmd：exec 模式没有 stdin，因此传 -y；卸载后服务已不存在，保留健康检查会让任务必然失败。',
         '点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
         '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
         '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',
@@ -1072,7 +1130,9 @@
         h('div', { class: 'toolbar' }, [
           h('button', { class: 'btn', onclick: saveComp }, ['保存']),
           h('button', { class: 'btn ghost', onclick: function () { state.editingComp = null; state.err = ''; render(); } }, ['取消']),
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入只执行命令示例']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入只执行命令（安装）']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_update'); } }, ['填入只执行命令（更新）']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_uninstall'); } }, ['填入只执行命令（卸载）']) : null,
           !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入脚本安装示例']) : null,
           !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['填入二进制替换示例']) : null
         ])
@@ -1087,7 +1147,9 @@
           render();
         }
       }, ['新建组件']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入示例：只执行命令']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入示例：只执行命令（安装）']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_update'); } }, ['填入示例：只执行命令（更新）']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_uninstall'); } }, ['填入示例：只执行命令（卸载）']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入示例：node_exporter（脚本安装）']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['二进制替换示例']) : null,
       h('span', { class: 'muted' }, ['共 ' + state.components.length + ' 个组件'])
@@ -1119,7 +1181,7 @@
     );
 
     var empty = state.components.length === 0
-      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：只执行命令 / node_exporter（脚本安装）”。'])
+      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：只执行命令（安装 / 更新 / 卸载） / node_exporter（脚本安装）”。'])
       : null;
 
     return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table, empty])]);
@@ -1604,16 +1666,21 @@
     }
 
     function fillSample() {
-      var comp = state.components.filter(function (x) { return x.name === 'node_exporter'; })[0];
+      var names = ['node_exporter', 'node_exporter_cmd', 'node_exporter_update', 'node_exporter_uninstall'];
+      var comp = null;
+      for (var i = 0; i < names.length; i++) {
+        comp = state.components.filter(function (x) { return x.name === names[i]; })[0];
+        if (comp) break;
+      }
       if (!comp) {
-        alert('请先到“组件”页点“填入示例：node_exporter（脚本安装）”并保存');
+        alert('请先到“组件”页点“填入示例：只执行命令（安装 / 更新 / 卸载）”或“node_exporter（脚本安装）”并保存');
         return;
       }
       f.kind = 'upgrade';
       var vers = versionsFor(comp.id);
       f.component_id = String(comp.id);
       f.version = comp.script_url ? 'latest' : (vers[0] || 'latest');
-      f.name = 'node_exporter 升级示例';
+      f.name = comp.name + ' 升级示例';
       f.ip_expr = '10.1.255.24-26';
       f.mode = 'canary';
       f.batch_size = '10';
@@ -1624,26 +1691,7 @@
       render();
     }
 
-    // commandScript 生成命令任务的通用脚本：先下载 install.sh 再按动作执行。
-    // 不使用 `script -c "bash <(curl ...)"`：script 的 -c 由 /bin/sh 解析，
-    // 进程替换 <(...) 是 bash 语法，dash/ash 下会报 Syntax error。
-    function commandScript(action) {
-      return [
-        '#!/bin/bash',
-        'set -e',
-        'url=\'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh\'',
-        'f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)',
-        'trap \'rm -f "$f"\' EXIT',
-        'if command -v curl >/dev/null 2>&1; then',
-        '  curl -fsSL "$url" -o "$f"',
-        'elif command -v wget >/dev/null 2>&1; then',
-        '  wget -qO "$f" "$url"',
-        'else',
-        '  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1',
-        'fi',
-        'bash "$f" ' + action
-      ].join('\n');
-    }
+    // 命令任务与组件示例共用 installScript(action) 骨架（顶层已定义）。
 
     // fillCommandInstallSample 预填“安装/更新 node_exporter”示例：
     // install.sh 的 install 动作幂等，已安装时会覆盖升级，首次执行即安装。
@@ -1651,7 +1699,7 @@
       f.kind = 'command';
       f.name = '安装/更新 node_exporter（示例）';
       f.ip_expr = '10.1.255.24-26';
-      f.script = commandScript('install');
+      f.script = installScript('install');
       f.interpreter = '/bin/bash';
       f.stdin = '';
       f.tty = false;
@@ -1670,7 +1718,7 @@
       f.kind = 'command';
       f.name = '更新 node_exporter（示例）';
       f.ip_expr = '10.1.255.24-26';
-      f.script = commandScript('update');
+      f.script = installScript('update');
       f.interpreter = '/bin/bash';
       f.stdin = '';
       f.tty = false;
@@ -1691,7 +1739,7 @@
       f.kind = 'command';
       f.name = '卸载旧监控（示例）';
       f.ip_expr = '10.1.255.24-26';
-      f.script = commandScript('uninstall');
+      f.script = installScript('uninstall');
       f.interpreter = '/bin/bash';
       f.stdin = 'Y\\n';
       f.tty = false; // 不需要 PTY：install.sh 的 uninstall 直接读取 stdin
