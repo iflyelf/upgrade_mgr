@@ -25,8 +25,12 @@
 #   NODE_EXPORTER_BASE     下载基础 URL，默认 GitHub iflyelf release 地址
 #
 # 平台命令任务示例（卸载）：
-#   script -q -c "bash <(curl -s 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh') uninstall" /dev/null
-#   标准输入填 Y\n（或追加 -y）。
+#   url='https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh'
+#   f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)
+#   curl -fsSL "$url" -o "$f" && bash "$f" uninstall; rc=$?; rm -f "$f"; exit $rc
+#   标准输入填 Y\n（或给脚本追加 -y）。
+#   不要用 script -c "bash <(curl ...)"：script 的 -c 交由 /bin/sh 解析，
+#   进程替换 <(...) 是 bash 语法，dash/ash 下会报 Syntax error: "(" unexpected。
 #
 # 支持：
 #   - systemd：CentOS/RHEL/Rocky/openEuler 7+、Ubuntu 16.04+、Debian 8+、SLES 12+

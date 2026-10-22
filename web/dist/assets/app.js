@@ -1491,7 +1491,7 @@
     ]);
     var scriptEl = h('textarea', {
       rows: '8',
-      placeholder: '#!/bin/bash\n# 例如卸载旧监控（install.sh 支持 install/update/uninstall/status）：\nscript -q -c "bash <(curl -s https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh) uninstall" /dev/null\n',
+      placeholder: '#!/bin/bash\n# 例如卸载旧监控（install.sh 支持 install/update/uninstall/status）：\nset -e\nurl="https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh"\nf=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)\ncurl -fsSL "$url" -o "$f"\nbash "$f" uninstall\nrm -f "$f"\n',
       value: f.script || '',
       oninput: function () { f.script = scriptEl.value; }
     }, []);
@@ -1625,12 +1625,28 @@
     }
 
     // fillCommandSample 预填“卸载旧监控”示例：
-    // 命令内用 script(1) 分配伪终端，install.sh 会读取 stdin 确认；平台标准输入填 Y。
+    // 先把 install.sh 下载到临时文件再执行，避免 script(1) 的 -c 字符串
+    // 被 /bin/sh 解析而报 `Syntax error: "(" unexpected`（进程替换是 bash 语法）。
+    // 卸载确认由平台“标准输入”提供（Y\n），脚本内部用 read 读取，无需 PTY。
     function fillCommandSample() {
       f.kind = 'command';
       f.name = '卸载旧监控（示例）';
       f.ip_expr = '10.1.255.24-26';
-      f.script = 'script -q -c "bash <(curl -s \'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh\') uninstall" /dev/null';
+      f.script = [
+        '#!/bin/bash',
+        'set -e',
+        'url=\'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh\'',
+        'f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)',
+        'trap \'rm -f "$f"\' EXIT',
+        'if command -v curl >/dev/null 2>&1; then',
+        '  curl -fsSL "$url" -o "$f"',
+        'elif command -v wget >/dev/null 2>&1; then',
+        '  wget -qO "$f" "$url"',
+        'else',
+        '  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1',
+        'fi',
+        'bash "$f" uninstall'
+      ].join('\n');
       f.interpreter = '/bin/bash';
       f.stdin = 'Y\\n';
       f.tty = false; // 脚本内部已通过 script(1) 分配伪终端

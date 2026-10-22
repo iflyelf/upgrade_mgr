@@ -98,3 +98,29 @@ func TestShellQuote(t *testing.T) {
 		t.Fatalf("shellQuote(%q)=%q want %q", "a'b c", got, want)
 	}
 }
+
+// TestTTYCommandReturnCode 伪终端模式必须尽量透传子命令退出码。
+//
+// 老版本 script(1) 没有 -e，会总是返回 0，导致失败的脚本被标记为成功。
+// 支持 -e 时必须带上；命令字符串整体作为一个参数传入，不经过额外 shell。
+func TestTTYCommandReturnCode(t *testing.T) {
+	argv := ttyCommand("/bin/bash", "/tmp/x.sh", []string{"uninstall"})
+	if len(argv) < 5 || argv[0] != "script" {
+		t.Fatalf("非预期 argv: %v", argv)
+	}
+	hasE := false
+	for _, a := range argv[1:] {
+		if a == "-e" {
+			hasE = true
+		}
+	}
+	if hasE != scriptSupportsReturn() {
+		t.Fatalf("-e 应与探测结果一致: got=%v want=%v argv=%v", hasE, scriptSupportsReturn(), argv)
+	}
+	if argv[len(argv)-1] != "/dev/null" {
+		t.Fatalf("typescript 必须指向 /dev/null: %v", argv)
+	}
+	if argv[len(argv)-2] != "'/bin/bash' '/tmp/x.sh' 'uninstall'" {
+		t.Fatalf("命令参数拼装错误: %q", argv[len(argv)-2])
+	}
+}

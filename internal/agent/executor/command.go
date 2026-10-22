@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -144,6 +145,9 @@ func validateInterpreter(p string) error {
 //
 // script -q -c "<cmd>" /dev/null：quiet、不额外记录 typescript 文件。
 // 命令字符串中的每个参数单独做 shell 单引号转义，避免注入。
+//
+// 若 script(1) 支持 -e/--return（util-linux 2.24+），一并启用：
+// 否则 script 总是返回 0，子命令失败会被误判为成功。
 func ttyCommand(interp, path string, args []string) []string {
 	parts := make([]string, 0, len(args)+2)
 	parts = append(parts, shellQuote(interp), shellQuote(path))
@@ -151,7 +155,26 @@ func ttyCommand(interp, path string, args []string) []string {
 		parts = append(parts, shellQuote(a))
 	}
 	cmd := strings.Join(parts, " ")
-	return []string{"script", "-q", "-c", cmd, "/dev/null"}
+	argv := []string{"script"}
+	if scriptSupportsReturn() {
+		argv = append(argv, "-e")
+	}
+	return append(argv, "-q", "-c", cmd, "/dev/null")
+}
+
+var (
+	scriptReturnOnce sync.Once
+	scriptReturnOK   bool
+)
+
+// scriptSupportsReturn 探测 script(1) 是否支持 -e/--return。
+// 老版本（如 CentOS 6 的 util-linux 2.17）不支持，探测失败时保持原行为。
+func scriptSupportsReturn() bool {
+	scriptReturnOnce.Do(func() {
+		c := exec.Command("script", "-e", "-q", "-c", "exit 0", "/dev/null")
+		scriptReturnOK = c.Run() == nil
+	})
+	return scriptReturnOK
 }
 
 func ttySuffix(tty bool, stdin string) string {
