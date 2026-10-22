@@ -34,7 +34,9 @@
     agentTargetVersion: '', agentAutoUpdate: false,
     guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
-    taskDetailOpenLogs: {} };
+    taskDetailOpenLogs: {},
+    // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
+    hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false };
 
   function h(tag, attrs, children) {
     var el = document.createElement(tag);
@@ -516,6 +518,7 @@
   function switchView(v) {
     // 切换页签时关闭任务详情并停止轮询，避免后台定时器继续渲染旧弹窗。
     closeTaskDetail(true);
+    stopAutoRefresh();
     state.view = v;
     state.err = '';
     if (v === 'settings') loadSettings();
@@ -528,20 +531,55 @@
 
   function loginView() {
     var uEl, pEl;
+    var doLogin = function () {
+      if (state.loginBusy) return;
+      state.err = '';
+      state.loginBusy = true;
+      api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ username: uEl.value, password: pEl.value })
+      })
+        .then(function (u) {
+          state.user = u;
+          state.loginBusy = false;
+          state.loginName = '';
+          state.err = '';
+          loadHosts();
+        })
+        .catch(function (e) {
+          state.loginBusy = false;
+          state.loginName = uEl.value;
+          state.err = e.message;
+          render();
+        });
+    };
+    var onKey = function (ev) {
+      if (ev.key === 'Enter' || ev.keyCode === 13) {
+        ev.preventDefault();
+        doLogin();
+      }
+    };
     var card = h('div', { class: 'card login-card' }, [
       h('h2', {}, ['登录']),
-      state.err ? h('div', { class: 'err field' }, [state.err]) : null,
-      h('div', { class: 'field' }, [h('label', {}, ['用户名']), (uEl = h('input', { value: '' }, []))]),
-      h('div', { class: 'field' }, [h('label', {}, ['密码']), (pEl = h('input', { type: 'password' }, []))]),
+      state.err ? h('div', { class: 'err field', role: 'alert' }, [state.err]) : null,
+      h('div', { class: 'field' }, [h('label', {}, ['用户名']),
+        (uEl = h('input', { value: state.loginName || '', autocomplete: 'username' }, []))]),
+      h('div', { class: 'field' }, [h('label', {}, ['密码']),
+        (pEl = h('input', { type: 'password', autocomplete: 'current-password' }, []))]),
       h('button', {
-        class: 'btn', onclick: function () {
-          api('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uEl.value, password: pEl.value }) })
-            .then(function (u) { state.user = u; state.err = ''; loadHosts(); })
-            .catch(function (e) { state.err = e.message; render(); });
-        }
-      }, ['登录'])
+        class: 'btn', disabled: state.loginBusy ? 'disabled' : null,
+        onclick: doLogin
+      }, [state.loginBusy ? '登录中…' : '登录'])
     ]);
-    pEl && (pEl.type = 'password');
+    uEl.onkeydown = onKey;
+    pEl.onkeydown = onKey;
+    // 登录页自动聚焦用户名；密码框按回车同样提交。
+    setTimeout(function () {
+      try {
+        if (state.user) return;
+        if (state.loginName) pEl.focus(); else uEl.focus();
+      } catch (e) {}
+    }, 0);
     return h('div', { class: 'login-wrap' }, [card]);
   }
 
@@ -557,7 +595,8 @@
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
       state.q ? h('button', { class: 'btn ghost', onclick: function () { state.q = ''; state.hostPage = 1; loadHosts(); } }, ['清除']) : null,
       h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']),
-      state.hostsLoading ? h('span', { class: 'muted' }, ['加载中…']) : null
+      state.hostsLoading ? h('span', { class: 'muted' }, ['加载中…']) : null,
+      h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
     ]);
     qEl.onkeydown = function (ev) { if (ev.key === 'Enter') doSearch(); };
 
@@ -1527,11 +1566,15 @@
     ]);
 
     var list = h('div', { class: 'card' }, [
-      h('div', { class: 'toolbar' }, [h('span', { class: 'muted' }, ['共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。'])]),
-      simpleTable(['ID', '名称', '组件', '版本', '状态', '总数', '成功', '失败', '操作'], state.tasks,
+      h('div', { class: 'toolbar' }, [
+        h('span', { class: 'muted' }, ['共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。']),
+        h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
+      ]),
+      simpleTable(['ID', '名称', '组件', '版本', '状态', '进度', '总数', '成功', '失败', '操作'], state.tasks,
         function (x) {
           var c = compMap[x.component_id];
           var acts = [detailBtn(x)].concat(isAdmin() ? taskActions(x) : []);
+          var pct = x.total ? Math.round(x.success * 100 / x.total) : 0;
           return [x.id,
             h('a', {
               href: '#', class: 'link',
@@ -1539,6 +1582,9 @@
             }, [x.name]),
             c ? c.name : x.component_id, x.version,
             h('span', { class: 'tag status-' + x.status }, [statusText(x.status)]),
+            h('div', { class: 'progress progress-sm', title: '成功 ' + x.success + ' / ' + x.total }, [
+              h('div', { style: 'width:' + pct + '%' }, [])
+            ]),
             x.total, x.success, x.failed,
             h('div', { class: 'row-actions' }, acts)];
         }),
@@ -1618,21 +1664,27 @@
   }
 
   var hostsReqSeq = 0;
+  var tasksReqSeq = 0;
   var taskDetailSeq = 0;
   var taskDetailTimer = null;
-  function loadHosts(page) {
-    state.view = 'hosts';
+  var autoTimer = null;
+  var autoBusy = false;
+  function loadHosts(page, quiet) {
+    if (!quiet) state.view = 'hosts';
     if (page != null) {
       var p = parseInt(page, 10);
       if (p > 0) state.hostPage = p;
     }
-    state.hostsLoading = true;
+    if (!quiet) state.hostsLoading = true;
     var seq = ++hostsReqSeq;
-    api('/api/hosts?q=' + encodeURIComponent(state.q) +
+    return api('/api/hosts?q=' + encodeURIComponent(state.q) +
         '&page=' + state.hostPage + '&size=' + state.hostSize)
       .then(function (d) {
         // 快速翻页/搜索时只接受最后一次请求，避免慢响应覆盖新结果。
         if (seq !== hostsReqSeq) return;
+        if (quiet && state.view !== 'hosts') return;
+        var sig = JSON.stringify([d.list || [], d.total || 0, d.page || 1,
+          d.agent_target_version || '', !!d.agent_auto_update]);
         state.hosts = d.list || [];
         state.total = d.total || 0;
         state.hostPage = d.page || 1;
@@ -1641,14 +1693,34 @@
         state.agentTargetVersion = d.agent_target_version || '';
         state.agentAutoUpdate = !!d.agent_auto_update;
         state.hostsLoading = false;
-        state.hostErr = '';
+        // 自动刷新成功后清除上一次“加载主机失败”提示；操作类错误（删除/保存失败）
+        // 保留给用户查看，不被轮询无声清掉。手动刷新则统一清空。
+        var hadLoadErr = state.hostErr.indexOf('加载主机失败') === 0;
+        if (!quiet || hadLoadErr) state.hostErr = '';
+        // 自动刷新时数据没变化就不重建 DOM，避免打断用户滚动/选择文本。
+        if (quiet && sig === state.hostsSig && !hadLoadErr) {
+          scheduleAutoRefresh();
+          return;
+        }
+        state.hostsSig = sig;
+        var sy = window.scrollY;
         render();
+        if (quiet) window.scrollTo(0, sy);
+        scheduleAutoRefresh();
       })
       .catch(function (e) {
         if (seq !== hostsReqSeq) return;
         state.hostsLoading = false;
         state.hostErr = '加载主机失败: ' + e.message;
-        render();
+        // 自动刷新失败也要让用户看到；用滚动位置保持减少打扰。
+        if (!quiet) {
+          render();
+        } else if (state.view === 'hosts') {
+          var sy = window.scrollY;
+          render();
+          window.scrollTo(0, sy);
+        }
+        scheduleAutoRefresh();
       });
   }
   function loadSettings() {
@@ -1672,18 +1744,41 @@
         render();
       });
   }
-  function loadTasks() {
-    Promise.all([api('/api/tasks'), api('/api/components'), api('/api/artifacts')])
+  function loadTasks(quiet) {
+    if (!quiet) state.view = 'tasks';
+    var seq = ++tasksReqSeq;
+    // 自动刷新只需要任务状态；组件/制品变化很少，沿用已有数据，
+    // 避免每 4 秒重复拉取两个较大的列表。
+    var reqs = quiet
+      ? [api('/api/tasks'), Promise.resolve(state.components), Promise.resolve(state.artifacts)]
+      : [api('/api/tasks'), api('/api/components'), api('/api/artifacts')];
+    return Promise.all(reqs)
       .then(function (rs) {
+        if (seq !== tasksReqSeq) return;
+        // 请求期间用户可能已切换页签，避免后台任务数据覆盖当前页面。
+        if (state.view !== 'tasks') return;
+        var sig = JSON.stringify([rs[0] || [], rs[1] || [], rs[2] || []]);
         state.tasks = rs[0] || [];
         state.components = rs[1] || [];
         state.artifacts = rs[2] || [];
+        if (quiet && sig === state.tasksSig) {
+          scheduleAutoRefresh();
+          return;
+        }
+        state.tasksSig = sig;
+        var sy = window.scrollY;
         render();
+        if (quiet) window.scrollTo(0, sy);
+        scheduleAutoRefresh();
       })
       .catch(function (e) {
-        state.err = e.message;
-        state.tasks = [];
-        render();
+        if (seq !== tasksReqSeq) return;
+        if (!quiet) {
+          state.err = e.message;
+          state.tasks = [];
+          render();
+        }
+        scheduleAutoRefresh();
       });
   }
   function stopTaskDetailTimer() {
@@ -1702,6 +1797,7 @@
     state.taskDetailErr = '';
     state.taskDetailScroll = 0;
     state.taskDetailOpenLogs = {};
+    state.taskDetailSig = '';
     if (!skipRender) render();
   }
   function openTaskDetail(id) {
@@ -1714,6 +1810,7 @@
     state.taskDetailErr = '';
     state.taskDetailScroll = 0;
     state.taskDetailOpenLogs = {};
+    state.taskDetailSig = '';
     render();
     loadTaskDetail(id, 1);
   }
@@ -1721,14 +1818,19 @@
     stopTaskDetailTimer();
     var seq = ++taskDetailSeq;
     if (!quiet) state.taskDetailLoading = true;
-    api('/api/tasks/' + id + '?host_page=' + (page || 1) + '&host_size=50')
+    return api('/api/tasks/' + id + '?host_page=' + (page || 1) + '&host_size=50')
       .then(function (d) {
         if (seq !== taskDetailSeq || state.taskDetailId !== id) return;
+        var sig = JSON.stringify(d);
         state.taskDetail = d;
         state.taskDetailPage = d.host_page || page || 1;
         state.taskDetailLoading = false;
         state.taskDetailErr = '';
-        render();
+        // 自动轮询且数据完全一致时不重建弹窗，保留用户展开的日志与滚动位置。
+        if (!quiet || sig !== state.taskDetailSig) {
+          state.taskDetailSig = sig;
+          render();
+        }
         scheduleTaskDetailRefresh();
       })
       .catch(function (e) {
@@ -1747,7 +1849,7 @@
     // 仅运行中/已暂停任务需要轮询；终态任务不再请求。
     if (d.status !== 'running' && d.status !== 'paused') return;
     taskDetailTimer = setInterval(function () {
-      if (!state.taskDetailId) return;
+      if (!state.taskDetailId || document.hidden) return;
       loadTaskDetail(state.taskDetailId, state.taskDetailPage, true);
     }, 4000);
   }
@@ -1851,16 +1953,119 @@
       })
       .catch(function (e) { alert('同步失败: ' + e.message); });
   }
+  // autoRefreshDelay 返回当前页面自动刷新间隔；0 表示不需要轮询。
+  // 有升级动作时 4 秒刷新，空闲时 15 秒低频刷新，避免无意义的数据库压力。
+  function autoRefreshDelay() {
+    if (state.view === 'tasks') {
+      var running = state.tasks.some(function (x) {
+        return x.status === 'running' || x.status === 'paused';
+      });
+      return running ? 4000 : 15000;
+    }
+    if (state.view === 'hosts') {
+      var active = state.hosts.some(function (x) {
+        if (x.agent_status === 'upgrading' || x.agent_status === 'restarting') return true;
+        return x.agent_update_status &&
+          ['pending', 'dispatched', 'accepted', 'running'].indexOf(x.agent_update_status) >= 0;
+      });
+      return active ? 4000 : 15000;
+    }
+    return 0;
+  }
+
+  // isEditingField 判断用户是否正在输入。自动刷新会重建 DOM，
+  // 此时跳过本轮，避免输入框失焦/光标跳回开头。
+  function isEditingField() {
+    var a = document.activeElement;
+    if (!a) return false;
+    var tag = (a.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA' || a.isContentEditable) return true;
+    if (tag === 'SELECT') return true;
+    if (tag !== 'INPUT') return false;
+    var type = (a.type || 'text').toLowerCase();
+    // 勾选框/单选框/按钮聚焦时不影响刷新，避免用户点过复选框后轮询被永久暂停。
+    return ['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range', 'color'].indexOf(type) < 0;
+  }
+
+  function stopAutoRefresh() {
+    if (autoTimer) {
+      clearTimeout(autoTimer);
+      autoTimer = null;
+    }
+  }
+
+  function scheduleAutoRefresh(delay) {
+    stopAutoRefresh();
+    if (!state.user) return;
+    var d = delay || autoRefreshDelay();
+    if (!d) return;
+    autoTimer = setTimeout(autoRefreshTick, d);
+  }
+
+  function autoRefreshTick() {
+    autoTimer = null;
+    // 后台标签页不轮询，等 visibilitychange 恢复时再启动，避免无意义的定时唤醒。
+    if (document.hidden) return;
+    if (!state.user || state.taskDetailId || state.editingHost) {
+      scheduleAutoRefresh();
+      return;
+    }
+    if (isEditingField()) {
+      scheduleAutoRefresh();
+      return;
+    }
+    if (autoBusy) {
+      scheduleAutoRefresh(1000);
+      return;
+    }
+    var p = null;
+    if (state.view === 'tasks') p = loadTasks(true);
+    else if (state.view === 'hosts') p = loadHosts(state.hostPage, true);
+    if (!p) {
+      scheduleAutoRefresh();
+      return;
+    }
+    autoBusy = true;
+    Promise.resolve(p).then(function () {
+      autoBusy = false;
+      scheduleAutoRefresh();
+    }, function () {
+      autoBusy = false;
+      scheduleAutoRefresh();
+    });
+  }
+
+  // 页面重新可见时立即刷新一次，后台标签页不轮询。
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      stopAutoRefresh();
+      return;
+    }
+    if (state.user && state.view !== 'settings' && state.view !== 'components' &&
+        state.view !== 'artifacts' && state.view !== 'password') {
+      // 先清掉可能仍在排队的定时器，避免同一时刻触发两次请求。
+      stopAutoRefresh();
+      autoRefreshTick();
+    }
+  });
+
   function logout() {
     stopTaskDetailTimer();
+    stopAutoRefresh();
     api('/api/auth/logout', { method: 'POST' }).then(function () {
       state.user = null;
       state.taskDetailId = null;
       state.taskDetail = null;
+      state.hostsSig = '';
+      state.tasksSig = '';
+      state.taskDetailSig = '';
       render();
     });
   }
 
   // 启动：尝试拿当前用户
-  api('/api/auth/userinfo').then(function (u) { state.user = u; loadHosts(); }).catch(function () { render(); });
+  api('/api/auth/userinfo').then(function (u) {
+    state.user = u;
+    loadHosts().then(scheduleAutoRefresh, scheduleAutoRefresh);
+  }).catch(function () { render(); });
 })();

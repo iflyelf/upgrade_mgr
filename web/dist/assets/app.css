@@ -197,6 +197,11 @@ pre.code {
   background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 999px;
 }
 .progress > div { height: 100%; background: var(--primary-color); transition: width .3s; }
+/* 任务列表内的紧凑进度条：不参与纵向布局挤压 */
+.progress-sm { height: 6px; min-width: 72px; margin: 0; }
+/* 自动刷新状态提示：小圆点呼吸效果，避免用户误以为需要手动刷新 */
+.auto-refresh-tip { white-space: nowrap; font-size: 12px; opacity: .85; }
+.auto-refresh-tip::first-letter { color: var(--ok-color); }
 .detail-subtitle { margin: 16px 0 8px; }
 .modal .table-wrap { max-height: 340px; overflow: auto; }
 .log-details summary { cursor: pointer; color: var(--primary-color); font-size: 12px; }

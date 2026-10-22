@@ -189,32 +189,130 @@ func setIfEmpty(dst *string, v string) {
 	}
 }
 
+// cleanupBatchSize 单次事务最多删除的主机数，避免 Consul 大批离线时
+// 单个事务持锁过久、阻塞 Agent 上报与任务创建。
+const cleanupBatchSize = 500
+
+// maxCleanupBatches 单次同步最多清理的批次数。防御并发不断新增过期主机时
+// 清理循环长时间占用同步锁；剩余主机在下一轮同步继续清理。
+const maxCleanupBatches = 20
+
+// missingHostCond 返回「可以从 Consul 清单安全删除」的过滤条件。
+//
+// 参数占位符由调用方传入（不同语句的参数编号不同）：
+// 条件中两次引用同一 syncedAt 参数。
+func missingHostCond(syncedAtParam string) string {
+	return `
+		h.source='consul'
+		AND (h.agent_id IS NULL OR h.agent_id='')
+		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
+		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
+		AND (h.maintenance_until IS NULL OR h.maintenance_until <= NOW())
+		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.ip = h.ip)
+		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.host_id = h.id)
+		AND NOT EXISTS (SELECT 1 FROM task_hosts th
+		                WHERE th.host_id=h.id AND th.status IN ('pending','running'))
+		AND NOT EXISTS (SELECT 1 FROM commands c
+		                WHERE c.host_id=h.id AND c.status IN ('pending','dispatched','accepted','running'))`
+}
+
 // cleanupMissingHosts 清理本轮未出现在 Consul 中的纯 Consul 主机。
 //
 // syncedAt 与本轮所有 upsert 使用的 last_synced_at 相同：本轮出现的主机
 // last_synced_at=syncedAt，不会被删除；上一轮及更早的才小于 syncedAt。
 // 有 Agent、Agent 记录、未完成任务/指令的主机一律保留。
+//
+// 并发安全：按「task_hosts -> commands -> hosts」的顺序逐台加锁后再删除，
+// 与 Agent Report/UpdateStage、HostDelete 的锁顺序一致。若直接 DELETE hosts，
+// 外键级联会先锁 hosts 再锁子表，和正在落终态的 Agent 上报形成反向锁序，
+// 极端情况下会死锁。
+//
+// 单轮最多处理 maxCleanupBatches 批，避免极端情况下长期占用同步锁；
+// 剩余主机在下一轮同步继续清理（不影响正确性）。
 func (s *Syncer) cleanupMissingHosts(ctx context.Context, syncedAt time.Time) (int, error) {
-	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM hosts AS h
-		WHERE h.source='consul'
-		  AND (h.agent_id IS NULL OR h.agent_id='')
-		  AND (h.last_synced_at IS NULL OR h.last_synced_at < $1)
-		  AND (h.last_seen IS NULL OR h.last_seen < $1)
-		  AND (h.maintenance_until IS NULL OR h.maintenance_until <= NOW())
-		  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.ip = h.ip)
-		  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.host_id = h.id)
-		  AND NOT EXISTS (SELECT 1 FROM task_hosts th
-		                  WHERE th.host_id=h.id AND th.status IN ('pending','running'))
-		  AND NOT EXISTS (SELECT 1 FROM commands c
-		                  WHERE c.host_id=h.id AND c.status IN ('pending','dispatched','accepted','running'))
-	`, syncedAt)
+	total := 0
+	for round := 0; round < maxCleanupBatches; round++ {
+		ids, err := s.findMissingHosts(ctx, syncedAt, cleanupBatchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		n, err := s.deleteMissingHosts(ctx, syncedAt, ids)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		// 整批都在加锁后复查中被保留：本轮不再重试，避免死循环。
+		if n == 0 || len(ids) < cleanupBatchSize {
+			return total, nil
+		}
+	}
+	return total, nil
+}
+
+// findMissingHosts 无锁挑选候选主机；真正删除前会在事务内复查。
+func (s *Syncer) findMissingHosts(ctx context.Context, syncedAt time.Time, limit int) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT h.id FROM hosts h
+		WHERE `+missingHostCond("$1")+`
+		ORDER BY h.id
+		LIMIT $2`, syncedAt, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// deleteMissingHosts 在一个事务内按统一锁序删除候选主机。
+func (s *Syncer) deleteMissingHosts(ctx context.Context, syncedAt time.Time, ids []int64) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
+	defer tx.Rollback()
+
+	deleted := 0
+	for _, id := range ids {
+		// 与 Report/UpdateStage/HostDelete 相同：先锁逐机记录，再锁指令，最后锁主机。
+		for _, q := range []string{
+			`SELECT 1 FROM task_hosts WHERE host_id=$1 FOR UPDATE`,
+			`SELECT 1 FROM commands WHERE host_id=$1 FOR UPDATE`,
+		} {
+			rows, err := tx.QueryContext(ctx, q, id)
+			if err != nil {
+				return deleted, err
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return deleted, err
+			}
+		}
+
+		// 加锁后复查：期间可能新增 Agent/任务/指令，或主机重新出现在 Consul 中。
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM hosts h
+			WHERE h.id=$1 AND `+missingHostCond("$2"), id, syncedAt)
+		if err != nil {
+			return deleted, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			deleted += int(n)
+		}
 	}
-	return int(n), nil
+	if err := tx.Commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
 }

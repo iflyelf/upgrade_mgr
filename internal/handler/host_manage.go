@@ -163,6 +163,44 @@ func HostDelete(s *svc.ServiceContext) http.HandlerFunc {
 		defer tx.Rollback()
 
 		cond, condArgs := reqScope(r).Where("", 2)
+		// 先做无锁的租户/存在性检查：跨租户主机直接视为不存在，
+		// 避免为了加锁而触碰他人的子表数据。
+		err = tx.QueryRowContext(r.Context(),
+			`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1 AND `+cond,
+			append([]any{id}, condArgs...)...).Scan(&ip, &agentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			opErr = err
+			httpx.Fail(w, http.StatusNotFound, "主机不存在或无权访问")
+			return
+		}
+		if err != nil {
+			opErr = err
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		// 锁顺序必须与 Report/UpdateStage 的 task_hosts -> commands -> hosts 一致。
+		// 若反过来先锁 hosts 再级联删除子表，会与正在落终态的 Agent 上报形成
+		// “上报持有 task_hosts 等 hosts，删除持有 hosts 等 task_hosts”的死锁。
+		for _, q := range []string{
+			`SELECT 1 FROM task_hosts WHERE host_id=$1 FOR UPDATE`,
+			`SELECT 1 FROM commands WHERE host_id=$1 FOR UPDATE`,
+		} {
+			rows, qerr := tx.QueryContext(r.Context(), q, id)
+			if qerr != nil {
+				opErr = qerr
+				httpx.FailErr(w, http.StatusInternalServerError, qerr)
+				return
+			}
+			rows.Close()
+			if qerr = rows.Err(); qerr != nil {
+				opErr = qerr
+				httpx.FailErr(w, http.StatusInternalServerError, qerr)
+				return
+			}
+		}
+
+		// 最后锁主机行并复查，防止检查后被重新注册/改租户。
 		err = tx.QueryRowContext(r.Context(),
 			`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1 AND `+cond+` FOR UPDATE`,
 			append([]any{id}, condArgs...)...).Scan(&ip, &agentID)

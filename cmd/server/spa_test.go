@@ -57,4 +57,18 @@ func TestSPAHandlerCacheBusting(t *testing.T) {
 	if rec.Header().Get("ETag") != indexTag || !regexp.MustCompile(`\?v=`).Match(body) {
 		t.Fatal("history 路由回退的 index.html 未改写")
 	}
+
+	// favicon.ico 必须直接返回图标，不能被 SPA 回退成 index.html，
+	// 且 Content-Type 要正确，否则浏览器地址栏不显示站点图标。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("favicon status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/x-icon" {
+		t.Fatalf("favicon Content-Type = %q", ct)
+	}
+	if rec.Body.Len() < 100 {
+		t.Fatalf("favicon 内容异常，长度 %d", rec.Body.Len())
+	}
 }

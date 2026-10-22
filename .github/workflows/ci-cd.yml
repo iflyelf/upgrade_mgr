@@ -1,0 +1,301 @@
+#=================================================
+# https://github.com/iflyelf/upgrade_mgr
+# License: MIT
+# Author: iflyelf
+#=================================================
+
+name: CI/CD
+
+# 统一流水线：PR 只做测试与编译校验；main/tag 额外发布二进制、Release 与镜像。
+# 合并了原 build.yml 与 publish.yml，避免同一事件重复编译多架构二进制。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一 ref 仅保留最新一次运行；tag 发布不并发取消，避免版本产物缺失。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+# 镜像推送目标（华为云 SWR: 国内可访问, 替代 docker.io）
+# 组织名称可直接修改, 凭据通过 Secrets: SWR_USERNAME / SWR_PASSWORD
+env:
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_ORGANIZATION: iflyelf
+  IMAGE_NAME: upgrade-mgr
+
+jobs:
+  #-------------------------------------------------
+  # 测试：带 PostgreSQL 跑完整集成测试，PR 与发布前都执行
+  #-------------------------------------------------
+  test:
+    name: 测试与静态检查
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: upgrade_mgr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d upgrade_mgr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/upgrade_mgr?sslmode=disable
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 安装 Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: 前端语法检查
+        run: node --check web/dist/assets/app.js
+
+      - name: Go 静态检查
+        run: go vet ./...
+
+      - name: 运行测试
+        # 集成测试共享同一个测试库，必须串行运行，避免迁移/清理互相干扰。
+        run: go test -p 1 ./...
+
+  #-------------------------------------------------
+  # 多架构二进制（PR 作为编译校验，push/tag 作为发布产物）
+  #-------------------------------------------------
+  build:
+    name: 编译 ${{ matrix.os }}/${{ matrix.arch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: linux
+            arch: arm
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: 编译控制台与 Agent
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          make build
+          mv bin/upgrade-mgr bin/upgrade-mgr-${{ matrix.os }}-${{ matrix.arch }}
+          make build-agent
+          mv bin/upgrade-agent bin/upgrade-agent-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: bin/*
+
+  #-------------------------------------------------
+  # CentOS 6 兼容 Agent（Go 1.23）
+  #-------------------------------------------------
+  agent-legacy:
+    name: 编译 Agent Legacy (Go 1.23)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Go 1.23
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.23.12'
+
+      - name: 运行 Agent 测试 (Go 1.23)
+        env:
+          GOTOOLCHAIN: local
+        run: make test-agent-legacy LEGACY_GO=local
+
+      - name: 编译 Agent (Go 1.23)
+        env:
+          GOTOOLCHAIN: local
+        run: make agent-legacy LEGACY_GO=local
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: binaries-agent-legacy
+          path: dist/*
+
+  #-------------------------------------------------
+  # 打包并发布：main -> latest Release；tag v* -> 版本 Release
+  # 复用 build/agent-legacy 的产物，不重复编译。
+  #-------------------------------------------------
+  release:
+    name: 打包并发布 Release
+    if: github.event_name != 'pull_request'
+    needs: [build, agent-legacy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v8.0.2
+        with:
+          path: artifacts
+
+      - name: 打包并生成校验和
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -maxdepth 3 -type f -exec cp {} dist/ \;
+          cd dist
+          for f in upgrade-mgr-linux-* upgrade-agent-linux-*; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.tar.gz) continue ;;
+            esac
+            tar -czf "${f}.tar.gz" "$f"
+            sha256sum "${f}.tar.gz" >> checksums.txt
+          done
+          ls -lh
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v3.0.3
+        with:
+          # main/手动触发更新 latest；tag 发布使用 tag 名
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          prerelease: false
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+
+  #-------------------------------------------------
+  # 镜像：仅 main 与手动触发推送 latest，PR/tag 不移动 latest 标签
+  #-------------------------------------------------
+  image:
+    name: 构建并推送镜像
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      packages: write
+    env:
+      # 凭据仅在 step 内通过 env 判断是否存在，避免空 Secret 导致登录失败
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 计算版本号
+        id: ver
+        run: echo "version=latest-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 QEMU
+        uses: docker/setup-qemu-action@v4.4.0
+        with:
+          platforms: all
+
+      - name: 安装 docker buildx
+        uses: docker/setup-buildx-action@v4.4.1
+        with:
+          version: latest
+
+      - name: 登录华为云 SWR
+        if: env.SWR_USERNAME != '' && env.SWR_PASSWORD != ''
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ env.SWR_USERNAME }}
+          password: ${{ env.SWR_PASSWORD }}
+
+      - name: 登录 DockerHub（可选）
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_PASSWORD != ''
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_PASSWORD }}
+
+      - name: 生成镜像标签
+        id: tags
+        run: |
+          TAGS=""
+          if [ -n "${SWR_USERNAME}" ] && [ -n "${SWR_PASSWORD}" ]; then
+            TAGS="${SWR_REGISTRY}/${SWR_ORGANIZATION}/${IMAGE_NAME}:latest"
+          fi
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_PASSWORD}" ]; then
+            TAGS="${TAGS:+${TAGS},}${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
+          fi
+          if [ -z "${TAGS}" ]; then
+            echo "::error::未配置镜像仓库凭据（SWR_USERNAME/SWR_PASSWORD 或 DOCKER_USERNAME/DOCKER_PASSWORD）"
+            exit 1
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "将推送以下标签: ${TAGS}"
+
+      - name: 构建并推送镜像（仅 latest）
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          # 华为云 SWR 不支持 OCI index/attestation，改用 Docker 媒体类型并关闭 provenance
+          provenance: false
+          sbom: false
+          outputs: type=registry,oci-mediatypes=false
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+
+  #-------------------------------------------------
+  # 清理旧运行记录（整个仓库只保留一个清理任务，避免重复执行）
+  #-------------------------------------------------
+  cleanup:
+    name: 清理旧的 workflow 运行记录
+    # PR 没有需要清理的发布运行；main/tag/手动触发完成后都清理。
+    if: always() && github.event_name != 'pull_request'
+    needs: [build, agent-legacy, release, image]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: 清理旧的 workflow 运行记录
+        uses: Mattraks/delete-workflow-runs@v2.1.0
+        with:
+          repository: ${{ github.repository }}
+          retain_days: 1
+          keep_minimum_runs: 3

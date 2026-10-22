@@ -55,6 +55,12 @@ func spaHandler() http.Handler {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		case strings.HasSuffix(p, ".svg"):
 			w.Header().Set("Content-Type", "image/svg+xml")
+		case strings.HasSuffix(p, ".ico"):
+			w.Header().Set("Content-Type", "image/x-icon")
+		case strings.HasSuffix(p, ".png"):
+			w.Header().Set("Content-Type", "image/png")
+		case strings.HasSuffix(p, ".webmanifest"):
+			w.Header().Set("Content-Type", "application/manifest+json")
 		}
 		// 资源文件名不带内容 hash，不能用 immutable 长缓存，否则升级二进制后浏览器仍使用旧前端；
 		// 统一 no-cache + 内容 ETag，未变更时浏览器协商得到 304，开销很小。

@@ -204,7 +204,13 @@ Agent 只依赖标准库，所以用独立 modfile `build/agent-legacy.mod`（`g
 
 ## CI/CD 与镜像发布
 
-推送代码到 `main` 或在 Actions 页面手动触发 `.github/workflows/publish.yml` 即构建，二进制与镜像统一发布到 `latest`：
+仓库只有一条流水线 `.github/workflows/ci-cd.yml`（原 `build.yml` 与 `publish.yml` 已合并，避免同一事件重复编译）：
+
+- **Pull Request**：跑 PostgreSQL 集成测试、`go vet`、前端语法检查，并编译三种架构做校验，不发布任何产物。
+- **push main / 手动触发**：测试通过后编译多架构二进制与 Legacy Agent，打包发布到 GitHub Release 的 `latest`，并构建推送镜像。
+- **push tag `v*`**：复用同一套编译产物，创建对应版本号的 Release；不会移动 `latest` 镜像标签。
+
+推送代码到 `main` 或在 Actions 页面手动触发 `.github/workflows/ci-cd.yml` 即构建，二进制与镜像统一发布到 `latest`：
 
 | 产物 | 位置 |
 |---|---|
@@ -1152,6 +1158,19 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - 任务取消/删除、阶段上报、结果上报与逐机下发统一锁顺序 `task_batches → task_hosts → commands → upgrade_tasks`，避免并发取消时残留新指令或事务互相等待；启动/暂停/取消增加状态条件与影响行数检查，防止覆盖终态。
 - 新增 `DELETE /api/tasks/{id}`：仅允许 `draft` 或终态（`success/failed/canceled/rolled_back`），`running/paused` 需先取消；即使终态，只要仍有 `pending/dispatched/accepted/running` 指令也拒绝删除。
 - 删除走租户作用域并写审计 `task.delete`，级联清理 `task_batches/task_hosts/commands`；前端对可删除状态展示“删除”按钮并二次确认。
+
+### 2026-10-22 页面自动刷新、登录回车、CI 整合与并发审计
+
+- 任务列表与主机列表新增自动刷新：有升级动作时 4 秒、空闲时 15 秒；数据未变化不重建 DOM，自动刷新遇到输入框聚焦会跳过，避免打断填写。任务详情弹窗同样按数据指纹去重，并恢复展开的日志与滚动位置。页面切到后台时暂停轮询，重新可见时立即刷新。
+- 任务列表新增“进度”列，直接展示成功占比；主机列表与任务列表标注“自动刷新中”。
+- 登录页支持用户名/密码框按回车提交，登录中禁用按钮，失败后保留用户名并自动聚焦密码框。
+- 合并 `.github/workflows/build.yml` 与 `publish.yml` 为单一 `ci-cd.yml`：PR 跑 PostgreSQL 集成测试 + `go vet` + 前端语法检查；main/tag 复用同一套编译产物发布，不再重复编译；整仓只保留一个旧运行记录清理任务。
+- 死锁审计：主机删除原先先锁 `hosts` 再级联删除子表，与 Agent 上报的 `task_hosts → commands → hosts` 加锁顺序相反。现在删除前先按 `task_hosts → commands → hosts` 加锁，消除潜在死锁。
+- Consul 清理同样改为先挑候选主机、再在事务内按 `task_hosts → commands → hosts` 逐台加锁复查后删除，并按 500 台分批，避免大批主机离线时一个长事务阻塞上报。
+- `ReapExpired` 的租约过期判断改用数据库 `NOW()`，`Dequeue` 写入租约也改为数据库时间并回读，避免应用与数据库时钟偏差导致空转或误回收。
+- 新增迁移 `015_reconcile_indexes`：补终态指令对账索引与维护窗口清理索引，降低高频轮询/对账的扫描量。
+- 修正任务自动刷新只拉取 `/api/tasks`，组件/制品沿用缓存，减少无意义请求。
+- 补齐站点图标 `favicon.ico` 与 `apple-touch-icon.png`；静态资源处理器增加 `.ico/.png/.webmanifest` 的 Content-Type，避免图标被 SPA 回退成 HTML。
 
 ### 2026-10-22 任务重新执行与制品下载 416 修复
 

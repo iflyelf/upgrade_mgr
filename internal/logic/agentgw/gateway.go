@@ -122,11 +122,15 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 		return nil, err
 	}
 
-	// 标记 dispatched + 租约
-	lease := time.Now().Add(30 * time.Minute)
-	_, err = tx.ExecContext(ctx, `
-		UPDATE commands SET status='dispatched', dispatched_at=NOW(), lease_expire_at=$2, attempts=attempts+1
-		WHERE id=$1`, id, lease)
+	// 标记 dispatched + 租约。租约用数据库时间写入并回读，
+	// 保证 Agent 拿到的过期时间与 ReapExpired 的 NOW() 判断使用同一时钟。
+	var lease time.Time
+	err = tx.QueryRowContext(ctx, `
+		UPDATE commands
+		SET status='dispatched', dispatched_at=NOW(),
+		    lease_expire_at=NOW() + INTERVAL '30 minutes', attempts=attempts+1
+		WHERE id=$1
+		RETURNING lease_expire_at`, id).Scan(&lease)
 	if err != nil {
 		return nil, err
 	}

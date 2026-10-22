@@ -163,9 +163,11 @@ func (g *Gateway) ReapExpired(ctx context.Context) (int, error) {
 		}
 		var curStatus string
 		var curLease sql.NullTime
+		var curExpired bool
 		err := tx.QueryRowContext(ctx, `
-			SELECT status, lease_expire_at FROM commands
-			WHERE id=$1 FOR UPDATE`, e.id).Scan(&curStatus, &curLease)
+			SELECT status, lease_expire_at, COALESCE(lease_expire_at < NOW(), false)
+			FROM commands
+			WHERE id=$1 FOR UPDATE`, e.id).Scan(&curStatus, &curLease, &curExpired)
 		if err == sql.ErrNoRows {
 			continue
 		}
@@ -176,7 +178,9 @@ func (g *Gateway) ReapExpired(ctx context.Context) (int, error) {
 			curStatus != protocol.CmdRunning {
 			continue
 		}
-		if !curLease.Valid || !curLease.Time.Before(time.Now()) {
+		// 用数据库时间判断租约是否过期，避免服务端与数据库时钟偏差导致
+		// “数据库选中了过期指令，应用侧却认为租约仍有效”而反复空转。
+		if !curLease.Valid || !curExpired {
 			continue
 		}
 
