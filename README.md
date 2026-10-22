@@ -527,7 +527,7 @@ GET  /api/agents/self-update           # 目标版本、可用二进制、最近
 
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
 
-控制台「组件」页点「填入示例：node_exporter_script（脚本安装）」会自动填好组件；
+控制台「组件」页点「填入示例：脚本安装 / 脚本更新 / 脚本卸载」会自动填好组件；
 `examples/node_exporter/install.sh` 是**单文件自包含**安装脚本，已内嵌
 systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 
@@ -542,7 +542,19 @@ systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 
 #### 5.2 组件：填入脚本安装示例
 
-点「新建组件」→「填入示例：node_exporter_script（脚本安装）」→ 保存。自动填好的关键字段：
+「组件」页的脚本模式提供三个示例，与「任务」页示例一一对应，都只填 `script_url`，
+用 `exec_args` 区分动作：
+
+| 组件示例按钮 | 组件名 | 显示名称 | `exec_args` | 适用场景 |
+| --- | --- | --- | --- | --- |
+| 填入示例：脚本安装 | `node_exporter_script` | `Node Exporter（脚本安装）` | `["install"]` | 首次安装或覆盖升级 |
+| 填入示例：脚本更新 | `node_exporter_script_update` | `Node Exporter（脚本更新）` | `["update"]` | 备份旧二进制，启动失败自动回滚 |
+| 填入示例：脚本卸载 | `node_exporter_script_uninstall` | `Node Exporter（脚本卸载）` | `["uninstall","-y"]` | 非交互停止并删除服务、文件 |
+
+> 脚本卸载示例不带服务名、`health_cmd`、`version_cmd`：卸载后服务已不存在，
+> 保留这些字段会让平台在卸载后尝试启服并做健康检查，任务必然失败。
+
+点「新建组件」→「填入示例：脚本安装」→ 保存。自动填好的关键字段：
 
 | 字段 | 值 |
 | --- | --- |
@@ -607,6 +619,12 @@ fi
 脚本模板默认已填 `health_cmd`（`pgrep -x node_exporter`）与 `version_cmd`
 （`/opt/monitor/exporter/node_exporter --version`）。不需要平台层检查时，可从高级配置
 JSON 中删除对应字段。
+
+脚本更新示例（`node_exporter_script_update`）与安装示例同源，`exec_args` 为
+`["update"]`，脚本会先备份旧二进制再替换，启动失败自动回滚；健康检查、版本确认与
+安装示例一致。脚本卸载示例（`node_exporter_script_uninstall`）`exec_args` 为
+`["uninstall","-y"]`，**不带**服务名、`health_cmd`、`version_cmd`，避免卸载后平台
+再次启服或健康检查失败。
 
 ##### script 模式：自定义下载与执行
 
