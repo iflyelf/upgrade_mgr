@@ -1171,7 +1171,7 @@
     modal.appendChild(h('div', { class: 'progress', title: '完成 ' + done + ' / ' + total }, [
       h('div', { style: 'width:' + percent + '%' }, [])
     ]));
-    modal.appendChild(hint('运行中每 4 秒自动刷新；日志来自 Agent 阶段上报和最终执行结果。'));
+    modal.appendChild(hint('运行中/已暂停任务每 4 秒自动刷新，终态任务停止刷新；日志来自 Agent 阶段上报和最终执行结果。'));
 
     var batches = d.batches || [];
     modal.appendChild(h('h4', { class: 'detail-subtitle' }, ['批次进度']));
