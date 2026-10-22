@@ -27,7 +27,20 @@ func TestScriptArtifact(t *testing.T) {
 		t.Fatal("未配置 script_url 时应回退制品库")
 	}
 	if _, ok := scriptArtifact(protocol.ComponentSpec{DeployMode: protocol.DeployReplace, ScriptURL: spec.ScriptURL}, "1.2.3", "amd64", "linux"); ok {
-		t.Fatal("非 script 模式不应使用 script_url")
+		t.Fatal("非 script/exec 模式不应使用 script_url")
+	}
+
+	// exec + script_url：只执行命令但脚本外置，exec_args 只写动作。
+	execSpec := protocol.ComponentSpec{DeployMode: protocol.DeployExec, ScriptURL: spec.ScriptURL}
+	art, ok = scriptArtifact(execSpec, "latest", "amd64", "linux")
+	if !ok {
+		t.Fatal("exec + script_url 应跳过制品库")
+	}
+	if art.URL != "" {
+		t.Fatalf("exec + script_url 也不应写入 Artifact.URL: %+v", art)
+	}
+	if _, ok := scriptArtifact(protocol.ComponentSpec{DeployMode: protocol.DeployExec}, "latest", "amd64", "linux"); ok {
+		t.Fatal("exec 未配置 script_url 时应回退制品库")
 	}
 }
 

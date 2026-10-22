@@ -640,59 +640,45 @@ Agent 会在 `post_install` 命令之后把脚本写入
 高级配置 JSON。该脚本同样属于任意命令执行，只应允许可信管理员编辑组件。
 使用前需同步更新目标机 Agent：旧版 Agent 不认识该字段，会跳过脚本。
 
-#### 5.3 组件：只执行命令示例（exec 模式）
+#### 5.3 组件：只执行命令示例（exec + script_url）
 
-「组件」页与「任务」页的示例一一对应，都是先下载 `install.sh` 再执行，只是动作不同：
+「组件」页与「任务」页的示例一一对应，都是 **`script_url` + 一个动作参数**，
+不再需要把整段 shell 写进 `exec_args`：
 
-| 组件示例按钮 | 组件名 | `exec_args` 末尾动作 | 适用场景 |
+| 组件示例按钮 | 组件名 | `exec_args` | 适用场景 |
 | --- | --- | --- | --- |
-| 填入示例：只执行命令（安装） | `node_exporter_cmd` | `install` | 首次安装或覆盖升级 |
-| 填入示例：只执行命令（更新） | `node_exporter_update` | `update` | 备份旧二进制，启动失败自动回滚 |
-| 填入示例：只执行命令（卸载） | `node_exporter_uninstall` | `uninstall -y` | 停止并删除服务、文件 |
+| 填入示例：只执行命令（安装） | `node_exporter_cmd` | `["install"]` | 首次安装或覆盖升级 |
+| 填入示例：只执行命令（更新） | `node_exporter_update` | `["update"]` | 备份旧二进制，启动失败自动回滚 |
+| 填入示例：只执行命令（卸载） | `node_exporter_uninstall` | `["uninstall","-y"]` | 停止并删除服务、文件 |
+
+「任务」页对应提供「填入示例：安装组件 / 更新组件 / 卸载组件」，选中上述任一组件即可，
+动作由组件自身配置决定。
 
 安装示例的关键字段：
 
 | 字段 | 值 |
 | --- | --- |
 | 部署模式 | `exec` |
-| 执行程序 | `/bin/bash` |
-| 执行参数 | `-c`、下载 `install.sh` 到临时文件后 `bash "$f" install` |
-| 安装路径 | `/opt/monitor/exporter/node_exporter`（可选；纯命令模式可不填） |
+| `script_url` | `https://proxy.xiaonuo.live/?url=.../install.sh` |
+| `exec_args` | `["install"]`（更新用 `["update"]`，卸载用 `["uninstall","-y"]`） |
+| 安装路径 | `/opt/monitor/exporter/node_exporter`（可选；exec 模式可不填） |
 | 服务名 | 留空（服务由脚本自行启停，避免平台重复操作） |
 | 健康检查 | `pgrep -x node_exporter` |
 | 版本确认 | `/opt/monitor/exporter/node_exporter --version` |
 
-`exec_args` 的脚本内容（安装动作；更新/卸载只改最后一行）：
+执行流程：
 
-```bash
-#!/bin/bash
-set -e
-url='https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh'
-f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)
-trap 'rm -f "$f"' EXIT
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$url" -o "$f"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$f" "$url"
-else
-  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1
-fi
-bash "$f" install
-```
-
-纯 `exec` 模式不会下载制品、不会备份/替换二进制，也不会执行平台回滚；Agent 只负责
-运行命令并回收输出。需要平台侧备份与自动回滚时，改用 `replace` / `replace_exec` 模式，
-或使用上面的 `script` 模式让脚本自行处理。
+1. 服务端发现 `exec` 模式且配置了 `script_url`，跳过制品库直接下发。
+2. Agent 先下载 `script_url` 到本地临时文件（不带平台凭据），
+   再按 `exec_args` 作为脚本参数执行，等价于 `sh install.sh install`。
+3. 后续与 `script` 模式一致：不备份、不替换二进制，服务启停与回滚由脚本负责。
 
 > 卸载示例用 `uninstall -y` 跳过确认（exec 模式没有 stdin），且**不带**
 > `health_cmd` / `version_cmd`：卸载后服务已不存在，保留健康检查必然失败。
 
-> 不要用 `bash <(curl ...)`：本平台会把 `-c` 字符串交给 `/bin/sh`（dash/ash）解析，
-> 进程替换 `<(...)` 是 bash 语法，会报 `Syntax error: "(" unexpected`。
-> 上面「先下载再执行」的写法与 shell 无关，最稳妥。
-
-> 注意：`exec_args` 直接由 Agent `exec`，不经过 shell；需要管道、重定向、进程替换时
-> 必须显式使用 `/bin/bash -c "..."`。该模式同样受 `agent.allow_exec_mode` 控制。
+> 若确实需要在内联命令里使用管道、重定向、进程替换，`exec_args` 仍可直接写
+> `["-c","..."]`（Agent 直接 exec，不经过 shell）。但这类写法可读性差，
+> 推荐优先使用 `script_url`。以上模式同样受 `agent.allow_exec_mode` 控制。
 
 #### 5.4 制品（可选）：上传安装脚本
 
