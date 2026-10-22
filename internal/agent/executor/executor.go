@@ -38,7 +38,9 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 
 	// 安全：白名单校验 install_path，防止服务端被攻破后下发恶意路径删除任意文件。
 	// script 模式不读写 install_path（安装位置由脚本自行决定），因此不做该校验。
-	if comp.DeployMode != protocol.DeployScript {
+	// 纯 exec（无制品、只执行命令）允许不填 install_path。
+	execOnly := comp.DeployMode == protocol.DeployExec && strings.TrimSpace(art.URL) == ""
+	if comp.DeployMode != protocol.DeployScript && !(execOnly && strings.TrimSpace(comp.InstallPath) == "") {
 		if err := validateInstallPath(comp.InstallPath); err != nil {
 			return res, fmt.Errorf("install_path 非法: %w", err)
 		}
@@ -54,6 +56,10 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		}
 	}
 
+	// 纯 exec 且没有制品：只执行命令，不下载、不备份、不替换任何文件。
+	// 组件页「填入示例：只执行命令」即使用该形态，无需先上传任何制品。
+	noArtifact := execOnly
+
 	// 1. 下载
 	downloadURL := art.URL
 	downloadAuth := authHeader
@@ -68,33 +74,40 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		// 自定义地址可能是第三方仓库，绝不携带平台 Agent 凭据。
 		downloadAuth = ""
 	}
-	logf(protocol.StageDownloading, "下载 %s", redactURL(downloadURL))
-	tmpDir := filepath.Join(comp.BackupDir, ".tmp")
-	os.MkdirAll(tmpDir, 0755)
-	dlPath := filepath.Join(tmpDir, artifactFilename(downloadURL))
-	// 成功执行后清理临时下载文件：避免下次升级同名制品时残留旧文件，
-	// 触发 Range 续传 HTTP 416（本地文件比远端大）而反复卡在下载。
-	defer func() {
-		if res.Success {
-			_ = os.Remove(dlPath)
-		}
-	}()
-	if err := downloader.Download(ctx, downloader.Spec{
-		URL: downloadURL, Dest: dlPath, MD5: art.MD5, SHA256: art.SHA256,
-		AuthHeader: downloadAuth, MaxRetries: 3, Timeout: 20 * time.Minute,
-	}); err != nil {
-		logf(protocol.StageFailed, "下载失败: %v", err)
-		return res, err
-	}
-	if art.MD5 != "" || art.SHA256 != "" {
-		logf(protocol.StageDownloaded, "下载完成，校验和验证通过")
+	dlPath := ""
+	if noArtifact {
+		logf(protocol.StageDownloading, "exec 模式未指定制品，跳过下载，直接执行命令")
 	} else {
-		logf(protocol.StageDownloaded, "下载完成（未提供校验和，跳过校验）")
+		logf(protocol.StageDownloading, "下载 %s", redactURL(downloadURL))
+		tmpDir := filepath.Join(comp.BackupDir, ".tmp")
+		os.MkdirAll(tmpDir, 0755)
+		dlPath = filepath.Join(tmpDir, artifactFilename(downloadURL))
+		// 成功执行后清理临时下载文件：避免下次升级同名制品时残留旧文件，
+		// 触发 Range 续传 HTTP 416（本地文件比远端大）而反复卡在下载。
+		defer func() {
+			if res.Success {
+				_ = os.Remove(dlPath)
+			}
+		}()
+		if err := downloader.Download(ctx, downloader.Spec{
+			URL: downloadURL, Dest: dlPath, MD5: art.MD5, SHA256: art.SHA256,
+			AuthHeader: downloadAuth, MaxRetries: 3, Timeout: 20 * time.Minute,
+		}); err != nil {
+			logf(protocol.StageFailed, "下载失败: %v", err)
+			return res, err
+		}
+		if art.MD5 != "" || art.SHA256 != "" {
+			logf(protocol.StageDownloaded, "下载完成，校验和验证通过")
+		} else {
+			logf(protocol.StageDownloaded, "下载完成（未提供校验和，跳过校验）")
+		}
 	}
 
-	// 2. 备份（script 模式由安装脚本自行处理升级/备份）
+	// 2. 备份（script 模式由安装脚本自行处理升级/备份；纯 exec 不替换文件）
 	if comp.DeployMode == protocol.DeployScript {
 		logf(protocol.StageBackup, "脚本模式：跳过平台备份，由安装脚本自行处理")
+	} else if noArtifact {
+		logf(protocol.StageBackup, "exec 模式：仅执行命令，跳过备份与替换")
 	} else {
 		logf(protocol.StageBackup, "备份当前版本")
 		bak, err := binswap.Backup(comp.InstallPath, comp.BackupDir)

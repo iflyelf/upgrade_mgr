@@ -133,7 +133,7 @@ func TestCreateCommandTask(t *testing.T) {
 	if err := json.Unmarshal(payload, &pl); err != nil {
 		t.Fatalf("指令载荷无效: %v", err)
 	}
-	if pl.Command.Script != "echo hello" {
+	if pl.Command == nil || pl.Command.Script != "echo hello" {
 		t.Fatalf("载荷未携带脚本: %+v", pl)
 	}
 

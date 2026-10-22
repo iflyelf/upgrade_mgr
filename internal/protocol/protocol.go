@@ -5,6 +5,7 @@
 package protocol
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 	"time"
@@ -58,11 +59,18 @@ func NormalizeSignatureModes(modes []string) []string {
 const (
 	// AgentCapabilityRunCommand 支持 run_command（一次性脚本/命令）指令。
 	AgentCapabilityRunCommand = "run_command"
+	// AgentCapabilityOptionalCommand 指令载荷中的 command 字段可省略（指针 + omitempty）。
+	//
+	// 历史坑：v0.x（512d1f9）把 CommandPayload.Command 写成值类型，encoding/json
+	// 不会省略零值结构体，导致所有指令载荷都带 "command":{"script":""}；
+	// 旧 Agent 不认识该字段，验签重序列化时丢弃它 → 「签名不匹配」。
+	// 服务端据此能力区分：上报 run_command 但没上报本能力的老 Agent 需要按旧序列化签名。
+	AgentCapabilityOptionalCommand = "optional_command"
 )
 
 // SupportedCapabilities 返回当前 Agent 支持的能力列表（按稳定顺序）。
 func SupportedCapabilities() []string {
-	return []string{AgentCapabilityRunCommand}
+	return []string{AgentCapabilityRunCommand, AgentCapabilityOptionalCommand}
 }
 
 // NormalizeCapabilities 过滤未知能力、去重并按稳定顺序返回。
@@ -72,6 +80,8 @@ func NormalizeCapabilities(caps []string) []string {
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case AgentCapabilityRunCommand:
 			set[AgentCapabilityRunCommand] = true
+		case AgentCapabilityOptionalCommand:
+			set[AgentCapabilityOptionalCommand] = true
 		}
 	}
 	out := make([]string, 0, len(set))
@@ -292,14 +302,41 @@ type CommandSpec struct {
 }
 
 // CommandPayload 指令载荷。
+//
+// 注意：Command 必须是指针 + omitempty。encoding/json 不会省略零值结构体，
+// 若用值类型，所有指令（含 self_update/upgrade）载荷都会多出
+// "command":{"script":""}；旧 Agent 不认识该字段、验签重序列化时丢弃它，
+// 会直接导致「签名不匹配」。
 type CommandPayload struct {
 	Component  ComponentSpec `json:"component"`
 	Artifact   Artifact      `json:"artifact"`
 	ToVersion  string        `json:"to_version"`
 	RollbackTo string        `json:"rollback_to,omitempty"`
 	// Command 仅 run_command 指令使用。
-	Command CommandSpec `json:"command,omitempty"`
+	Command *CommandSpec `json:"command,omitempty"`
 }
+
+// CanonicalPayloadWithLegacyCommand 在 canonical payload 末尾补上旧版值类型
+// Command 字段序列化出的 `"command":{"script":""}`。
+//
+// 背景：v0.x（512d1f9）把 CommandPayload.Command 写成值类型 CommandSpec 且带
+// omitempty。encoding/json 不会省略零值结构体，因此该版本 Agent 在验签时会对
+// 所有指令载荷补出 `"command":{"script":""}`。服务端对这类 Agent 必须签同样的
+// 字节，否则会持续回报「签名不匹配」，连自我升级都发不出去。
+func CanonicalPayloadWithLegacyCommand(canonical []byte) []byte {
+	if len(canonical) <= 2 || canonical[len(canonical)-1] != '}' {
+		return canonical
+	}
+	if bytes.Contains(canonical, []byte(`"command"`)) {
+		return canonical
+	}
+	out := make([]byte, 0, len(canonical)+len(legacyCommandFragment)-1)
+	out = append(out, canonical[:len(canonical)-1]...)
+	out = append(out, legacyCommandFragment...)
+	return out
+}
+
+var legacyCommandFragment = []byte(`,"command":{"script":""}}`)
 
 // Command 下发给 Agent 的指令信封。
 type Command struct {
