@@ -77,20 +77,34 @@ func (g *Gateway) AgentSecret(ctx context.Context, agentID string) (string, erro
 type AgentSigning struct {
 	Secret              string
 	LegacySignatureMode string
+	// LegacyCommandField 为 true 表示该 Agent 的 CommandPayload.Command 是值类型，
+	// 验签重序列化时会补出空的 `"command":{"script":""}`，服务端需按旧字节签名。
+	LegacyCommandField bool
 }
 
 // AgentSigningInfo 查询 Agent 的签名能力，决定 legacy signature 使用 ID 还是 SignedPath。
 // 未上报能力（旧 Agent / 历史数据）默认 id，保持向后兼容。
 func (g *Gateway) AgentSigningInfo(ctx context.Context, agentID string) (AgentSigning, error) {
 	var info AgentSigning
-	var storedModes string
+	var storedModes, capabilities, buildVersion string
 	err := g.db.QueryRowContext(ctx,
-		`SELECT secret, COALESCE(signature_modes,'') FROM agents WHERE agent_id=$1`,
-		agentID).Scan(&info.Secret, &storedModes)
+		`SELECT secret, COALESCE(signature_modes,''), COALESCE(capabilities,''), COALESCE(build_version,'')
+		 FROM agents WHERE agent_id=$1`,
+		agentID).Scan(&info.Secret, &storedModes, &capabilities, &buildVersion)
 	if err != nil {
 		return info, err
 	}
 	info.LegacySignatureMode = protocol.PreferredLegacySignatureMode(strings.Split(storedModes, ","))
+	// 只有 512d1f9 这一版 Agent 同时满足：(1) 上报 run_command；(2) 没有上报
+	// optional_command；更早的 Agent 没有 Command 字段，不应补；
+	// 修复后的 Agent 上报 optional_command，也不应补。
+	hasRunCommand := protocol.HasCapability(capabilities, protocol.AgentCapabilityRunCommand)
+	hasOptionalCommand := protocol.HasCapability(capabilities, protocol.AgentCapabilityOptionalCommand)
+	info.LegacyCommandField = hasRunCommand && !hasOptionalCommand
+	// 兜底：Agent 刚自升级到 512d1f9、心跳尚未上报 capabilities 时，按版本号识别。
+	if !info.LegacyCommandField && !hasOptionalCommand && strings.Contains(buildVersion, "g512d1f9") {
+		info.LegacyCommandField = true
+	}
 	return info, nil
 }
 
@@ -146,6 +160,12 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 	secret := signing.Secret
 	var pl protocol.CommandPayload
 	_ = json.Unmarshal(payload, &pl)
+	// 旧版服务端（512d1f9）往 payload 里写过空的 "command":{"script":""}；
+	// 反序列化后会得到非空指针，重新序列化仍会带上该字段，旧 Agent 验签依旧失败。
+	// 这里把「空命令」归一化为 nil，恢复与旧 Agent 一致的字节。
+	if pl.Command != nil && isEmptyCommandSpec(*pl.Command) {
+		pl.Command = nil
+	}
 
 	cmd := &protocol.Command{
 		ID:        fmt.Sprintf("%d", id),
@@ -159,6 +179,12 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 	// 注意：payload 列为 JSONB（键序被规范化），不能用 DB 原始字节签名。
 	// 用 Go 规范化的 payload 字节签名，与 Agent 侧 json.Marshal(cmd.Payload) 一致。
 	canonical, _ := json.Marshal(pl)
+	// 兼容 512d1f9 这一版 Agent：它的 CommandPayload.Command 是值类型，
+	// 验签重序列化时总会补出 "command":{"script":""}。仅对不带命令的载荷
+	// （upgrade/self_update）补字段，run_command 本身就是非空 command，无需处理。
+	if signing.LegacyCommandField && pl.Command == nil {
+		canonical = protocol.CanonicalPayloadWithLegacyCommand(canonical)
+	}
 	env := signer.Envelope{
 		Method: "CMD", Body: canonical,
 		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
@@ -258,6 +284,12 @@ func (g *Gateway) Ack(ctx context.Context, agentID, cmdID, status, reason string
 		return err
 	}
 	return tx.Commit()
+}
+
+// isEmptyCommandSpec 判断命令规格是否为空（旧版服务端会写入空 command）。
+func isEmptyCommandSpec(c protocol.CommandSpec) bool {
+	return c.Script == "" && c.Interpreter == "" && len(c.Args) == 0 && len(c.Env) == 0 &&
+		c.WorkDir == "" && c.Timeout == "" && c.Stdin == "" && !c.TTY && !c.IgnoreError
 }
 
 func truncateReason(s string) string {

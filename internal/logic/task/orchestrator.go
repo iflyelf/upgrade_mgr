@@ -286,7 +286,7 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 					"Agent 版本过低，不支持执行命令任务；请先升级 Agent")
 				continue
 			}
-			payload := protocol.CommandPayload{Command: cmdSpec, ToVersion: version}
+			payload := protocol.CommandPayload{Command: &cmdSpec, ToVersion: version}
 			pj, _ := json.Marshal(payload)
 			ok, err := o.dispatchHostWithType(ctx, taskID, r.thID, r.hostID, r.aid, protocol.CmdRunCommand, pj)
 			if err != nil {
@@ -304,14 +304,20 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 		art, customURL := scriptArtifact(comp, version, arch, r.os)
 		if !customURL {
 			found, err := o.svc.artRepo.Find(ctx, scope.New(tenantID, false), compID, version, arch, r.os)
-			if err != nil {
+			switch {
+			case err != nil && comp.DeployMode == protocol.DeployExec:
+				// 「只执行命令」模式：没有制品也能下发，Agent 只运行 exec_path/exec_args。
+				// 这样组件无需先上传任何文件即可执行安装/卸载脚本。
+				log.Printf("[orchestrator] 任务 %d 主机 %s exec 模式无制品，按纯命令下发", taskID, r.aid)
+			case err != nil:
 				o.markHostSkipped(ctx, r.thID)
 				continue
-			}
-			art = protocol.Artifact{
-				ID: found.ID, Version: found.Version, Arch: found.Arch, OSFamily: found.OSFamily,
-				URL: fmt.Sprintf("/api/artifacts/%d/download", found.ID),
-				MD5: found.MD5, SHA256: found.SHA256, Size: found.Size, InnerPath: found.InnerPath,
+			default:
+				art = protocol.Artifact{
+					ID: found.ID, Version: found.Version, Arch: found.Arch, OSFamily: found.OSFamily,
+					URL: fmt.Sprintf("/api/artifacts/%d/download", found.ID),
+					MD5: found.MD5, SHA256: found.SHA256, Size: found.Size, InnerPath: found.InnerPath,
+				}
 			}
 		}
 		payload := protocol.CommandPayload{

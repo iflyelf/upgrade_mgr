@@ -509,6 +509,12 @@ Agent 注册/心跳会上报 `build_version`、自身二进制 SHA256（`build_h
 切换为 `signed_path` 并重排一次，第二次仍拒绝才标记失败，避免死循环。整个过程无需手工
 修改 `agents.signature_modes`。
 
+**载荷字段兼容**：`self_update` / `upgrade` 等指令的载荷会省略空的 `command` 字段。
+v0.512d1f9 这一版 Agent 曾把 `Command` 写成值类型，序列化时总会补出
+`"command":{"script":""}`；服务端通过 `optional_command` 能力识别该版本，并按旧字节
+签名，否则该版本连自我升级都会被拒（「signer: 签名不匹配」）。修复后的 Agent 上报
+`optional_command`，服务端恢复正常签名。
+
 **相关接口**：
 
 ```http
@@ -634,7 +640,29 @@ Agent 会在 `post_install` 命令之后把脚本写入
 高级配置 JSON。该脚本同样属于任意命令执行，只应允许可信管理员编辑组件。
 使用前需同步更新目标机 Agent：旧版 Agent 不认识该字段，会跳过脚本。
 
-#### 5.3 制品（可选）：上传安装脚本
+#### 5.3 组件：只执行命令示例（exec 模式）
+
+点「新建组件」→「填入示例：只执行命令」→ 保存。该示例演示**只执行命令、不依赖制品**：
+
+| 字段 | 值 |
+| --- | --- |
+| 部署模式 | `exec` |
+| 执行程序 | `/bin/bash` |
+| 执行参数 | `-c`、`bash <(curl -fsSL "<install.sh 地址>") install` |
+| 安装路径 | `/opt/monitor/exporter/node_exporter`（可选；纯命令模式可不填） |
+| 服务名 | 留空（服务由脚本自行启停，避免平台重复操作） |
+| 健康检查 | `pgrep -x node_exporter` |
+| 版本确认 | `/opt/monitor/exporter/node_exporter --version` |
+
+纯 `exec` 模式不会下载制品、不会备份/替换二进制，也不会执行平台回滚；Agent 只负责
+运行命令并回收输出。把命令末尾的 `install` 换成 `update` 即升级，换成
+`uninstall -y` 即卸载，换成 `status` 即查看状态。需要平台侧备份与自动回滚时，改用
+`replace` / `replace_exec` 模式，或使用上面的 `script` 模式让脚本自行处理。
+
+> 注意：`exec_args` 直接由 Agent `exec`，不经过 shell；需要管道、重定向、进程替换时
+> 必须显式使用 `/bin/bash -c "..."`。该模式同样受 `agent.allow_exec_mode` 控制。
+
+#### 5.4 制品（可选）：上传安装脚本
 
 脚本示例默认使用 5.2 中真实可用的 `script_url`，通常不需要本节。如果不想依赖
 外链，先删除组件高级配置 JSON 里的 `script_url`，再进入「制品」页：
@@ -650,7 +678,7 @@ Agent 会在 `post_install` 命令之后把脚本写入
 
 此时 Agent 从制品库下载脚本，不再访问 `script_url`；任务版本需要和制品版本一致。
 
-#### 5.4 任务：安装到目标机
+#### 5.5 任务：安装到目标机
 
 1. 「任务」页选组件 `node_exporter`、版本 `latest`。
 2. 填 IP 段，例如 `10.1.255.24-26` 或 `10.1.255.0/24`。
@@ -662,13 +690,14 @@ Agent 执行顺序：下载安装脚本 → 跳过平台备份 → `pre_install`
 （命令数组；如配置了 `post_install_script` 则随后执行）→ 健康检查（如配置了 `health_cmd`）
 → 版本确认（如配置了 `version_cmd`）。脚本输出会记录在任务日志里。
 
-#### 5.5 脚本做了什么
+#### 5.6 脚本做了什么
 
 5.2 的 `script_url` 直接指向本仓库 `main` 分支的
-`examples/node_exporter/install.sh`，所以不需要先上传制品。`install.sh` 会：
+`examples/node_exporter/install.sh`，所以不需要先上传制品。`install.sh` 是单文件脚本，
+支持 `install` / `update` / `uninstall` / `status` 四个动作，会：
 
 - 按 `uname -m` 识别 `amd64` / `arm64` / `arm` / `386`（也可用
-  `NODE_EXPORTER_ARCH` 或第一个参数覆盖）。
+  `NODE_EXPORTER_ARCH`、`--arch` 或第一个参数覆盖）。
 - 从 `https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/node_exporter/releases/download/latest/...`
   下载静态二进制，安装到 `/opt/monitor/exporter/node_exporter`。
 - 创建 metrics 目录 `/opt/monitor/exporter/metrics`。
@@ -678,6 +707,15 @@ Agent 执行顺序：下载安装脚本 → 跳过平台备份 → `pre_install`
   - SysV/upstart：写 `/etc/init.d/node_exporter`，用
     `chkconfig` / `update-rc.d` / `insserv` 注册，再启动。
 - 输出服务状态并请求 `http://127.0.0.1:16666/metrics` 做初步验证。
+
+四个动作的差异：
+
+| 动作 | 行为 |
+| --- | --- |
+| `install`（默认） | 下载并安装/覆盖二进制，写入 unit/init，启用并启动服务 |
+| `update` | 备份旧二进制到 `node_exporter.bak`，替换后重启；新版本启动失败自动回滚旧二进制 |
+| `uninstall` | 停止服务、注销自启、删除 unit/init 与二进制；默认需确认，`-y` 跳过确认，`--keep-data` 保留 metrics/日志 |
+| `status` | 输出安装路径、版本与服务状态，未安装时退出码为 3 |
 
 支持的发行版（实际以目标机 init 检测结果为准）：
 
@@ -695,14 +733,18 @@ Agent 执行顺序：下载安装脚本 → 跳过平台备份 → `pre_install`
 也可以在目标机手动执行同一个脚本：
 
 ```bash
-sudo bash examples/node_exporter/install.sh
+sudo bash examples/node_exporter/install.sh install
+sudo bash examples/node_exporter/install.sh update      # 升级，失败自动回滚
+sudo bash examples/node_exporter/install.sh status      # 查看状态与版本
+sudo bash examples/node_exporter/install.sh uninstall   # 交互确认；-y 跳过确认，--keep-data 保留数据
 
 # 指定架构/版本（可选）
+sudo bash examples/node_exporter/install.sh install --arch arm64 --version latest
 sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
   bash examples/node_exporter/install.sh
 ```
 
-#### 5.6 验证与注意事项
+#### 5.7 验证与注意事项
 
 - systemd：`systemctl status node_exporter`，日志 `journalctl -u node_exporter`。
 - SysV/upstart：`service node_exporter status` 或
@@ -761,12 +803,13 @@ sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
 「填入示例：卸载旧监控」会预填一个可直接执行的交互式卸载示例：
 
 ```bash
-script -q -c "bash <(curl -s http://qxbdown.iflytek.com/get/monitor/install-monitor.sh) uninstall" /dev/null
+script -q -c "bash <(curl -s 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh') uninstall" /dev/null
 ```
 
 配合标准输入 `Y\n`：示例本身已用 `script(1)` 分配伪终端，因此无需再勾选「分配伪终端」。
 若脚本用 `read -e -p "[Y/N]:"` 确认后又用 `dd if=/dev/tty` 等待回车，这种
-「PTY + 标准输入」组合可以正常通过。
+「PTY + 标准输入」组合可以正常通过。`install.sh` 的 `uninstall` 动作也会直接读取
+stdin，标准输入填 `Y`（或给脚本追加 `-y`）即可。
 
 执行日志会随阶段上报实时写入任务详情，页面每 4 秒自动刷新；执行完成后按退出码
 标记成功/失败，失败主机可以直接「重试」。

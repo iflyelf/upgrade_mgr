@@ -1,13 +1,32 @@
 #!/bin/bash
-# node_exporter 单文件安装脚本（可直接作为平台制品上传）
+# node_exporter 单文件安装/更新/卸载脚本（可直接作为平台制品上传）
 #
-# 用法：sudo bash install.sh [amd64|arm64|arm|386]
+# 用法：sudo bash install.sh [install|update|uninstall|status] [选项] [架构]
+#
+# 操作：
+#   install    安装或覆盖升级（默认）
+#   update     更新已安装实例：备份旧二进制、替换、重启，失败自动回滚
+#   uninstall  停止并移除服务、二进制与数据（默认需要确认）
+#   status     查看安装状态与版本
+#
+# 选项：
+#   -y, --yes          卸载时跳过确认（也可用 NODE_EXPORTER_ASSUME_YES=1）
+#   --keep-data        卸载时保留 metrics 目录与日志
+#   --arch ARCH        目标架构（amd64/arm64/arm/386），默认 uname -m
+#   --version VERSION  目标版本（默认 latest）
+#   -h, --help         显示帮助
+#
+# 兼容旧用法：sudo bash install.sh [amd64|arm64|arm|386]
 #
 # 环境变量（均可选）：
 #   NODE_EXPORTER_ARCH     目标架构，默认自动执行 uname -m
 #   NODE_EXPORTER_VERSION  版本，默认 latest
 #   NODE_EXPORTER_PROXY    下载代理前缀，默认 https://proxy.xiaonuo.live/?url=
 #   NODE_EXPORTER_BASE     下载基础 URL，默认 GitHub iflyelf release 地址
+#
+# 平台命令任务示例（卸载）：
+#   script -q -c "bash <(curl -s 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh') uninstall" /dev/null
+#   标准输入填 Y\n（或追加 -y）。
 #
 # 支持：
 #   - systemd：CentOS/RHEL/Rocky/openEuler 7+、Ubuntu 16.04+、Debian 8+、SLES 12+
@@ -20,21 +39,88 @@
 # 脚本使用 POSIX sh 兼容写法；Agent 优先用 /bin/bash，缺失时回退 /bin/sh。
 set -eu
 
-ARCH="${NODE_EXPORTER_ARCH:-${1:-}}"
-if [ -z "$ARCH" ]; then
-  ARCH="$(uname -m)"
-fi
-case "$ARCH" in
-  x86_64 | amd64) ARCH=amd64 ;;
-  aarch64 | arm64) ARCH=arm64 ;;
-  armv7l | armv7 | armv6l | armv6 | arm) ARCH=arm ;;
-  i386 | i486 | i586 | i686 | 386) ARCH=386 ;;
-  *)
-    echo "无法识别架构: $ARCH" >&2
-    echo "可选架构: amd64 / arm64 / arm / 386" >&2
-    exit 1
-    ;;
-esac
+ACTION="install"
+ARCH_ARG=""
+ASSUME_YES=0
+KEEP_DATA=0
+VERSION="${NODE_EXPORTER_VERSION:-latest}"
+
+usage() {
+  cat <<'USAGE'
+用法: sudo bash install.sh [install|update|uninstall|status] [选项] [架构]
+
+操作:
+  install    安装或覆盖升级（默认）
+  update     更新已安装实例（备份旧二进制，启动失败自动回滚）
+  uninstall  停止并移除服务、二进制与数据（默认需要确认）
+  status     查看安装状态与版本
+
+选项:
+  -y, --yes          卸载时跳过确认
+  --keep-data        卸载时保留 metrics 目录与日志
+  --arch ARCH        目标架构：amd64/arm64/arm/386（默认 uname -m）
+  --version VERSION  目标版本（默认 latest）
+  -h, --help         显示帮助
+
+兼容旧用法: sudo bash install.sh [amd64|arm64|arm|386]
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    install | update | uninstall | status) ACTION="$1" ;;
+    -y | --yes) ASSUME_YES=1 ;;
+    --keep-data) KEEP_DATA=1 ;;
+    --arch)
+      shift
+      if [ $# -eq 0 ]; then
+        echo "--arch 需要参数（amd64/arm64/arm/386）" >&2
+        exit 2
+      fi
+      ARCH_ARG="$1"
+      ;;
+    --version)
+      shift
+      if [ $# -eq 0 ]; then
+        echo "--version 需要参数（如 1.8.2 或 latest）" >&2
+        exit 2
+      fi
+      VERSION="$1"
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    x86_64 | amd64 | aarch64 | arm64 | armv7l | armv7 | armv6l | armv6 | arm | i386 | i486 | i586 | i686 | 386)
+      ARCH_ARG="$1"
+      ;;
+    *)
+      echo "未知参数: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+ARCH=""
+resolve_arch() {
+  ARCH="${NODE_EXPORTER_ARCH:-$ARCH_ARG}"
+  if [ -z "$ARCH" ]; then
+    ARCH="$(uname -m)"
+  fi
+  case "$ARCH" in
+    x86_64 | amd64) ARCH=amd64 ;;
+    aarch64 | arm64) ARCH=arm64 ;;
+    armv7l | armv7 | armv6l | armv6 | arm) ARCH=arm ;;
+    i386 | i486 | i586 | i686 | 386) ARCH=386 ;;
+    *)
+      echo "无法识别架构: $ARCH" >&2
+      echo "可选架构: amd64 / arm64 / arm / 386" >&2
+      exit 1
+      ;;
+  esac
+}
 
 # 发行版信息仅用于提示，不影响安装流程。
 detect_os() {
@@ -70,24 +156,29 @@ elif command -v initctl >/dev/null 2>&1 && [ -d /etc/init ]; then
   INIT_LABEL="upstart（使用 /etc/init.d 脚本）"
 fi
 
-echo "系统: ${OS_PRETTY}"
-echo "内核: ${KERNEL}"
-echo "架构: ${ARCH}"
-echo "init: ${INIT_LABEL}"
-case "$ARCH" in
-  arm | 386)
-    echo "提示：iflyelf latest 资产通常只提供 amd64/arm64；若下载 404，请改用自编译的静态二进制。" >&2
-    ;;
-esac
-
-VERSION="${NODE_EXPORTER_VERSION:-latest}"
 PROXY="${NODE_EXPORTER_PROXY:-https://proxy.xiaonuo.live/?url=}"
 BASE="${NODE_EXPORTER_BASE:-https://github.com/iflyelf/node_exporter/releases/download/${VERSION}}"
 INSTALL_DIR="/opt/monitor/exporter"
+BIN_FILE="${INSTALL_DIR}/node_exporter"
+METRICS_DIR="${INSTALL_DIR}/metrics"
+LOG_FILE="/var/log/node_exporter.log"
 UNIT_FILE="/etc/systemd/system/node_exporter.service"
 INIT_FILE="/etc/init.d/node_exporter"
 TMP_BIN="/tmp/node_exporter-download.$$"
+BACKUP_BIN="${BIN_FILE}.bak"
 trap 'rm -f "$TMP_BIN"' EXIT
+
+print_env() {
+  echo "系统: ${OS_PRETTY}"
+  echo "内核: ${KERNEL}"
+  echo "架构: ${ARCH}"
+  echo "init: ${INIT_LABEL}"
+  case "$ARCH" in
+    arm | 386)
+      echo "提示：iflyelf latest 资产通常只提供 amd64/arm64；若下载 404，请改用自编译的静态二进制。" >&2
+      ;;
+  esac
+}
 
 download() {
   src="$1"
@@ -335,20 +426,88 @@ NODE_EXPORTER_INIT
   chmod 0755 "$INIT_FILE"
 }
 
-echo "下载 node_exporter-linux-${ARCH}（${VERSION}，静态编译）..."
-download "${PROXY}${BASE}/node_exporter-linux-${ARCH}" "$TMP_BIN"
+# ---- 服务控制：统一封装 systemd / SysV ----
+svc_exists() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    [ -f "$UNIT_FILE" ]
+  else
+    [ -x "$INIT_FILE" ]
+  fi
+}
 
-install -d -m 0755 "${INSTALL_DIR}/metrics"
-install -m 0755 "$TMP_BIN" "${INSTALL_DIR}/node_exporter"
+svc_stop() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    systemctl stop node_exporter >/dev/null 2>&1 || true
+  elif command -v service >/dev/null 2>&1; then
+    service node_exporter stop >/dev/null 2>&1 || true
+  elif [ -x "$INIT_FILE" ]; then
+    "$INIT_FILE" stop >/dev/null 2>&1 || true
+  fi
+}
 
-if [ "$USE_SYSTEMD" -eq 1 ]; then
-  write_unit
-  systemctl daemon-reload
-  systemctl enable node_exporter
-  systemctl restart node_exporter
-else
-  write_init
+svc_start() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    systemctl start node_exporter
+  elif command -v service >/dev/null 2>&1; then
+    service node_exporter start
+  else
+    "$INIT_FILE" start
+  fi
+}
 
+svc_restart() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    systemctl restart node_exporter
+  elif command -v service >/dev/null 2>&1; then
+    service node_exporter restart
+  else
+    "$INIT_FILE" restart
+  fi
+}
+
+svc_status() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    systemctl --no-pager --lines=5 status node_exporter
+  elif command -v service >/dev/null 2>&1; then
+    service node_exporter status
+  else
+    "$INIT_FILE" status
+  fi
+}
+
+svc_is_active() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    systemctl is-active --quiet node_exporter
+  elif command -v service >/dev/null 2>&1; then
+    service node_exporter status >/dev/null 2>&1
+  else
+    "$INIT_FILE" status >/dev/null 2>&1
+  fi
+}
+
+svc_remove() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    systemctl disable node_exporter >/dev/null 2>&1 || true
+    rm -f "$UNIT_FILE"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed node_exporter >/dev/null 2>&1 || true
+  else
+    if command -v chkconfig >/dev/null 2>&1; then
+      chkconfig --del node_exporter >/dev/null 2>&1 || true
+    fi
+    if command -v update-rc.d >/dev/null 2>&1; then
+      update-rc.d -f node_exporter remove >/dev/null 2>&1 || true
+    fi
+    rm -f "$INIT_FILE"
+  fi
+}
+
+# enable_service：注册开机自启（systemd enable / SysV chkconfig 等）。
+enable_service() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    systemctl enable node_exporter >/dev/null 2>&1 || true
+    return 0
+  fi
   REGISTERED=0
   if command -v chkconfig >/dev/null 2>&1; then
     chkconfig --add node_exporter >/dev/null 2>&1 || true
@@ -369,40 +528,172 @@ else
   if [ "$REGISTERED" -eq 0 ]; then
     echo "警告：未找到可用的 chkconfig/update-rc.d/insserv，服务不会开机自启。" >&2
   fi
+}
 
-  if command -v service >/dev/null 2>&1; then
-    service node_exporter restart
+# install_service_file：写入 unit/init 并（重新）启动服务。
+install_service_file() {
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    write_unit
+    systemctl daemon-reload
   else
-    "$INIT_FILE" restart
+    write_init
   fi
-fi
+  enable_service
+  # 覆盖安装时旧进程仍在运行，必须 restart 才会加载新二进制。
+  svc_restart
+}
 
-sleep 1
-if [ "$USE_SYSTEMD" -eq 1 ]; then
-  systemctl --no-pager --lines=5 status node_exporter || true
-else
-  "$INIT_FILE" status || true
-fi
+verify_metrics() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 5 "http://127.0.0.1:16666/metrics" | head -n 3 || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- --timeout=5 "http://127.0.0.1:16666/metrics" | head -n 3 || true
+  else
+    echo "未安装 curl/wget，跳过 metrics 自动验证。"
+  fi
+}
 
-echo
-if command -v curl >/dev/null 2>&1; then
-  curl -fsS --max-time 5 "http://127.0.0.1:16666/metrics" | head -n 3 || true
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO- --timeout=5 "http://127.0.0.1:16666/metrics" | head -n 3 || true
-else
-  echo "未安装 curl/wget，跳过 metrics 自动验证。"
-fi
+show_summary() {
+  echo
+  echo "完成：系统=${OS_PRETTY} 内核=${KERNEL} 架构=${ARCH} init=${INIT_LABEL}"
+  if [ "$USE_SYSTEMD" -eq 1 ]; then
+    echo "服务文件: ${UNIT_FILE}"
+    echo "查看状态: systemctl status node_exporter"
+    echo "查看日志: journalctl -u node_exporter"
+  else
+    echo "服务文件: ${INIT_FILE}"
+    echo "查看状态: service node_exporter status"
+    echo "查看日志: tail -f ${LOG_FILE}"
+  fi
+  echo "指标验证: wget -qO- http://127.0.0.1:16666/metrics | head"
+  echo "远程抓取请放行 16666/tcp（firewalld/ufw/SuSEfirewall2）。"
+}
 
-echo
-echo "完成：系统=${OS_PRETTY} 内核=${KERNEL} 架构=${ARCH} init=${INIT_LABEL}"
-if [ "$USE_SYSTEMD" -eq 1 ]; then
-  echo "服务文件: ${UNIT_FILE}"
-  echo "查看状态: systemctl status node_exporter"
-  echo "查看日志: journalctl -u node_exporter"
-else
-  echo "服务文件: ${INIT_FILE}"
-  echo "查看状态: service node_exporter status"
-  echo "查看日志: tail -f /var/log/node_exporter.log"
-fi
-echo "指标验证: wget -qO- http://127.0.0.1:16666/metrics | head"
-echo "远程抓取请放行 16666/tcp（firewalld/ufw/SuSEfirewall2）。"
+do_install() {
+  print_env
+  echo "下载 node_exporter-linux-${ARCH}（${VERSION}，静态编译）..."
+  download "${PROXY}${BASE}/node_exporter-linux-${ARCH}" "$TMP_BIN"
+
+  install -d -m 0755 "${METRICS_DIR}"
+  install -m 0755 "$TMP_BIN" "$BIN_FILE"
+  install_service_file
+
+  sleep 1
+  svc_status || true
+  echo
+  verify_metrics
+  show_summary
+}
+
+do_update() {
+  if [ ! -f "$BIN_FILE" ]; then
+    echo "未检测到已安装的 node_exporter（${BIN_FILE}），请先执行 install。" >&2
+    exit 1
+  fi
+  print_env
+  echo "检测到已安装版本，执行更新（旧二进制备份到 ${BACKUP_BIN}）..."
+  download "${PROXY}${BASE}/node_exporter-linux-${ARCH}" "$TMP_BIN"
+
+  backup_tmp="${BACKUP_BIN}.new.$$"
+  cp -p "$BIN_FILE" "$backup_tmp"
+  mv -f "$backup_tmp" "$BACKUP_BIN"
+
+  svc_stop
+  install -d -m 0755 "${METRICS_DIR}"
+  install -m 0755 "$TMP_BIN" "$BIN_FILE"
+  # 更新时保留用户可能自定义过的 unit/init，仅在缺失时重建。
+  if ! svc_exists; then
+    install_service_file
+  else
+    if [ "$USE_SYSTEMD" -eq 1 ]; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    # 用 || true 兜住启动失败，交给下面的 is_active 判断触发自动回滚；
+    # 否则 set -e 会直接退出，跳过回滚。
+    svc_start || true
+  fi
+
+  sleep 2
+  if svc_is_active; then
+    echo "更新成功，服务已启动。"
+  else
+    echo "⚠️ 更新后服务未正常启动，正在回滚到备份二进制..." >&2
+    svc_stop
+    cp -p "$BACKUP_BIN" "$BIN_FILE"
+    svc_start || true
+    sleep 1
+    if svc_is_active; then
+      echo "已回滚到旧版本，请检查日志：${LOG_FILE} / journalctl -u node_exporter" >&2
+    else
+      echo "回滚后服务仍未启动，请手动排查。" >&2
+    fi
+    exit 1
+  fi
+
+  echo
+  verify_metrics
+  show_summary
+}
+
+do_uninstall() {
+  print_env
+  if [ "$ASSUME_YES" -ne 1 ] && [ "${NODE_EXPORTER_ASSUME_YES:-0}" != "1" ]; then
+    printf '确定卸载 node_exporter（停止并删除服务/二进制%s）？[Y/N]: ' \
+      "$([ "$KEEP_DATA" -eq 1 ] && echo '，保留数据' || echo '与数据')"
+    ans=""
+    # 兼容两种输入：交互终端直接输入，或平台命令任务通过 stdin 传入 Y。
+    read -r ans || true
+    case "$ans" in
+      y | Y | yes | YES) ;;
+      *)
+        echo "已取消（未收到 Y）。如需非交互卸载请加 -y。"
+        exit 0
+        ;;
+    esac
+  fi
+
+  echo "停止并移除服务..."
+  svc_stop
+  svc_remove
+
+  rm -f "$BIN_FILE" "$BACKUP_BIN"
+  if [ "$KEEP_DATA" -eq 1 ]; then
+    echo "已保留数据目录 ${METRICS_DIR} 与日志 ${LOG_FILE}。"
+  else
+    rm -rf "$INSTALL_DIR"
+    rm -f "$LOG_FILE"
+    rm -f /var/run/node_exporter.pid
+    echo "已删除安装目录 ${INSTALL_DIR}、日志与 PID 文件。"
+  fi
+
+  echo
+  echo "卸载完成：node_exporter 已从本机移除。"
+}
+
+do_status() {
+  print_env
+  if [ ! -f "$BIN_FILE" ]; then
+    echo "未安装：${BIN_FILE} 不存在。"
+    exit 3
+  fi
+  echo "安装路径: ${BIN_FILE}"
+  if [ -x "$BIN_FILE" ]; then
+    ver="$("$BIN_FILE" --version 2>/dev/null | head -n 1 || true)"
+    if [ -n "$ver" ]; then
+      echo "版本: ${ver}"
+    fi
+  fi
+  if [ -x "$INIT_FILE" ] && [ "$USE_SYSTEMD" -ne 1 ]; then
+    "$INIT_FILE" status || true
+  else
+    svc_status || true
+  fi
+}
+
+resolve_arch
+case "$ACTION" in
+  install) do_install ;;
+  update) do_update ;;
+  uninstall) do_uninstall ;;
+  status) do_status ;;
+esac

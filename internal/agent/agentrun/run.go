@@ -247,7 +247,10 @@ func (a *Agent) poll(ctx context.Context) {
 // 不进入组件升级流水线，也不做备份/停服/回滚；复用阶段上报，
 // 让任务详情页能实时看到执行输出。
 func (a *Agent) executeRunCommand(ctx context.Context, cmd protocol.Command) {
-	spec := cmd.Payload.Command
+	spec := protocol.CommandSpec{}
+	if cmd.Payload.Command != nil {
+		spec = *cmd.Payload.Command
+	}
 	a.postStage(cmd.ID, protocol.StageRequest{
 		AgentID: a.cfg.AgentID, Stage: protocol.StageRunCommand,
 		Message: "开始执行命令\n",

@@ -183,3 +183,94 @@ func TestDequeueUsesAdvertisedLegacySignature(t *testing.T) {
 		})
 	}
 }
+
+// TestDequeueSignsLegacyCommandField 验证 512d1f9 版 Agent 的兼容签名。
+//
+// 该版本把 CommandPayload.Command 写成值类型，验签重序列化时总会补出
+// `"command":{"script":""}`；服务端必须按同样字节签名，否则 Agent 会一直拒绝
+// self_update（报 “signer: 签名不匹配”），导致该版本无法自我升级。
+func TestDequeueSignsLegacyCommandField(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("连接数据库失败: %v", err)
+	}
+	defer db.Close()
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+
+	ctx := context.Background()
+	g := New(db)
+	agentID := fmt.Sprintf("sig-legacy-cmd-%d", time.Now().UnixNano())
+	secret := "sig-legacy-cmd-secret"
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM commands WHERE agent_id=$1`, agentID)
+		db.Exec(`DELETE FROM agents WHERE agent_id=$1`, agentID)
+	})
+
+	// 只上报 run_command、不上报 optional_command：即 512d1f9 版 Agent。
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO agents (agent_id, ip, token_hash, secret, signature_modes, capabilities, status)
+		VALUES ($1, '127.0.0.1', 'hash', $2, 'id,signed_path,v2', 'run_command', 'online')`,
+		agentID, secret); err != nil {
+		t.Fatalf("插入 Agent 失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO commands (agent_id, type, payload, status)
+		VALUES ($1, 'self_update', '{"to_version":"v2","artifact":{"version":"v2","arch":"amd64","url":"/api/agent/binary/linux-amd64"}}', 'pending')`,
+		agentID); err != nil {
+		t.Fatalf("插入指令失败: %v", err)
+	}
+
+	cmd, err := g.Dequeue(ctx, agentID)
+	if err != nil || cmd == nil {
+		t.Fatalf("Dequeue 失败: cmd=%v err=%v", cmd, err)
+	}
+	// 按 512d1f9 Agent 的序列化方式重算 body。
+	body, _ := json.Marshal(cmd.Payload)
+	legacyBody := protocol.CanonicalPayloadWithLegacyCommand(body)
+	if string(legacyBody) == string(body) {
+		t.Fatalf("旧版 Agent 的 canonical 应包含空 command 字段: %s", body)
+	}
+	env := signer.Envelope{
+		Method: "CMD", Body: legacyBody,
+		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce, Path: cmd.SignedPath(),
+	}
+	if err := signer.Verify(secret, cmd.SignatureV2, env, 10*time.Minute); err != nil {
+		t.Fatalf("按旧版 canonical 校验 signature_v2 失败（会复现签名不匹配）: %v", err)
+	}
+
+	// 修复后的 Agent（上报 optional_command）不应被补字段。
+	agentID2 := agentID + "-new"
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM commands WHERE agent_id=$1`, agentID2)
+		db.Exec(`DELETE FROM agents WHERE agent_id=$1`, agentID2)
+	})
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO agents (agent_id, ip, token_hash, secret, signature_modes, capabilities, status)
+		VALUES ($1, '127.0.0.1', 'hash', $2, 'id,signed_path,v2', 'run_command,optional_command', 'online')`,
+		agentID2, secret); err != nil {
+		t.Fatalf("插入 Agent 失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO commands (agent_id, type, payload, status)
+		VALUES ($1, 'self_update', '{"to_version":"v2"}', 'pending')`, agentID2); err != nil {
+		t.Fatalf("插入指令失败: %v", err)
+	}
+	cmd2, err := g.Dequeue(ctx, agentID2)
+	if err != nil || cmd2 == nil {
+		t.Fatalf("Dequeue 失败: cmd=%v err=%v", cmd2, err)
+	}
+	body2, _ := json.Marshal(cmd2.Payload)
+	env2 := signer.Envelope{
+		Method: "CMD", Body: body2,
+		Timestamp: cmd2.Timestamp, Nonce: cmd2.Nonce, Path: cmd2.SignedPath(),
+	}
+	if err := signer.Verify(secret, cmd2.SignatureV2, env2, 10*time.Minute); err != nil {
+		t.Fatalf("修复版 Agent 应使用标准 canonical: %v", err)
+	}
+}

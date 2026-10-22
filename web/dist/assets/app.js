@@ -411,6 +411,23 @@
   // 组件模板：顶层字段对应表单，其余字段回填到“高级配置 JSON”。
   var COMP_TEMPLATES = [
     {
+      key: 'node_exporter_exec',
+      label: '只执行命令（exec，无需制品：安装/更新 node_exporter）',
+      desc: '演示“只执行命令”模式：不下载制品、不替换二进制，直接以 /bin/bash -c 运行一条命令。示例调用本仓库 install.sh 的 install 动作，脚本会自行下载二进制并注册服务；把命令末尾的 install 改成 update 即可完成升级，改成 uninstall -y 即可卸载。Agent 只负责执行命令并回收输出，服务启停与回滚由脚本自行处理（本示例不填服务名，避免平台重复启停）。命令数组在 Agent 侧直接 exec，不经过 sh；需要 shell 特性时显式使用 bash -c。',
+      comp: {
+        name: 'node_exporter_cmd', display_name: 'Node Exporter（只执行命令）',
+        deploy_mode: 'exec',
+        binary_name: 'node_exporter',
+        install_path: '/opt/monitor/exporter/node_exporter',
+        service_name: '', service_mgr: 'auto', enabled: true,
+        exec_path: '/bin/bash',
+        exec_args: ['-c', 'bash <(curl -fsSL "https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh") install'],
+        exec_timeout: '30m',
+        health_cmd: [['pgrep', '-x', 'node_exporter']],
+        version_cmd: [['/opt/monitor/exporter/node_exporter', '--version']]
+      }
+    },
+    {
       key: 'node_exporter_script',
       label: 'node_exporter（上传安装脚本，Agent 下载后执行）',
       desc: '直接使用真实可用的 script_url（通过 proxy.xiaonuo.live 代理本仓库 examples/node_exporter/install.sh），不需要上传制品。Agent 下载脚本后用 Shell 执行；脚本会自行从 iflyelf/node_exporter latest 下载静态二进制（当前 1.12.1，仅 amd64/arm64），并按目标机 init 写 systemd unit 或 SysV init。script 模式与命令任务默认可用（由 agent.allow_exec_mode 控制，默认开启，可在“设置”里关闭）；高级配置 JSON 已预填 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd，post_install 脚本文本框也填入了一段可选的安装后检查示例，可直接修改参考。若不想依赖外链，删除高级 JSON 中的 script_url，改为上传 examples/node_exporter/install.sh 作为制品即可。',
@@ -479,13 +496,14 @@
         '“同步 Consul”也能导入主机，但没装 Agent 的主机在任务下发时会被跳过。'
       ]),
       step('2', '组件 定义装什么、装到哪', 'components', [
-        '点“新建组件”，再点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
+        '点“新建组件”，再点“填入示例：只执行命令”：部署模式 exec，不依赖制品，直接运行 /bin/bash -c 调用 install.sh 的 install 动作；把命令里的 install 改成 update 即升级、改成 uninstall -y 即卸载。适合只执行命令、不需要平台备份/替换二进制的场景。',
+        '点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
         '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
         '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',
         'CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11：无 systemd，脚本自动写 /etc/init.d/node_exporter。',
         'agent.allow_exec_mode 默认开启：Agent 会下载安装脚本并以 Shell 执行（优先 bash，缺失时 sh）；如需禁止可在“设置”里关闭。',
         '高级配置 JSON 的 exec_args / exec_env / exec_timeout / work_dir 会直接控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。',
-        '安装脚本会自行下载 node_exporter 二进制、注册服务并启动，不需要在 post_install 里写大段 shell。',
+        '安装脚本支持 install / update / uninstall / status 四个动作：install 安装或覆盖升级，update 会备份旧二进制并在启动失败时自动回滚，uninstall 停止并删除服务与文件（加 -y 跳过确认），status 查看安装状态与版本。',
         '需要平台备份/回滚时改用“填入二进制替换示例”：服务注册逻辑放在独立的 post_install 脚本文本框里，不再写进高级配置 JSON。',
         '脚本输出会记录在任务日志；登录目标机后也可以用 systemctl/service 查看服务状态。'
       ]),
@@ -500,15 +518,19 @@
         'ls -l examples/node_exporter/install.sh',
         '',
         '# 可选：先在目标机手动试跑（需要 root，会自动下载并安装）',
-        'sudo bash examples/node_exporter/install.sh',
+        'sudo bash examples/node_exporter/install.sh install',
+        'sudo bash examples/node_exporter/install.sh update     # 升级，失败自动回滚',
+        'sudo bash examples/node_exporter/install.sh status     # 查看状态与版本',
+        'sudo bash examples/node_exporter/install.sh uninstall -y  # 卸载',
         '',
         '# 平台默认流程：组件高级 JSON 已用真实 script_url，无需上传制品',
         '# 备用流程：删除 script_url 后，在制品页上传 install.sh（版本 latest，架构 all）'
       ].join('\n'))),
       step('4', '任务 选择主机并执行', 'tasks', [
-        '组件选 node_exporter，版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
+        '组件选 node_exporter（脚本安装）或 node_exporter_cmd（只执行命令），版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
         '先点“预览”确认命中的主机数和分批，再点“创建任务”，最后在列表里点“启动”。',
-        '想先装一台观察：策略选“金丝雀”、首批 1 台并取消“自动推进”，首批成功后任务暂停，确认无误再点“推进”。'
+        '想先装一台观察：策略选“金丝雀”、首批 1 台并取消“自动推进”，首批成功后任务暂停，确认无误再点“推进”。',
+        '只想临时执行一条命令、不创建组件时，直接在任务页把“任务类型”切到“执行命令/脚本”，填脚本后启动；命令任务支持 stdin 与伪终端，适合交互式卸载。'
       ])
     ]);
     d.open = open;
@@ -1050,6 +1072,7 @@
         h('div', { class: 'toolbar' }, [
           h('button', { class: 'btn', onclick: saveComp }, ['保存']),
           h('button', { class: 'btn ghost', onclick: function () { state.editingComp = null; state.err = ''; render(); } }, ['取消']),
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入只执行命令示例']) : null,
           !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入脚本安装示例']) : null,
           !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['填入二进制替换示例']) : null
         ])
@@ -1064,6 +1087,7 @@
           render();
         }
       }, ['新建组件']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入示例：只执行命令']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入示例：node_exporter（脚本安装）']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['二进制替换示例']) : null,
       h('span', { class: 'muted' }, ['共 ' + state.components.length + ' 个组件'])
@@ -1095,7 +1119,7 @@
     );
 
     var empty = state.components.length === 0
-      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：node_exporter（脚本安装）”。'])
+      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：只执行命令 / node_exporter（脚本安装）”。'])
       : null;
 
     return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table, empty])]);
@@ -1467,7 +1491,7 @@
     ]);
     var scriptEl = h('textarea', {
       rows: '8',
-      placeholder: '#!/bin/bash\n# 例如卸载旧监控：\nbash <(curl -s http://qxbdown.iflytek.com/get/monitor/install-monitor.sh) uninstall\n',
+      placeholder: '#!/bin/bash\n# 例如卸载旧监控（install.sh 支持 install/update/uninstall/status）：\nscript -q -c "bash <(curl -s https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh) uninstall" /dev/null\n',
       value: f.script || '',
       oninput: function () { f.script = scriptEl.value; }
     }, []);
@@ -1601,12 +1625,12 @@
     }
 
     // fillCommandSample 预填“卸载旧监控”示例：
-    // 通过 script(1) 分配伪终端并喂 Y，兼容必须读取 /dev/tty 的交互脚本。
+    // 命令内用 script(1) 分配伪终端，install.sh 会读取 stdin 确认；平台标准输入填 Y。
     function fillCommandSample() {
       f.kind = 'command';
       f.name = '卸载旧监控（示例）';
       f.ip_expr = '10.1.255.24-26';
-      f.script = 'script -q -c "bash <(curl -s http://qxbdown.iflytek.com/get/monitor/install-monitor.sh) uninstall" /dev/null';
+      f.script = 'script -q -c "bash <(curl -s \'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh\') uninstall" /dev/null';
       f.interpreter = '/bin/bash';
       f.stdin = 'Y\\n';
       f.tty = false; // 脚本内部已通过 script(1) 分配伪终端
