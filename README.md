@@ -642,25 +642,54 @@ Agent 会在 `post_install` 命令之后把脚本写入
 
 #### 5.3 组件：只执行命令示例（exec 模式）
 
-点「新建组件」→「填入示例：只执行命令」→ 保存。该示例演示**只执行命令、不依赖制品**：
+「组件」页与「任务」页的示例一一对应，都是先下载 `install.sh` 再执行，只是动作不同：
+
+| 组件示例按钮 | 组件名 | `exec_args` 末尾动作 | 适用场景 |
+| --- | --- | --- | --- |
+| 填入示例：只执行命令（安装） | `node_exporter_cmd` | `install` | 首次安装或覆盖升级 |
+| 填入示例：只执行命令（更新） | `node_exporter_update` | `update` | 备份旧二进制，启动失败自动回滚 |
+| 填入示例：只执行命令（卸载） | `node_exporter_uninstall` | `uninstall -y` | 停止并删除服务、文件 |
+
+安装示例的关键字段：
 
 | 字段 | 值 |
 | --- | --- |
 | 部署模式 | `exec` |
 | 执行程序 | `/bin/bash` |
-| 执行参数 | `-c`、`bash <(curl -fsSL "<install.sh 地址>") install` |
+| 执行参数 | `-c`、下载 `install.sh` 到临时文件后 `bash "$f" install` |
 | 安装路径 | `/opt/monitor/exporter/node_exporter`（可选；纯命令模式可不填） |
 | 服务名 | 留空（服务由脚本自行启停，避免平台重复操作） |
 | 健康检查 | `pgrep -x node_exporter` |
 | 版本确认 | `/opt/monitor/exporter/node_exporter --version` |
 
-纯 `exec` 模式不会下载制品、不会备份/替换二进制，也不会执行平台回滚；Agent 只负责
-运行命令并回收输出。把命令末尾的 `install` 换成 `update` 即升级，换成 `status` 即查看
-状态。需要平台侧备份与自动回滚时，改用 `replace` / `replace_exec` 模式，或使用上面的
-`script` 模式让脚本自行处理。
+`exec_args` 的脚本内容（安装动作；更新/卸载只改最后一行）：
 
-> 若要改成 `uninstall -y` 卸载，请同时删除示例中的 `health_cmd` / `version_cmd`，
-> 否则卸载后健康检查必然失败，任务会被标记为失败。
+```bash
+#!/bin/bash
+set -e
+url='https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh'
+f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)
+trap 'rm -f "$f"' EXIT
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$url" -o "$f"
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "$f" "$url"
+else
+  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1
+fi
+bash "$f" install
+```
+
+纯 `exec` 模式不会下载制品、不会备份/替换二进制，也不会执行平台回滚；Agent 只负责
+运行命令并回收输出。需要平台侧备份与自动回滚时，改用 `replace` / `replace_exec` 模式，
+或使用上面的 `script` 模式让脚本自行处理。
+
+> 卸载示例用 `uninstall -y` 跳过确认（exec 模式没有 stdin），且**不带**
+> `health_cmd` / `version_cmd`：卸载后服务已不存在，保留健康检查必然失败。
+
+> 不要用 `bash <(curl ...)`：本平台会把 `-c` 字符串交给 `/bin/sh`（dash/ash）解析，
+> 进程替换 `<(...)` 是 bash 语法，会报 `Syntax error: "(" unexpected`。
+> 上面「先下载再执行」的写法与 shell 无关，最稳妥。
 
 > 注意：`exec_args` 直接由 Agent `exec`，不经过 shell；需要管道、重定向、进程替换时
 > 必须显式使用 `/bin/bash -c "..."`。该模式同样受 `agent.allow_exec_mode` 控制。
