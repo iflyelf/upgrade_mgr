@@ -371,8 +371,11 @@ func (a *Agent) verifyCommand(cmd protocol.Command) error {
 func (a *Agent) executeUpgrade(ctx context.Context, cmd protocol.Command) {
 	// script_url 优先于 Artifact.URL（与执行器保持一致），再按实际下载地址决定
 	// 是否携带 Agent 凭据：只有平台相对路径才附带，避免泄露给第三方脚本仓库。
+	// script 模式与 exec+script_url（只执行命令但脚本外置）都走这条路径。
 	downloadURL := cmd.Payload.Artifact.URL
-	if cmd.Payload.Component.DeployMode == protocol.DeployScript && cmd.Payload.Component.ScriptURL != "" {
+	if (cmd.Payload.Component.DeployMode == protocol.DeployScript ||
+		cmd.Payload.Component.DeployMode == protocol.DeployExec) &&
+		cmd.Payload.Component.ScriptURL != "" {
 		downloadURL = cmd.Payload.Component.ScriptURL
 	}
 	artifactURL, downloadAuth := a.resolveArtifactURL(downloadURL)

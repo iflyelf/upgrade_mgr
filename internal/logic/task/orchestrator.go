@@ -499,11 +499,17 @@ func (o *Orchestrator) markBatch(ctx context.Context, taskID int64, batchIdx int
 	return err
 }
 
-// scriptArtifact 返回 script 模式自定义下载地址对应的下发制品。
+// scriptArtifact 返回 script 模式（或 exec + script_url）自定义下载地址对应的下发制品。
 //
-// ok=false 表示未配置 script_url（或不是 script 模式），调用方应回退到制品库。
+// ok=false 表示未配置 script_url（或不是 script/exec 模式），调用方应回退到制品库。
+//
+// exec + script_url 让「只执行命令」不必把整段 shell 塞进 exec_args：
+// 组件只需填脚本地址 + 动作参数（如 install），Agent 下载后按 exec_args 执行脚本。
 func scriptArtifact(spec protocol.ComponentSpec, version, arch, osFamily string) (protocol.Artifact, bool) {
-	if spec.DeployMode != protocol.DeployScript || spec.ScriptURL == "" {
+	if spec.DeployMode != protocol.DeployScript && spec.DeployMode != protocol.DeployExec {
+		return protocol.Artifact{}, false
+	}
+	if spec.ScriptURL == "" {
 		return protocol.Artifact{}, false
 	}
 	return protocol.Artifact{

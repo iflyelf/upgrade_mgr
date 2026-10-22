@@ -434,19 +434,23 @@
   }
 
   // 组件模板：顶层字段对应表单，其余字段回填到“高级配置 JSON”。
+  //
+  // 「只执行命令」的三个示例都用 script_url + 简短 exec_args（install/update/uninstall），
+  // 不再把整段下载脚本塞进 exec_args：Agent 下载脚本后把 exec_args 作为脚本参数执行，
+  // 与 script 模式体验一致，配置更短、更不容易写错。
   var COMP_TEMPLATES = [
     {
       key: 'node_exporter_exec',
-      label: '只执行命令（exec，无需制品：安装 node_exporter）',
-      desc: '演示“只执行命令”模式：不下载制品、不替换二进制，直接以 /bin/bash -c 运行一段脚本。示例调用本仓库 install.sh 的 install 动作，脚本会自行下载二进制并注册服务。Agent 只负责执行命令并回收输出，服务启停与回滚由脚本自行处理（本示例不填服务名，避免平台重复启停）。命令数组在 Agent 侧直接 exec，不经过 sh；需要 shell 特性时显式使用 bash -c。需要升级请用“更新”示例，卸载请用“卸载”示例。',
+      label: '只执行命令（exec + script_url：安装 node_exporter）',
+      desc: '部署模式 exec，但不填制品、只填 script_url：Agent 先下载 install.sh，再把 exec_args（这里是 install）作为脚本参数执行。相比早期在 exec_args 里塞整段 shell，配置只需一个 URL + 一个动作。脚本会自行下载二进制并注册服务；平台不备份、不替换二进制，服务启停与回滚由脚本负责（本示例不填服务名，避免平台重复启停）。需要升级请用“更新”示例，卸载请用“卸载”示例。',
       comp: {
         name: 'node_exporter_cmd', display_name: 'Node Exporter（只执行命令-安装）',
         deploy_mode: 'exec',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        exec_path: '/bin/bash',
-        exec_args: ['-c', installScript('install')],
+        script_url: INSTALL_SCRIPT_URL,
+        exec_args: ['install'],
         exec_timeout: '30m',
         health_cmd: [['pgrep', '-x', 'node_exporter']],
         version_cmd: [['/opt/monitor/exporter/node_exporter', '--version']]
@@ -454,16 +458,16 @@
     },
     {
       key: 'node_exporter_exec_update',
-      label: '只执行命令（exec，无需制品：更新 node_exporter）',
-      desc: '与“安装”示例同源，只是把 install.sh 的动作改成 update：脚本先备份旧二进制到 node_exporter.bak，重启服务后若启动失败会自动回滚。适合已安装过 node_exporter、只想升级版本的机器。组件名独立（node_exporter_update），避免与安装组件互相覆盖。',
+      label: '只执行命令（exec + script_url：更新 node_exporter）',
+      desc: '与“安装”示例同源，script_url 相同，只把 exec_args 改成 update：Agent 下载 install.sh 后执行 update，脚本先备份旧二进制到 node_exporter.bak，重启服务后若启动失败会自动回滚。适合已安装过 node_exporter、只想升级版本的机器。组件名独立（node_exporter_update），避免与安装组件互相覆盖。',
       comp: {
         name: 'node_exporter_update', display_name: 'Node Exporter（只执行命令-更新）',
         deploy_mode: 'exec',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        exec_path: '/bin/bash',
-        exec_args: ['-c', installScript('update')],
+        script_url: INSTALL_SCRIPT_URL,
+        exec_args: ['update'],
         exec_timeout: '30m',
         health_cmd: [['pgrep', '-x', 'node_exporter']],
         version_cmd: [['/opt/monitor/exporter/node_exporter', '--version']]
@@ -471,16 +475,16 @@
     },
     {
       key: 'node_exporter_exec_uninstall',
-      label: '只执行命令（exec，无需制品：卸载 node_exporter）',
-      desc: '执行 install.sh 的 uninstall 动作，停止并删除服务、二进制与数据。这里用 -y 跳过交互确认（exec 模式没有 stdin，不能用 Y\\n 确认）。卸载后目标机上已无该服务，因此本示例不填 health_cmd / version_cmd——若保留会在卸载完成后做健康检查并必然失败，任务被标记为失败。',
+      label: '只执行命令（exec + script_url：卸载 node_exporter）',
+      desc: 'exec_args 为 uninstall -y（-y 跳过交互确认，exec 模式没有 stdin）。Agent 下载 install.sh 后执行卸载，停止并删除服务、二进制与数据。卸载后目标机上已无该服务，因此本示例不填 health_cmd / version_cmd——若保留会在卸载完成后做健康检查并必然失败。',
       comp: {
         name: 'node_exporter_uninstall', display_name: 'Node Exporter（只执行命令-卸载）',
         deploy_mode: 'exec',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        exec_path: '/bin/bash',
-        exec_args: ['-c', installScript('uninstall -y')],
+        script_url: INSTALL_SCRIPT_URL,
+        exec_args: ['uninstall', '-y'],
         exec_timeout: '30m'
       }
     },
@@ -553,7 +557,8 @@
         '“同步 Consul”也能导入主机，但没装 Agent 的主机在任务下发时会被跳过。'
       ]),
       step('2', '组件 定义装什么、装到哪', 'components', [
-        '组件示例提供「只执行命令」三种动作，与「任务」页的命令脚本一一对应：安装（exec_args 执行 install.sh install）、更新（update，备份旧二进制并在启动失败时自动回滚）、卸载（uninstall -y，跳过交互确认）。三者都先下载 install.sh 到临时文件再执行，不依赖 bash 进程替换，dash/ash 环境也不会报语法错误。',
+        '组件示例提供「只执行命令」三种动作，与「任务」页的示例按钮一一对应：安装（exec_args=["install"]）、更新（["update"]，备份旧二进制并在启动失败时自动回滚）、卸载（["uninstall","-y"]，跳过交互确认）。三者都只需 script_url + 一个动作参数，Agent 下载 install.sh 后按参数执行，不再需要把整段 shell 写进 exec_args。',
+        '任务页在组件升级模式下也提供「填入示例：安装组件 / 更新组件 / 卸载组件」，会选中对应组件；动作由组件自身配置决定。',
         '卸载示例不带服务名、health_cmd、version_cmd：exec 模式没有 stdin，因此传 -y；卸载后服务已不存在，保留健康检查会让任务必然失败。',
         '点“填入示例：node_exporter（脚本安装）”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
         '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
@@ -585,7 +590,8 @@
         '# 备用流程：删除 script_url 后，在制品页上传 install.sh（版本 latest，架构 all）'
       ].join('\n'))),
       step('4', '任务 选择主机并执行', 'tasks', [
-        '组件选 node_exporter（脚本安装）或 node_exporter_cmd（只执行命令），版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
+        '组件升级模式：点“填入示例：安装组件 / 更新组件 / 卸载组件”可直接选中对应示例组件，动作由组件的 script_url + exec_args 决定。',
+        '组件选 node_exporter_cmd（安装）、node_exporter_update（更新）或 node_exporter_uninstall（卸载），版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
         '先点“预览”确认命中的主机数和分批，再点“创建任务”，最后在列表里点“启动”。',
         '想先装一台观察：策略选“金丝雀”、首批 1 台并取消“自动推进”，首批成功后任务暂停，确认无误再点“推进”。',
         '只想临时执行一条命令、不创建组件时，直接在任务页把“任务类型”切到“执行命令/脚本”，填脚本后启动；命令任务支持 stdin 与伪终端，适合交互式卸载。'
@@ -1042,7 +1048,7 @@
       var osEl = h('input', { value: c.os_match || '', placeholder: '留空即可' }, []);
       var archEl = h('input', { value: c.arch_match || '', placeholder: '留空即可' }, []);
       var enabledEl = h('input', { type: 'checkbox', checked: c.enabled !== false }, []);
-      var advEl = h('textarea', { rows: '10', placeholder: '{"script_url":"https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh","exec_args":["amd64"],"exec_env":["NODE_EXPORTER_VERSION=latest"],"health_cmd":[["pgrep","-x","node_exporter"]]}' }, []);
+      var advEl = h('textarea', { rows: '10', placeholder: '{"script_url":"https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh","exec_args":["install"],"health_cmd":[["pgrep","-x","node_exporter"]],"version_cmd":[["/opt/monitor/exporter/node_exporter","--version"]]}' }, []);
       advEl.value = advText(c);
       var postScriptEl = h('textarea', {
         rows: '12',
@@ -1107,7 +1113,7 @@
           field('显示名称 (display_name)', dispEl, '页面上展示的名字。')
         ]),
         h('div', { class: 'grid2' }, [
-          field('部署模式 (deploy_mode)', modeEl, 'script / exec / replace_exec 由 agent.allow_exec_mode 控制（默认开启，可在“设置”里关闭）。script 模式可用高级 JSON 的 script_url 自定义 HTTP(S) 下载地址（需新版 Agent）。'),
+          field('部署模式 (deploy_mode)', modeEl, 'script / exec / replace_exec 由 agent.allow_exec_mode 控制（默认开启，可在“设置”里关闭）。script 与 exec 模式都可用高级 JSON 的 script_url 指定 HTTP(S) 脚本地址（需新版 Agent）；exec + script_url 时 exec_args 只写脚本参数（如 install）。'),
           field('服务名称 (service_name)', svcEl, 'systemd/sysv 服务名。首次安装时服务尚不存在，Agent 会跳过停服，安装后再启动。')
         ]),
         h('div', { class: 'grid2' }, [
@@ -1125,7 +1131,7 @@
           field('OS 匹配 (os_match)', osEl, '仅记录，当前版本不参与匹配。'),
           field('架构匹配 (arch_match)', archEl, '仅记录，当前版本不参与匹配。')
         ]),
-        field('高级配置 JSON（可选）', advEl, '支持 ' + ADV_KEYS.join('、') + '；命令是二维数组，例如 [["/bin/sh","-c","echo hi"]]。script 模式可用 script_url 指定 HTTP(S) 脚本地址（设置后不再要求上传制品；脚本示例已填真实地址），exec_args / exec_env / exec_timeout / work_dir 控制脚本执行。post_install 脚本请填到下方单独文本框。'),
+        field('高级配置 JSON（可选）', advEl, '支持 ' + ADV_KEYS.join('、') + '；命令是二维数组，例如 [["/bin/sh","-c","echo hi"]]。script 或 exec 模式可用 script_url 指定 HTTP(S) 脚本地址（设置后不再要求上传制品）；exec + script_url 时 exec_args 作为脚本参数传入，例如 ["install"]。post_install 脚本请填到下方单独文本框。'),
         field('post_install 脚本（可选）', postScriptEl, 'Agent 在 post_install 命令之后把脚本写入临时文件，并用 bash/sh 执行；失败会触发回滚。脚本不会写入高级配置 JSON。'),
         h('div', { class: 'toolbar' }, [
           h('button', { class: 'btn', onclick: saveComp }, ['保存']),
@@ -1665,22 +1671,32 @@
         .catch(function (e) { state.err = e.message; render(); });
     }
 
-    function fillSample() {
-      var names = ['node_exporter', 'node_exporter_cmd', 'node_exporter_update', 'node_exporter_uninstall'];
+    // 任务页示例与组件示例对齐：安装 / 更新 / 卸载分别对应组件页的三个 exec 示例。
+    // 只填任务名与组件，动作由组件自身的 script_url + exec_args 决定。
+    var UPGRADE_SAMPLES = {
+      install: { comps: ['node_exporter_cmd', 'node_exporter'], name: '安装 node_exporter（示例）' },
+      update: { comps: ['node_exporter_update'], name: '更新 node_exporter（示例）' },
+      uninstall: { comps: ['node_exporter_uninstall'], name: '卸载 node_exporter（示例）' }
+    };
+
+    function fillUpgradeSample(action) {
+      var s = UPGRADE_SAMPLES[action];
       var comp = null;
-      for (var i = 0; i < names.length; i++) {
-        comp = state.components.filter(function (x) { return x.name === names[i]; })[0];
+      for (var i = 0; i < s.comps.length; i++) {
+        comp = state.components.filter(function (x) { return x.name === s.comps[i]; })[0];
         if (comp) break;
       }
       if (!comp) {
-        alert('请先到“组件”页点“填入示例：只执行命令（安装 / 更新 / 卸载）”或“node_exporter（脚本安装）”并保存');
+        alert('请先到“组件”页点“填入示例：只执行命令（' +
+          (action === 'install' ? '安装' : action === 'update' ? '更新' : '卸载') +
+          '）”并保存');
         return;
       }
       f.kind = 'upgrade';
       var vers = versionsFor(comp.id);
       f.component_id = String(comp.id);
       f.version = comp.script_url ? 'latest' : (vers[0] || 'latest');
-      f.name = comp.name + ' 升级示例';
+      f.name = s.name;
       f.ip_expr = '10.1.255.24-26';
       f.mode = 'canary';
       f.batch_size = '10';
@@ -1691,7 +1707,8 @@
       render();
     }
 
-    // 命令任务与组件示例共用 installScript(action) 骨架（顶层已定义）。
+    // 命令任务示例：执行一次性脚本（kind=command），脚本内容随任务下发；
+    // 组件示例则由组件 script_url + exec_args 决定动作。两者共用 installScript(action) 骨架。
 
     // fillCommandInstallSample 预填“安装/更新 node_exporter”示例：
     // install.sh 的 install 动作幂等，已安装时会覆盖升级，首次执行即安装。
@@ -1769,7 +1786,7 @@
     var form = h('div', { class: 'card' }, [
       h('h3', {}, ['创建任务']),
       state.err ? h('div', { class: 'err field', role: 'alert' }, [state.err]) : null,
-      field('任务类型', kindEl, '组件升级走制品/备份/回滚流程；执行命令/脚本用于卸载、清理等一次性操作。'),
+      field('任务类型', kindEl, '组件升级走 script_url/制品与健康检查流程；执行命令/脚本用于卸载、清理等一次性操作。'),
       h('div', { class: 'grid2' }, [
         field('任务名', nameEl, '留空会自动生成。'),
         f.kind === 'command'
@@ -1777,8 +1794,7 @@
           : field('组件', compEl, state.components.length ? '' : '还没有组件，请先到“组件”页创建。')
       ]),
       f.kind === 'command' ? null : h('div', { class: 'grid2' }, [
-        field('目标版本', verEl, '使用制品时从已上传制品中选择；使用 script_url 时可填 latest（仅作记录）。'),
-        field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
+        field('目标版本', verEl, '使用制品时从已上传制品中选择；使用 script_url 时可填 latest（仅作记录）。'),        field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
       ]),
       f.kind === 'command' ? null : datalist,
       f.kind === 'command' ? field('命令脚本', scriptEl,
@@ -1810,13 +1826,13 @@
         h('button', { class: 'btn', onclick: doCreate }, ['创建任务']),
         f.kind === 'command'
           ? h('button', { class: 'btn ghost', onclick: fillCommandInstallSample }, ['填入示例：安装脚本'])
-          : null,
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('install'); } }, ['填入示例：安装组件']),
         f.kind === 'command'
           ? h('button', { class: 'btn ghost', onclick: fillCommandUpdateSample }, ['填入示例：更新脚本'])
-          : null,
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('update'); } }, ['填入示例：更新组件']),
         f.kind === 'command'
           ? h('button', { class: 'btn ghost', onclick: fillCommandSample }, ['填入示例：卸载旧监控'])
-          : h('button', { class: 'btn ghost', onclick: fillSample }, ['填入示例'])
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('uninstall'); } }, ['填入示例：卸载组件'])
       ]),
       hint('创建后任务处于 draft 状态，需要在下方列表点“启动”才会开始下发。')
     ]);

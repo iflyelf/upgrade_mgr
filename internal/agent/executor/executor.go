@@ -37,10 +37,11 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	art := cmd.Payload.Artifact
 
 	// 安全：白名单校验 install_path，防止服务端被攻破后下发恶意路径删除任意文件。
-	// script 模式不读写 install_path（安装位置由脚本自行决定），因此不做该校验。
-	// 纯 exec（无制品、只执行命令）允许不填 install_path。
-	execOnly := comp.DeployMode == protocol.DeployExec && strings.TrimSpace(art.URL) == ""
-	if comp.DeployMode != protocol.DeployScript && !(execOnly && strings.TrimSpace(comp.InstallPath) == "") {
+	// script 模式与 exec+script_url 模式不读写 install_path（安装位置由脚本自行决定），
+	// 因此不做该校验；纯 exec（无制品、无 script_url）允许不填 install_path。
+	execScript := comp.DeployMode == protocol.DeployExec && strings.TrimSpace(comp.ScriptURL) != ""
+	execOnly := comp.DeployMode == protocol.DeployExec && strings.TrimSpace(art.URL) == "" && !execScript
+	if comp.DeployMode != protocol.DeployScript && !execScript && !(execOnly && strings.TrimSpace(comp.InstallPath) == "") {
 		if err := validateInstallPath(comp.InstallPath); err != nil {
 			return res, fmt.Errorf("install_path 非法: %w", err)
 		}
@@ -63,7 +64,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	// 1. 下载
 	downloadURL := art.URL
 	downloadAuth := authHeader
-	if comp.DeployMode == protocol.DeployScript && comp.ScriptURL != "" {
+	if (comp.DeployMode == protocol.DeployScript || execScript) && comp.ScriptURL != "" {
 		scriptURL := strings.TrimSpace(comp.ScriptURL)
 		if err := validateScriptURL(scriptURL); err != nil {
 			logf(protocol.StageFailed, "script_url 非法: %v", err)
@@ -76,7 +77,7 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	}
 	dlPath := ""
 	if noArtifact {
-		logf(protocol.StageDownloading, "exec 模式未指定制品，跳过下载，直接执行命令")
+		logf(protocol.StageDownloading, "exec 模式未指定制品与 script_url，跳过下载，直接执行命令")
 	} else {
 		logf(protocol.StageDownloading, "下载 %s", redactURL(downloadURL))
 		tmpDir := filepath.Join(comp.BackupDir, ".tmp")
@@ -103,8 +104,8 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		}
 	}
 
-	// 2. 备份（script 模式由安装脚本自行处理升级/备份；纯 exec 不替换文件）
-	if comp.DeployMode == protocol.DeployScript {
+	// 2. 备份（script / exec+script_url 模式由安装脚本自行处理升级/备份；纯 exec 不替换文件）
+	if comp.DeployMode == protocol.DeployScript || execScript {
 		logf(protocol.StageBackup, "脚本模式：跳过平台备份，由安装脚本自行处理")
 	} else if noArtifact {
 		logf(protocol.StageBackup, "exec 模式：仅执行命令，跳过备份与替换")
@@ -167,16 +168,30 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 		}
 	}
 	if comp.DeployMode == protocol.DeployExec || comp.DeployMode == protocol.DeployReplaceExec {
-		logf(protocol.StageExec, "执行部署命令")
-		if err := runExec(ctx, comp); err != nil && !comp.IgnoreError {
-			logf(protocol.StageRollback, "exec 失败，执行回滚: %v", err)
-			if res.BackupPath != "" {
-				binswap.Rollback(res.BackupPath, comp.InstallPath)
-				if svcExists() {
-					svcMgr.Start(comp.ServiceName)
-				}
+		if execScript {
+			// exec + script_url：脚本外置，exec_args 作为脚本参数（如 install/update/uninstall -y），
+			// 不再把整段 shell 写进 exec_args。
+			logf(protocol.StageExec, "执行远程脚本 %s", redactURL(downloadURL))
+			out, err := runScript(ctx, comp, dlPath)
+			if strings.TrimSpace(out) != "" {
+				logf(protocol.StageExec, "脚本输出:\n%s", strings.TrimSpace(out))
 			}
-			return res, err
+			if err != nil && !comp.IgnoreError {
+				logf(protocol.StageRollback, "脚本执行失败（exec 模式无平台备份，请查看脚本日志）: %v", err)
+				return res, err
+			}
+		} else {
+			logf(protocol.StageExec, "执行部署命令")
+			if err := runExec(ctx, comp); err != nil && !comp.IgnoreError {
+				logf(protocol.StageRollback, "exec 失败，执行回滚: %v", err)
+				if res.BackupPath != "" {
+					binswap.Rollback(res.BackupPath, comp.InstallPath)
+					if svcExists() {
+						svcMgr.Start(comp.ServiceName)
+					}
+				}
+				return res, err
+			}
 		}
 	}
 	if comp.DeployMode == protocol.DeployScript {
@@ -330,7 +345,14 @@ func runScript(ctx context.Context, comp protocol.ComponentSpec, path string) (s
 	if err := os.Chmod(path, 0755); err != nil {
 		return "", fmt.Errorf("设置安装脚本可执行权限失败: %w", err)
 	}
-	argv := append([]string{shellPath(), path}, comp.ExecArgs...)
+	// exec + script_url 时组件可能仍填了 exec_path=/bin/bash，优先尊重它；
+	// 只接受 shell 解释器，避免被用来执行任意二进制。
+	interp := shellPath()
+	switch filepath.Base(strings.TrimSpace(comp.ExecPath)) {
+	case "bash", "sh", "dash", "ksh", "zsh":
+		interp = strings.TrimSpace(comp.ExecPath)
+	}
+	argv := append([]string{interp, path}, comp.ExecArgs...)
 	timeout, _ := time.ParseDuration(comp.ExecTimeout)
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
