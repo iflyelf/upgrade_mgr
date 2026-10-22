@@ -527,7 +527,7 @@ GET  /api/agents/self-update           # 目标版本、可用二进制、最近
 
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
 
-控制台「组件」页点「填入示例：node_exporter（脚本安装）」会自动填好组件；
+控制台「组件」页点「填入示例：node_exporter_script（脚本安装）」会自动填好组件；
 `examples/node_exporter/install.sh` 是**单文件自包含**安装脚本，已内嵌
 systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 
@@ -542,10 +542,12 @@ systemd unit 与 SysV init，上传后不需要同目录的其他文件。
 
 #### 5.2 组件：填入脚本安装示例
 
-点「新建组件」→「填入示例：node_exporter（脚本安装）」→ 保存。自动填好的关键字段：
+点「新建组件」→「填入示例：node_exporter_script（脚本安装）」→ 保存。自动填好的关键字段：
 
 | 字段 | 值 |
 | --- | --- |
+| 名称 | `node_exporter_script` |
+| 显示名称 | `Node Exporter（脚本安装）` |
 | 部署模式 | `script` |
 | 安装路径 | `/opt/monitor/exporter`（仅说明；实际路径固定在脚本内） |
 | 服务名 | `node_exporter` |
@@ -685,7 +687,7 @@ Agent 会在 `post_install` 命令之后把脚本写入
 脚本示例默认使用 5.2 中真实可用的 `script_url`，通常不需要本节。如果不想依赖
 外链，先删除组件高级配置 JSON 里的 `script_url`，再进入「制品」页：
 
-1. 组件选 `node_exporter`。
+1. 组件选 `node_exporter_script`（脚本安装示例的组件名）。
 2. 版本填 `latest`（创建任务时必须选同一个版本）。
 3. 架构选 `all（通用脚本）`。脚本会在目标机执行 `uname -m` 自动识别架构。
 4. 上传仓库里的 `examples/node_exporter/install.sh`。
@@ -698,7 +700,7 @@ Agent 会在 `post_install` 命令之后把脚本写入
 
 #### 5.5 任务：安装到目标机
 
-1. 「任务」页选组件 `node_exporter`、版本 `latest`。
+1. 「任务」页选组件 `node_exporter_script`（脚本安装）或 `node_exporter_cmd`（只执行命令-安装），版本 `latest`。
 2. 填 IP 段，例如 `10.1.255.24-26` 或 `10.1.255.0/24`。
 3. 先点「预览」确认命中主机和分批，再「创建任务」→「启动」。
 4. 想先装一台：策略选「金丝雀」、首批 1 台、取消「自动推进」；首批成功后点「推进」。
@@ -777,8 +779,8 @@ sudo NODE_EXPORTER_ARCH=arm64 NODE_EXPORTER_VERSION=latest \
 - `script` 模式执行下载的脚本（以及「命令任务」执行任意 Shell 命令），服务端被攻破时
   风险等同于任意命令执行；务必依赖 `agent.allow_exec_mode` 和 RBAC，只允许可信管理员操作。
   该开关默认开启，生产环境如需最小权限请主动关闭。
-- `script` 模式不做平台侧备份/自动回滚；需要平台备份和回滚时，改用
-  「填入示例：node_exporter（二进制替换）」，按主机架构上传二进制。该示例把
+- `script` / `exec + script_url` 模式不做平台侧备份/自动回滚；需要平台备份和回滚时，改用
+  「填入示例：node_exporter_binary（二进制替换）」，按主机架构上传二进制。该示例把
   服务注册逻辑放在独立的 `post_install_script` 字段中，Agent 在 post_install
   阶段写入临时文件并执行，不需要再往高级配置 JSON 里塞大段 shell。
 - `script_url` 只支持绝对 HTTP(S) 地址，且不会携带 Agent 凭据；目标机必须能
