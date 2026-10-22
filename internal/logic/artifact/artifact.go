@@ -238,13 +238,31 @@ func (r *Repo) Find(ctx context.Context, sc scope.Scope, componentID int64, vers
 // 安全要点：path 取自数据库，若库被篡改可能指向任意路径，
 // 因此删除前强制校验其位于制品根目录内（EnsureWithin），越界则跳过并告警。
 func (r *Repo) PurgeByComponent(ctx context.Context, sc scope.Scope, componentID int64) error {
+	paths, err := r.PathsByComponent(ctx, sc, componentID)
+	if err != nil {
+		return err
+	}
+	r.RemoveObjects(paths)
+	// 元数据由 components 的 ON DELETE CASCADE 清理；此处显式删除以支持独立调用。
+	dcond, dargs := sc.Where("", 2)
+	_, err = r.db.ExecContext(ctx, `DELETE FROM artifacts WHERE component_id=$1 AND `+dcond,
+		append([]any{componentID}, dargs...)...)
+	return err
+}
+
+// PathsByComponent 返回组件下全部制品的存储路径（只读，不删除）。
+//
+// 删除组件时应先取路径、再删组件（元数据随外键 CASCADE 消失）、最后删文件；
+// 这样组件删除失败时不会出现“文件已删但组件还在”的数据丢失。
+func (r *Repo) PathsByComponent(ctx context.Context, sc scope.Scope, componentID int64) ([]string, error) {
 	cond, targs := sc.Where("", 2)
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT path FROM artifacts WHERE component_id=$1 AND `+cond,
 		append([]any{componentID}, targs...)...)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer rows.Close()
 	var paths []string
 	for rows.Next() {
 		var p string
@@ -252,11 +270,11 @@ func (r *Repo) PurgeByComponent(ctx context.Context, sc scope.Scope, componentID
 			paths = append(paths, p)
 		}
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
+	return paths, rows.Err()
+}
 
+// RemoveObjects 尽力删除给定存储路径对应的对象；失败只告警，不阻断主流程。
+func (r *Repo) RemoveObjects(paths []string) {
 	for _, p := range paths {
 		// 安全：path 取自数据库，若被篡改可能指向任意位置；
 		// deleteObject 内部对 local 后端强制边界校验，越界直接报错跳过。
@@ -264,11 +282,6 @@ func (r *Repo) PurgeByComponent(ctx context.Context, sc scope.Scope, componentID
 			log.Printf("⚠️ 删除制品失败（已跳过）%s: %v", p, err)
 		}
 	}
-	// 元数据由 components 的 ON DELETE CASCADE 清理；此处显式删除以支持独立调用。
-	dcond, dargs := sc.Where("", 2)
-	_, err = r.db.ExecContext(ctx, `DELETE FROM artifacts WHERE component_id=$1 AND `+dcond,
-		append([]any{componentID}, dargs...)...)
-	return err
 }
 
 // resolveLocalPath 将存储键还原为本地绝对路径（仅 local 后端）。

@@ -36,7 +36,9 @@
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
     taskDetailOpenLogs: {},
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
-    hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false };
+    hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
+    // 任务页按组件筛选：'' 表示全部；用于删除组件前核对引用。
+    taskFilterComp: '', taskFilterKind: '' };
 
   function h(tag, attrs, children) {
     var el = document.createElement(tag);
@@ -1211,10 +1213,51 @@
           }, ['编辑']),
           h('button', {
             class: 'btn danger small', onclick: function () {
-              if (!confirm('确定删除组件 ' + x.name + ' 吗？')) return;
-              api('/api/components/' + x.id, { method: 'DELETE' })
-                .then(function () { loadComponents(); })
-                .catch(function (e) { alert('删除失败: ' + e.message); });
+              // 先查引用：有任务引用时必须二次确认是否连带删除；
+              // 运行中/暂停中的任务不能连带删除，需要先取消。
+              api('/api/components/' + x.id + '/references')
+                .then(function (ref) {
+                  ref = ref || {};
+                  var n = ref.task_count || 0;
+                  if (!n) {
+                    if (!confirm('确定删除组件 ' + x.name + ' 吗？')) return;
+                    return api('/api/components/' + x.id, { method: 'DELETE' })
+                      .then(function () {
+                        if (String(state.taskFilterComp) === String(x.id)) { state.taskFilterComp = ''; state.tasksSig = ''; }
+                        loadComponents();
+                      })
+                      .catch(function (e) { alert('删除失败: ' + e.message); });
+                  }
+                  if (ref.blocking_tasks > 0) {
+                    alert('组件 ' + x.name + ' 被 ' + n + ' 个任务引用，其中 ' +
+                      ref.blocking_tasks + ' 个正在运行或暂停。\n请先到「任务」页取消这些任务（可用“按组件筛选”快速定位），再删除组件。');
+                    return;
+                  }
+                  if (ref.active_commands > 0) {
+                    alert('引用该组件的任务仍有 ' + ref.active_commands + ' 条未完成指令，请先取消任务。');
+                    return;
+                  }
+                  var names = (ref.tasks || []).slice(0, 5).map(function (t) { return '#' + t.id + ' ' + t.name + '（' + statusText(t.status) + '）'; });
+                  var more = n > names.length ? '\n… 等共 ' + n + ' 个任务' : '';
+                  var tip = '组件 ' + x.name + ' 被 ' + n + ' 个任务引用：\n' + names.join('\n') + more +
+                    '\n\n删除组件会同时删除这些任务及其历史记录（批次、逐机状态、指令日志），且不可恢复。\n是否连带删除？';
+                  if (!confirm(tip)) return;
+                  // 二次确认：要求输入组件名，防止误点造成批量历史数据丢失。
+                  var typed = prompt('不可恢复操作。请输入组件名 “' + x.name + '” 以确认连带删除 ' + n + ' 个引用任务：');
+                  if (typed === null) return;
+                  if (typed.trim() !== x.name) {
+                    alert('组件名不匹配，已取消删除。');
+                    return;
+                  }
+                  return api('/api/components/' + x.id + '?cascade_tasks=true', { method: 'DELETE' })
+                    .then(function () {
+                      alert('已删除组件及 ' + n + ' 个引用任务。');
+                      if (String(state.taskFilterComp) === String(x.id)) { state.taskFilterComp = ''; state.tasksSig = ''; }
+                      loadComponents();
+                    })
+                    .catch(function (e) { alert('删除失败: ' + e.message); });
+                })
+                .catch(function (e) { alert('查询引用失败: ' + e.message); });
             }
           }, ['删除'])
         ]) : '-';
@@ -1875,9 +1918,44 @@
       hint('创建后任务处于 draft 状态，需要在下方列表点“启动”才会开始下发。')
     ]);
 
+    var filterCompEl = h('select', {
+      value: state.taskFilterComp,
+      onchange: function () {
+        state.taskFilterComp = filterCompEl.value;
+        state.taskFilterKind = '';
+        loadTasks();
+      }
+    }, [h('option', { value: '' }, ['全部组件'])].concat(
+      state.components.map(function (c) {
+        return h('option', { value: String(c.id) }, [c.name + (c.display_name ? '（' + c.display_name + '）' : '')]);
+      })
+    ));
+    var filterKindEl = h('select', {
+      value: state.taskFilterKind,
+      onchange: function () {
+        state.taskFilterKind = filterKindEl.value;
+        loadTasks();
+      }
+    }, [
+      h('option', { value: '' }, ['全部类型']),
+      h('option', { value: 'upgrade' }, ['组件升级']),
+      h('option', { value: 'command' }, ['执行命令'])
+    ]);
+
     var list = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, ['共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。']),
+        h('label', { class: 'muted' }, ['按组件筛选：', filterCompEl]),
+        h('label', { class: 'muted' }, ['类型：', filterKindEl]),
+        state.taskFilterComp || state.taskFilterKind
+          ? h('button', {
+            class: 'btn ghost small', onclick: function () {
+              state.taskFilterComp = '';
+              state.taskFilterKind = '';
+              loadTasks();
+            }
+          }, ['清除筛选'])
+          : null,
         h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
       ]),
       simpleTable(['ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '操作'], state.tasks,
@@ -2056,14 +2134,21 @@
         render();
       });
   }
+  function tasksURL() {
+    var qs = [];
+    if (state.taskFilterComp) qs.push('component_id=' + encodeURIComponent(state.taskFilterComp));
+    if (state.taskFilterKind) qs.push('kind=' + encodeURIComponent(state.taskFilterKind));
+    return '/api/tasks' + (qs.length ? '?' + qs.join('&') : '');
+  }
   function loadTasks(quiet) {
     if (!quiet) state.view = 'tasks';
     var seq = ++tasksReqSeq;
+    var tasksReq = api(tasksURL());
     // 自动刷新只需要任务状态；组件/制品变化很少，沿用已有数据，
     // 避免每 4 秒重复拉取两个较大的列表。
     var reqs = quiet
-      ? [api('/api/tasks'), Promise.resolve(state.components), Promise.resolve(state.artifacts)]
-      : [api('/api/tasks'), api('/api/components'), api('/api/artifacts')];
+      ? [tasksReq, Promise.resolve(state.components), Promise.resolve(state.artifacts)]
+      : [tasksReq, api('/api/components'), api('/api/artifacts')];
     return Promise.all(reqs)
       .then(function (rs) {
         if (seq !== tasksReqSeq) return;

@@ -3,9 +3,11 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/lib/pq"
 
@@ -54,18 +56,38 @@ func TaskCreate(s *svc.ServiceContext) http.HandlerFunc {
 }
 
 // TaskList 任务列表。
+//
+// 可选查询参数：kind（upgrade/command）、component_id（只看引用该组件的任务）、
+// status（任务状态）。删除组件前可用 component_id 快速确认引用情况。
 func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 租户隔离：只列出当前租户的任务（superadmin 跨租户）
 		tCond, tArgs := reqScope(r).Where("t", 1)
+		where := []string{tCond}
+		args := append([]any{}, tArgs...)
+		add := func(expr string, v any) {
+			args = append(args, v)
+			where = append(where, fmt.Sprintf(expr, len(args)))
+		}
+		if kind := r.URL.Query().Get("kind"); kind != "" {
+			add("COALESCE(t.kind,'upgrade')=$%d", kind)
+		}
+		if cidStr := r.URL.Query().Get("component_id"); cidStr != "" {
+			if cid, err := strconv.ParseInt(cidStr, 10, 64); err == nil {
+				add("t.component_id=$%d", cid)
+			}
+		}
+		if status := r.URL.Query().Get("status"); status != "" {
+			add("t.status=$%d", status)
+		}
 		rows, err := s.DB.QueryContext(r.Context(), `
 			SELECT t.id, COALESCE(t.kind,'upgrade'), t.name, COALESCE(t.component_id,0), t.version, t.status, t.created_at,
 			       COUNT(th.id) AS total,
 			       COUNT(th.id) FILTER (WHERE th.status='success') AS success,
 			       COUNT(th.id) FILTER (WHERE th.status='failed') AS failed
 			FROM upgrade_tasks t LEFT JOIN task_hosts th ON th.task_id=t.id
-			WHERE `+tCond+`
-			GROUP BY t.id ORDER BY t.created_at DESC LIMIT 200`, tArgs...)
+			WHERE `+strings.Join(where, " AND ")+`
+			GROUP BY t.id ORDER BY t.created_at DESC LIMIT 200`, args...)
 		if err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return

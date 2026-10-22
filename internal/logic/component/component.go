@@ -163,33 +163,170 @@ func (r *Repo) Update(ctx context.Context, sc scope.Scope, c *Component) error {
 	return nil
 }
 
-// Delete 删除组件。
+// DeletePlan 描述删除组件前的引用情况。
+type DeletePlan struct {
+	// TaskCount 引用该组件的任务总数。
+	TaskCount int64
+	// BlockingTasks 运行中/暂停中的任务数量（连带删除时必须先取消）。
+	BlockingTasks int64
+	// ActiveCommands 引用任务下未完成的指令数量。
+	ActiveCommands int64
+}
+
+// CheckDelete 预检删除组件：返回任务引用情况，或在不可删除时直接返回可读错误。
 //
-// upgrade_tasks.component_id 是 ON DELETE RESTRICT：只要组件被任何任务引用过
-// （含已取消、已成功的任务），直接 DELETE 会触发外键错误，被 Sanitize 后只剩
-// “数据库操作失败”。这里先统计引用数量并返回可操作的中文提示，避免用户无从下手。
-func (r *Repo) Delete(ctx context.Context, sc scope.Scope, id int64) error {
-	tCond, tArgs := sc.Where("upgrade_tasks", 2)
-	var taskCount int
-	if err := r.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM upgrade_tasks WHERE component_id=$1 AND `+tCond,
-		append([]any{id}, tArgs...)...).Scan(&taskCount); err != nil {
-		return err
+// cascadeTasks=false 时有任何任务引用都拒绝；true 时允许连带删除，但阻止
+// running/paused 任务与未完成指令。调用方先预检，再清理制品文件，最后执行删除，
+// 避免「删完文件才发现组件删不掉」。
+func (r *Repo) CheckDelete(ctx context.Context, sc scope.Scope, id int64, cascadeTasks bool) (DeletePlan, error) {
+	var plan DeletePlan
+	cCond, cArgs := sc.Where("", 2)
+	var exists int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT 1 FROM components WHERE id=$1 AND `+cCond,
+		append([]any{id}, cArgs...)...).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return plan, fmt.Errorf("组件不存在或无权访问")
 	}
-	if taskCount > 0 {
-		return fmt.Errorf("该组件已被 %d 个任务引用，无法删除；请先在「任务」页删除相关任务（运行中的任务需先取消）", taskCount)
+	if err != nil {
+		return plan, err
 	}
 
-	cond, args := sc.Where("", 2)
-	res, err := r.db.ExecContext(ctx, `DELETE FROM components WHERE id=$1 AND `+cond,
-		append([]any{id}, args...)...)
+	tCond, tArgs := sc.Where("upgrade_tasks", 2)
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COUNT(*) FILTER (WHERE status IN ('running','paused'))
+		 FROM upgrade_tasks WHERE component_id=$1 AND `+tCond,
+		append([]any{id}, tArgs...)...).Scan(&plan.TaskCount, &plan.BlockingTasks); err != nil {
+		return plan, err
+	}
+	if plan.TaskCount > 0 && !cascadeTasks {
+		return plan, fmt.Errorf("该组件已被 %d 个任务引用，无法删除；可在删除确认中勾选“连带删除引用任务”，或先到「任务」页手动删除", plan.TaskCount)
+	}
+	if plan.BlockingTasks > 0 {
+		return plan, fmt.Errorf("有 %d 个运行中或暂停中的任务引用该组件，请先在「任务」页取消后再删除", plan.BlockingTasks)
+	}
+	if plan.TaskCount > 0 {
+		aCond, aArgs := sc.Where("t", 2)
+		if err := r.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM commands c JOIN upgrade_tasks t ON t.id=c.task_id
+			 WHERE t.component_id=$1 AND `+aCond+`
+			   AND c.status IN ('pending','dispatched','accepted','running')`,
+			append([]any{id}, aArgs...)...).Scan(&plan.ActiveCommands); err != nil {
+			return plan, err
+		}
+		if plan.ActiveCommands > 0 {
+			return plan, fmt.Errorf("引用该组件的任务仍有 %d 条未完成指令，请先取消任务", plan.ActiveCommands)
+		}
+	}
+	return plan, nil
+}
+
+// Delete 删除组件（存在任务引用时拒绝）。
+func (r *Repo) Delete(ctx context.Context, sc scope.Scope, id int64) error {
+	_, err := r.delete(ctx, sc, id, false)
+	return err
+}
+
+// DeleteWithTasks 删除组件，并连带删除引用它的任务（含批次、逐机状态与指令）。
+//
+// 安全约束：存在 running / paused 任务或仍有未完成指令时拒绝删除，必须先取消；
+// 其余（draft / 终态）任务会被一并删除。调用方负责二次确认与审计。
+// 返回被连带删除的任务数量。
+func (r *Repo) DeleteWithTasks(ctx context.Context, sc scope.Scope, id int64) (int64, error) {
+	return r.delete(ctx, sc, id, true)
+}
+
+func (r *Repo) delete(ctx context.Context, sc scope.Scope, id int64, cascadeTasks bool) (int64, error) {
+	if _, err := r.CheckDelete(ctx, sc, id, cascadeTasks); err != nil {
+		return 0, err
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// 锁组件行，避免与并发删除/更新交叉。
+	cCond, cArgs := sc.Where("", 2)
+	var locked int
+	err = tx.QueryRowContext(ctx,
+		`SELECT 1 FROM components WHERE id=$1 AND `+cCond+` FOR UPDATE`,
+		append([]any{id}, cArgs...)...).Scan(&locked)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("组件不存在或无权访问")
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	tCond, tArgs := sc.Where("upgrade_tasks", 2)
+	var deleted int64
+	// 在事务内重新核对引用：预检之后仍可能有新任务创建（或草稿任务启动）。
+	// 注意：FOR UPDATE 不能与聚合函数同用，这里先锁行再在内存中统计。
+	rows, err := tx.QueryContext(ctx,
+		`SELECT status FROM upgrade_tasks WHERE component_id=$1 AND `+tCond+` FOR UPDATE`,
+		append([]any{id}, tArgs...)...)
+	if err != nil {
+		return 0, err
+	}
+	var taskCount, blocking int64
+	for rows.Next() {
+		var st string
+		if err := rows.Scan(&st); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		taskCount++
+		if st == "running" || st == "paused" {
+			blocking++
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if taskCount > 0 && !cascadeTasks {
+		return 0, fmt.Errorf("该组件已被 %d 个任务引用，无法删除；可在删除确认中勾选“连带删除引用任务”，或先到「任务」页手动删除", taskCount)
+	}
+	if cascadeTasks {
+		if blocking > 0 {
+			return 0, fmt.Errorf("有 %d 个运行中或暂停中的任务引用该组件，请先在「任务」页取消后再删除", blocking)
+		}
+		aCond, aArgs := sc.Where("t", 2)
+		var active int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM commands c JOIN upgrade_tasks t ON t.id=c.task_id
+			 WHERE t.component_id=$1 AND `+aCond+`
+			   AND c.status IN ('pending','dispatched','accepted','running')`,
+			append([]any{id}, aArgs...)...).Scan(&active); err != nil {
+			return 0, err
+		}
+		if active > 0 {
+			return 0, fmt.Errorf("引用该组件的任务仍有 %d 条未完成指令，请先取消任务", active)
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM upgrade_tasks WHERE component_id=$1 AND `+tCond,
+			append([]any{id}, tArgs...)...)
+		if err != nil {
+			return 0, err
+		}
+		deleted, _ = res.RowsAffected()
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM components WHERE id=$1 AND `+cCond,
+		append([]any{id}, cArgs...)...)
+	if err != nil {
+		return 0, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("组件不存在或无权访问")
+		return 0, fmt.Errorf("组件不存在或无权访问")
 	}
-	return nil
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 const selectCols = `SELECT id, tenant_id, name, display_name, deploy_mode, binary_name, install_path,

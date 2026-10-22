@@ -13,6 +13,12 @@ import (
 // 用户身份取自认证中间件注入的 context；IP 取自 X-Forwarded-For 或 RemoteAddr。
 // 写入为异步，不影响请求耗时；审计失败只告警，不影响业务返回。
 func auditOp(s *svc.ServiceContext, r *http.Request, action, resType, resID, resName string, err error) {
+	auditOpDetails(s, r, action, resType, resID, resName, err, nil, nil)
+}
+
+// auditOpDetails 同 auditOp，额外记录成功与失败细节（如连带删除的任务数）。
+func auditOpDetails(s *svc.ServiceContext, r *http.Request, action, resType, resID, resName string, err error,
+	details, extra map[string]any) {
 	if s.Audit == nil {
 		return
 	}
@@ -33,6 +39,16 @@ func auditOp(s *svc.ServiceContext, r *http.Request, action, resType, resID, res
 	if err != nil {
 		// 审计留存原始错误（服务端内部），与返回给客户端的脱敏消息相互独立。
 		ev.Message = err.Error()
+	}
+	merged := map[string]any{}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	for k, v := range details {
+		merged[k] = v
+	}
+	if len(merged) > 0 {
+		ev.Details = merged
 	}
 	s.Audit.Log(r.Context(), ev)
 }
