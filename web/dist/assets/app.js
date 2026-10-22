@@ -1268,7 +1268,7 @@
     var hosts = d.hosts || [];
     modal.appendChild(h('h4', { class: 'detail-subtitle' }, ['逐机执行状态']));
     modal.appendChild(hosts.length ? simpleTable(
-      ['主机', '批次', '状态', '当前阶段', '最新指令', '版本变化', '尝试', '开始时间', '结束时间', '执行日志'],
+      ['主机', '批次', '状态', '当前阶段', '最新指令', '版本变化', '尝试', '开始时间', '结束时间', '执行日志', '操作'],
       hosts,
       function (x) {
         var cmds = cmdByHost[x.id] || [];
@@ -1292,6 +1292,20 @@
         var ver = (x.from_version || '-') + ' → ' + (x.to_version || '-');
         var stage = stageText(x.stage);
         if (x.exit_code) stage += '（exit ' + x.exit_code + '）';
+        var hostAction = null;
+        if (isAdmin()) {
+          if (['failed', 'timeout', 'canceled', 'skipped', 'rolled_back'].indexOf(x.status) >= 0) {
+            hostAction = h('button', {
+              class: 'btn ghost small',
+              onclick: function () { retryTask(d, [x.id], function () { loadTaskDetail(d.id, state.taskDetailPage, true); }); }
+            }, ['重新执行']);
+          } else if (x.status === 'running') {
+            hostAction = h('button', {
+              class: 'btn ghost small',
+              onclick: function () { retryTask(d, [x.id], function () { loadTaskDetail(d.id, state.taskDetailPage, true); }); }
+            }, ['强制重新执行']);
+          }
+        }
         return [
           h('div', {}, [h('div', {}, [x.ip]), h('div', { class: 'muted' }, [x.hostname || '-'])]),
           '第 ' + (x.batch + 1) + ' 批',
@@ -1302,7 +1316,8 @@
           x.attempts || 0,
           fmtTime(x.started_at),
           fmtTime(x.finished_at),
-          logEl
+          logEl,
+          hostAction || h('span', { class: 'muted' }, ['-'])
         ];
       }
     ) : h('div', { class: 'muted empty' }, ['没有命中主机']));
@@ -1775,11 +1790,51 @@
     if (x.status === 'draft') btns.push(taskActionBtn(x, '启动', 'start', '', after));
     if (x.status === 'running') btns.push(taskActionBtn(x, '暂停', 'pause', '', after));
     if (x.status === 'paused') btns.push(taskActionBtn(x, '推进', 'promote', '', after));
+    if (x.status === 'running' || x.status === 'paused' ||
+        x.status === 'failed' || x.status === 'canceled' || x.status === 'rolled_back') {
+      btns.push(retryTaskBtn(x, null, after));
+    }
     if (x.status === 'draft' || x.status === 'running' || x.status === 'paused') {
       btns.push(taskActionBtn(x, '取消', 'cancel', 'danger', after));
     }
     if (deletableTask(x)) btns.push(deleteTaskBtn(x));
     return btns;
+  }
+
+  // retryTaskBtn 重新执行失败/卡住主机。force=true 会取消旧的未结束指令，
+  // 若旧 Agent 进程仍在执行，可能产生一次重复操作，因此必须二次确认。
+  function retryTaskBtn(x, taskHostIDs, after) {
+    var one = taskHostIDs && taskHostIDs.length === 1;
+    return h('button', {
+      class: 'btn ghost small',
+      onclick: function () { retryTask(x, taskHostIDs, after); }
+    }, [one ? '重新执行' : '重新执行失败/卡住主机']);
+  }
+
+  function retryTask(x, taskHostIDs, after) {
+    var one = taskHostIDs && taskHostIDs.length === 1;
+    var msg = one
+      ? '确定重新执行这台主机吗？\n将取消该主机未结束的旧指令并重新下发。'
+      : '确定重新执行任务 #' + x.id + ' 中失败/卡住的主机吗？\n已成功的主机会跳过；租约未到期的执行中主机也会跳过。';
+    msg += '\n\n注意：若旧 Agent 进程仍在执行，可能出现一次重复操作。';
+    if (!confirm(msg)) return;
+    var body = { force: true };
+    if (taskHostIDs) body.task_host_ids = taskHostIDs;
+    api('/api/tasks/' + x.id + '/retry', { method: 'POST', body: JSON.stringify(body) })
+      .then(function (d) {
+        var out = '已重置 ' + d.reset + ' 台主机的执行状态';
+        if (d.skipped_count) out += '，跳过 ' + d.skipped_count + ' 台';
+        if (d.skipped && d.skipped.length) {
+          out += '\n\n' + d.skipped.slice(0, 8).map(function (s) {
+            return (s.ip || ('#' + s.task_host_id)) + '：' + s.reason;
+          }).join('\n');
+          if (d.skipped_count > 8) out += '\n…';
+        }
+        alert(out);
+        if (after) after();
+        loadTasks();
+      })
+      .catch(function (e) { alert('重新执行失败: ' + e.message); });
   }
 
   function syncHosts() {

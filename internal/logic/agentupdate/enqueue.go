@@ -71,6 +71,26 @@ func Enqueue(ctx context.Context, db *sql.DB, sc scope.Scope, resolver *Resolver
 		return res, err
 	}
 
+	// 强制重新升级：先取消这些 Agent 上仍处于活动状态的 self_update 指令。
+	// 只取消自升级，不动组件升级等任务指令；insertCommand 仍会检查是否有
+	// 其他活动指令，避免在组件升级过程中重启 Agent。
+	if req.Force && len(req.HostIDs) > 0 {
+		if _, err := db.ExecContext(ctx, `
+			UPDATE commands c
+			SET status='canceled', finished_at=NOW(),
+			    log=COALESCE(c.log,'')||$2
+			FROM hosts h
+			WHERE c.host_id=h.id AND c.agent_id=h.agent_id
+			  AND c.type='self_update'
+			  AND c.status IN ('pending','dispatched','accepted','running')
+			  AND h.id = ANY($1)`,
+			pq.Array(req.HostIDs),
+			fmt.Sprintf("[%s] 管理员强制重新下发 Agent 自升级，取消旧指令\n",
+				time.Now().Format("2006-01-02 15:04:05"))); err != nil {
+			return res, err
+		}
+	}
+
 	tCond, tArgs := sc.Where("hosts", 1)
 	where := []string{tCond, "hosts.agent_id <> ''"}
 	args := append([]any{}, tArgs...)

@@ -189,7 +189,7 @@ func (o *Orchestrator) currentBatch(ctx context.Context, taskID int64) (int, str
 		if err := rows.Scan(&idx, &status); err != nil {
 			return -1, "", err
 		}
-		if status != "success" && status != "skipped" {
+		if status != "success" && status != "skipped" && status != "canceled" {
 			return idx, status, nil
 		}
 	}

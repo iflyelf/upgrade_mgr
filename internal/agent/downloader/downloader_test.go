@@ -53,6 +53,42 @@ func TestDownloadMD5Mismatch(t *testing.T) {
 	}
 }
 
+func TestDownloadRecoversFromHTTP416(t *testing.T) {
+	payload := []byte("fresh full content")
+	var sawRange int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			sawRange++
+			// 模拟代理/服务端拒绝续传：本地残留文件比远端大时返回 416。
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Write(payload)
+	}))
+	defer srv.Close()
+
+	dest := "/tmp/upgrade_test_dl_416.bin"
+	defer os.Remove(dest)
+	// 预置一个比远端更大的残留文件，触发 Range 续传。
+	if err := os.WriteFile(dest, []byte("stale-file-larger-than-remote"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Download(context.Background(), Spec{
+		URL: srv.URL, Dest: dest, MaxRetries: 3, Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("416 后应清理残留并重新下载: %v", err)
+	}
+	if sawRange == 0 {
+		t.Fatal("测试未覆盖 Range 续传路径")
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(payload) {
+		t.Fatalf("内容不匹配: %q", got)
+	}
+}
+
 func md5Hash(b []byte) string {
 	h := md5.Sum(b)
 	return hex.EncodeToString(h[:])

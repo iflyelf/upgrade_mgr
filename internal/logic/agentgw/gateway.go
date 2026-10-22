@@ -326,21 +326,49 @@ func (g *Gateway) UpdateStage(ctx context.Context, agentID, cmdID, stage, messag
 	message = sanitizeAndTruncate(message, maxStageMessageBytes)
 
 	var taskHostID sql.NullInt64
+	var cmdStatus string
 	err = tx.QueryRowContext(ctx, `
-		SELECT task_host_id FROM commands
-		WHERE id=$1 AND agent_id=$2
-		  AND status NOT IN ('success','failed','rolled_back','timeout','expired','canceled')`,
-		cmdID, agentID).Scan(&taskHostID)
+		SELECT task_host_id, status FROM commands
+		WHERE id=$1 AND agent_id=$2`, cmdID, agentID).Scan(&taskHostID, &cmdStatus)
 	if err == sql.ErrNoRows {
-		// 指令已结束或不属于该 Agent：只更新主机阶段，不追加日志。
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	// 与 Retry/Cancel 使用相同的加锁顺序：先 task_hosts，再 commands。
+	// 加锁后重读一次指令状态，避免并发“取消旧指令并重置 pending”时，
+	// 本请求仍拿着旧状态把过期进度写进新一轮执行。
+	var lockedID int64
+	if taskHostID.Valid {
+		err = tx.QueryRowContext(ctx,
+			`SELECT id FROM task_hosts WHERE id=$1 FOR UPDATE`, taskHostID.Int64).Scan(&lockedID)
+	} else {
+		err = tx.QueryRowContext(ctx,
+			`SELECT id FROM commands WHERE id=$1 FOR UPDATE`, cmdID).Scan(&lockedID)
+	}
+	if err == sql.ErrNoRows {
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status FROM commands WHERE id=$1 AND agent_id=$2`,
+		cmdID, agentID).Scan(&cmdStatus); err != nil {
+		return err
+	}
+	// 被“重新执行”取消或已过期的旧指令：旧 Agent 的迟到阶段不能覆盖新一轮进度。
+	if cmdStatus == protocol.CmdCanceled || cmdStatus == protocol.CmdExpired {
+		return tx.Commit()
+	}
+	if isFinalStatus(cmdStatus) {
+		// 已终态指令只更新主机阶段，不追加日志（保持原有展示语义）。
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE hosts SET last_stage=$2 WHERE agent_id=$1`, agentID, stage); err != nil {
 			return err
 		}
 		return tx.Commit()
-	}
-	if err != nil {
-		return err
 	}
 
 	line := fmt.Sprintf("[%s] 阶段: %s", time.Now().Format("2006-01-02 15:04:05"), stageLabel(stage))
@@ -467,17 +495,81 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 	//   1) 越权——Agent 可借此影响非本次上报的指令；
 	//   2) 串号——同一 Agent 并发持有多条指令时，结果会写到错误的指令/主机上。
 	var cmdID, taskHostID sql.NullInt64
+	var cmdStatus string
 	if cmdIDStr == "" {
 		return fmt.Errorf("缺少指令 ID")
 	}
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, task_host_id FROM commands
-		WHERE id=$1 AND agent_id=$2`, cmdIDStr, agentID).Scan(&cmdID, &taskHostID)
+		SELECT id, task_host_id, status FROM commands
+		WHERE id=$1 AND agent_id=$2`, cmdIDStr, agentID).Scan(&cmdID, &taskHostID, &cmdStatus)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("指令不存在或不属于当前 Agent")
 	}
 	if err != nil {
 		return err
+	}
+	// 与 Retry/Cancel 使用相同的加锁顺序：先 task_hosts，再 commands。
+	// 加锁后重读指令状态，避免并发“取消旧指令并重置 pending”时，
+	// 本请求仍用旧状态把结果写回刚重置的主机。
+	var lockedID int64
+	if taskHostID.Valid {
+		err = tx.QueryRowContext(ctx,
+			`SELECT id FROM task_hosts WHERE id=$1 FOR UPDATE`, taskHostID.Int64).Scan(&lockedID)
+	} else {
+		err = tx.QueryRowContext(ctx,
+			`SELECT id FROM commands WHERE id=$1 FOR UPDATE`, cmdID).Scan(&lockedID)
+	}
+	if err == sql.ErrNoRows {
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status FROM commands WHERE id=$1 AND agent_id=$2`,
+		cmdID, agentID).Scan(&cmdStatus); err != nil {
+		return err
+	}
+	// 被“重新执行”取消/回收的旧指令：迟到上报必须完全忽略。
+	// 否则旧 Agent 的结果会把刚重置为 pending 的 task_host 改回 success/failed，
+	// 或污染新一次执行的进度。
+	if cmdStatus == protocol.CmdExpired || cmdStatus == protocol.CmdCanceled {
+		return tx.Commit()
+	}
+	// 已终态的重复上报：命令状态由 SQL 条件保护，但不能再改 task_host，
+	// 尤其是成功主机被强制重试后，旧上报不能把它重新标成成功/失败。
+	cmdActive := !isFinalStatus(cmdStatus)
+	// 指令因 UpdateStage 自动终态时，最终 report 仍可补写 Consul 版本；
+	// 但若该主机已有更新的活动指令，或该指令早于本次重试基线，
+	// 说明正在进行新一轮执行，旧结果必须忽略。
+	if finalReport := isFinalStatus(req.Status); finalReport && !cmdActive {
+		if taskHostID.Valid {
+			var stale bool
+			if err := tx.QueryRowContext(ctx, `
+				SELECT th.started_at IS NOT NULL
+				       AND COALESCE(c.finished_at, c.created_at) < th.started_at
+				FROM task_hosts th JOIN commands c ON c.id=$2
+				WHERE th.id=$1`, taskHostID.Int64, cmdID.Int64).Scan(&stale); err == nil && stale {
+				return tx.Commit()
+			}
+		}
+		var newerActive int
+		if taskHostID.Valid {
+			_ = tx.QueryRowContext(ctx, `
+				SELECT COUNT(*) FROM commands
+				WHERE task_host_id=$1 AND id<>$2
+				  AND status IN (`+activeCommandStatusList()+`)`,
+				taskHostID.Int64, cmdID.Int64).Scan(&newerActive)
+		} else {
+			_ = tx.QueryRowContext(ctx, `
+				SELECT COUNT(*) FROM commands
+				WHERE agent_id=$1 AND id<>$2
+				  AND status IN (`+activeCommandStatusList()+`)`,
+				agentID, cmdID.Int64).Scan(&newerActive)
+		}
+		if newerActive > 0 {
+			return tx.Commit()
+		}
 	}
 
 	// 清洗所有会落库的 Agent 文本，尤其是脚本输出中的 NUL / 非法 UTF-8。
@@ -500,7 +592,7 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 
 	final := isFinalStatus(req.Status)
 	// 锁顺序与 Cancel/UpdateStage 一致：先 task_hosts，再 commands。
-	if taskHostID.Valid && final {
+	if taskHostID.Valid && final && cmdActive {
 		// 防止覆盖终态：租约回收可能已置为 timeout
 		_, err = tx.ExecContext(ctx, `
 			UPDATE task_hosts
@@ -542,15 +634,18 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 
 	// 最终态：清除维护窗口，恢复在线（IP 查询需在事务内完成）
 	var hostIP string
-	if final {
+	if final && cmdActive {
 		_, _ = tx.ExecContext(ctx, `
 			UPDATE hosts SET maintenance_until=NULL, maintenance_reason='', agent_status='online', last_stage=$2
 			WHERE agent_id=$1`, agentID, req.Stage)
-
-		// 事务内查询 IP（供后续 Consul 写入用）
-		if req.Status == protocol.CmdSuccess {
-			_ = tx.QueryRowContext(ctx, `SELECT ip FROM hosts WHERE agent_id=$1`, agentID).Scan(&hostIP)
-		}
+	}
+	// 成功结果可能先由 UpdateStage 的终态阶段自动落库，最终 report 到达时
+	// 指令已是 success；上面的活动指令检查已排除“旧上报碰到新一轮执行”，
+	// 这里仍需补写 Consul 版本，否则新 Agent 的 upgraded_version 不会更新。
+	consulEligible := false
+	if final && req.Status == protocol.CmdSuccess {
+		consulEligible = true
+		_ = tx.QueryRowContext(ctx, `SELECT ip FROM hosts WHERE agent_id=$1`, agentID).Scan(&hostIP)
 	}
 
 	// 提交事务
@@ -559,7 +654,7 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 	}
 
 	// 成功 → 回写 Consul Meta（在事务外、读锁下执行，避免写操作在锁内阻塞）
-	if final && req.Status == protocol.CmdSuccess && hostIP != "" && req.ToVersion != "" {
+	if final && consulEligible && hostIP != "" && req.ToVersion != "" {
 		g.consulMu.RLock()
 		consulClient := g.consul
 		g.consulMu.RUnlock()
@@ -597,6 +692,11 @@ func (g *Gateway) ConsumeEnrollToken(ctx context.Context, token, clientIP string
 		return 0, false
 	}
 	return tenantID, true
+}
+
+// activeCommandStatusList 返回活动指令状态的 SQL 字面量列表。
+func activeCommandStatusList() string {
+	return "'pending','dispatched','accepted','running'"
 }
 
 func isFinalStatus(s string) bool {

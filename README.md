@@ -838,6 +838,7 @@ POST /api/tasks/{id}/start       # 启动任务
 POST /api/tasks/{id}/pause       # 暂停任务
 POST /api/tasks/{id}/promote     # 推进下一批（手动）
 POST /api/tasks/{id}/cancel      # 取消任务
+POST /api/tasks/{id}/retry       # 重新执行失败/卡住主机（可指定 task_host_ids）
 DELETE /api/tasks/{id}           # 删除任务（draft/终态且无活动指令）
 ```
 
@@ -1151,6 +1152,15 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - 任务取消/删除、阶段上报、结果上报与逐机下发统一锁顺序 `task_batches → task_hosts → commands → upgrade_tasks`，避免并发取消时残留新指令或事务互相等待；启动/暂停/取消增加状态条件与影响行数检查，防止覆盖终态。
 - 新增 `DELETE /api/tasks/{id}`：仅允许 `draft` 或终态（`success/failed/canceled/rolled_back`），`running/paused` 需先取消；即使终态，只要仍有 `pending/dispatched/accepted/running` 指令也拒绝删除。
 - 删除走租户作用域并写审计 `task.delete`，级联清理 `task_batches/task_hosts/commands`；前端对可删除状态展示“删除”按钮并二次确认。
+
+### 2026-10-22 任务重新执行与制品下载 416 修复
+
+- 新增 `POST /api/tasks/{id}/retry`（管理员，审计 `task.retry`）：重新执行失败/超时/取消/跳过/已回滚的主机，默认跳过已成功主机；`task_host_ids` 可指定单台，`force=true` 才允许强制重跑执行中/已成功主机。
+- 重试在事务内取消该主机未结束的旧指令、把逐机记录重置为 `pending`、批次恢复 `pending`、任务恢复 `running`，由编排器重新下发，无需手工改库或逐台登录。
+- 用 `task_hosts.started_at` 作为重试基线：对账只同步基线之后的终态指令，避免刚重置的主机被历史 `failed/timeout` 立刻覆盖；被取消/过期旧指令的迟到阶段与结果上报一律忽略。
+- 任务详情逐机表新增“操作”列：失败/超时/取消/跳过/回滚显示“重新执行”，执行中显示“强制重新执行”；任务列表操作区新增“重新执行失败/卡住主机”。
+- Agent 下载器修复 HTTP 416 卡死：本地 `.tmp` 残留文件大于远端文件时，`Range` 续传起点越界。现在收到 416 会删除残留并按完整下载重试；下载前若已有完整且校验和匹配的文件直接复用，校验失败删除后自动重下；执行成功后清理临时制品。
+- ⚠️ 下载器修复位于 Agent 侧，存量主机需更新 Agent 后生效；页面“重新执行”可立即用于处理已失败/卡住的任务。
 
 ### 2026-10-22 Agent 指令签名兼容：服务端升级不再要求重装 Agent
 

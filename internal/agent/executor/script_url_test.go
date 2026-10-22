@@ -90,6 +90,7 @@ func TestArtifactFilename(t *testing.T) {
 		{"https://example.com/install.sh", "install.sh"},
 		{"https://example.com/install.sh?token=abc", "install.sh"},
 		{"https://example.com/path/", "path"},
+		{"https://example.com/api/artifacts/42/download", "artifact-42.bin"},
 		{"https://example.com", "artifact"},
 		{"https://example.com/..", "artifact"},
 	}

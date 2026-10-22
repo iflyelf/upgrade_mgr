@@ -72,6 +72,13 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	tmpDir := filepath.Join(comp.BackupDir, ".tmp")
 	os.MkdirAll(tmpDir, 0755)
 	dlPath := filepath.Join(tmpDir, artifactFilename(downloadURL))
+	// 成功执行后清理临时下载文件：避免下次升级同名制品时残留旧文件，
+	// 触发 Range 续传 HTTP 416（本地文件比远端大）而反复卡在下载。
+	defer func() {
+		if res.Success {
+			_ = os.Remove(dlPath)
+		}
+	}()
 	if err := downloader.Download(ctx, downloader.Spec{
 		URL: downloadURL, Dest: dlPath, MD5: art.MD5, SHA256: art.SHA256,
 		AuthHeader: downloadAuth, MaxRetries: 3, Timeout: 20 * time.Minute,
@@ -487,11 +494,32 @@ func redactURL(rawURL string) string {
 // artifactFilename 从 URL 的 path 部分取文件名，避免 query 参数进入本地文件名。
 func artifactFilename(rawURL string) string {
 	if u, err := url.Parse(rawURL); err == nil {
+		// 平台制品下载地址形如 /api/artifacts/{id}/download。
+		// 若直接用 path.Base 会全部得到 "download"，不同组件/版本共用
+		// 同一个 .tmp 文件，极易发生旧文件残留导致 Range 416。
+		// 这里用制品 ID 生成稳定且唯一的文件名，同时保留可读后缀。
+		if id := artifactIDFromPath(u.Path); id != "" {
+			return "artifact-" + id + ".bin"
+		}
 		if base := path.Base(u.Path); base != "." && base != ".." && base != "/" && base != "" {
 			return base
 		}
 	}
 	return "artifact"
+}
+
+// artifactIDFromPath 从 /api/artifacts/{id}/download 提取制品 ID。
+func artifactIDFromPath(p string) string {
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] == "artifacts" && parts[i+2] == "download" {
+			id := parts[i+1]
+			if id != "" && !strings.ContainsAny(id, `/\`) {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 // validateInstallPath 校验 install_path，防止越权替换/删除敏感文件。

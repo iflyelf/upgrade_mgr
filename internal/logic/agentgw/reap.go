@@ -2,6 +2,7 @@ package agentgw
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -109,14 +110,16 @@ func (g *Gateway) ReapExpired(ctx context.Context) (int, error) {
 	defer tx.Rollback()
 
 	// 一次最多处理 500 条，避免大量离线 Agent 时单个事务过大。
+	// 这里先不加行锁：真正的状态更新会带 lease/status 条件重新校验。
+	// 逐条按「先 task_hosts、后 commands」加锁，与 Report/UpdateStage/Retry
+	// 的顺序一致，避免与 Agent 上报并发时互相等待。
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, agent_id, COALESCE(task_host_id,0) FROM commands
 		WHERE status IN ('dispatched','accepted','running')
 		  AND lease_expire_at IS NOT NULL
 		  AND lease_expire_at < NOW()
 		ORDER BY id
-		LIMIT 500
-		FOR UPDATE SKIP LOCKED`)
+		LIMIT 500`)
 	if err != nil {
 		return 0, err
 	}
@@ -142,11 +145,45 @@ func (g *Gateway) ReapExpired(ctx context.Context) (int, error) {
 	line := fmt.Sprintf("[%s] 超过租约未收到 Agent 阶段/结果上报，服务端标记超时\n",
 		time.Now().Format("2006-01-02 15:04:05"))
 	agents := map[string]bool{}
+	reaped := 0
 	for _, e := range list {
+		// 与 Retry/Cancel/Report 保持相同的加锁顺序：先 task_hosts，再 commands。
+		// 锁住逐机记录后重新校验指令状态，避免与“重新执行”并发时，
+		// 把刚取消的旧指令/刚重置的 pending 又标成 timeout。
+		if e.taskHi > 0 {
+			var lockedID int64
+			err := tx.QueryRowContext(ctx,
+				`SELECT id FROM task_hosts WHERE id=$1 FOR UPDATE`, e.taskHi).Scan(&lockedID)
+			if err == sql.ErrNoRows {
+				continue
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+		var curStatus string
+		var curLease sql.NullTime
+		err := tx.QueryRowContext(ctx, `
+			SELECT status, lease_expire_at FROM commands
+			WHERE id=$1 FOR UPDATE`, e.id).Scan(&curStatus, &curLease)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if curStatus != protocol.CmdDispatched && curStatus != protocol.CmdAccepted &&
+			curStatus != protocol.CmdRunning {
+			continue
+		}
+		if !curLease.Valid || !curLease.Time.Before(time.Now()) {
+			continue
+		}
+
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE commands
-			SET status=$2, last_stage=$3, last_stage_at=NOW(), finished_at=NOW(),
-			    result=COALESCE(result, jsonb_build_object('status',$2,'stage',$3)),
+			SET status=$2::varchar, last_stage=$3::varchar, last_stage_at=NOW(), finished_at=NOW(),
+			    result=COALESCE(result, jsonb_build_object('status',$2::varchar,'stage',$3::varchar)),
 			    log=COALESCE(log,'')||$4
 			WHERE id=$1 AND status IN ('dispatched','accepted','running')`,
 			e.id, protocol.CmdTimeout, protocol.StageFailed, line); err != nil {
@@ -155,13 +192,14 @@ func (g *Gateway) ReapExpired(ctx context.Context) (int, error) {
 		if e.taskHi > 0 {
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE task_hosts
-				SET status=$2, stage=$3, finished_at=NOW(), log=COALESCE(log,'')||$4
+				SET status=$2::varchar, stage=$3::varchar, finished_at=NOW(), log=COALESCE(log,'')||$4
 				WHERE id=$1 AND status IN ('pending','running')`,
 				e.taskHi, protocol.CmdTimeout, protocol.StageFailed, line); err != nil {
 				return 0, err
 			}
 		}
 		agents[e.agent] = true
+		reaped++
 	}
 
 	// 指令已终态且该 Agent 没有其他活动指令时，立即退出维护窗口。
@@ -184,7 +222,7 @@ func (g *Gateway) ReapExpired(ctx context.Context) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return len(list), nil
+	return reaped, nil
 }
 
 // SyncTaskHostsFromCommands 把已终态指令同步回 task_hosts。
@@ -203,7 +241,8 @@ func (g *Gateway) SyncTaskHostsFromCommands(ctx context.Context) (int, error) {
 		    finished_at=COALESCE(c.finished_at, NOW())
 		FROM (
 		    SELECT DISTINCT ON (c.task_host_id)
-		           c.task_host_id, c.status, c.last_stage, c.result, c.payload, c.log, c.finished_at
+		           c.task_host_id, c.status, c.last_stage, c.result, c.payload, c.log,
+		           c.finished_at, c.created_at
 		    FROM commands c
 		    JOIN task_hosts active_th ON active_th.id = c.task_host_id
 		    WHERE c.task_host_id IS NOT NULL
@@ -213,6 +252,9 @@ func (g *Gateway) SyncTaskHostsFromCommands(ctx context.Context) (int, error) {
 		) c
 		WHERE c.task_host_id = th.id
 		  AND th.status IN ('pending','running')
+		  -- 只同步「本次执行」的终态指令。retry 会把 started_at 设为重试时间，
+		  -- 早于它的历史 failed/timeout 不能立刻把 pending 又改回失败。
+		  AND (th.started_at IS NULL OR COALESCE(c.finished_at, c.created_at) >= th.started_at)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM commands c2
 		      WHERE c2.task_host_id=th.id

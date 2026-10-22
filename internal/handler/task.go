@@ -3,6 +3,7 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -349,6 +350,29 @@ func TaskPause(s *svc.ServiceContext) http.HandlerFunc {
 }
 func TaskCancel(s *svc.ServiceContext) http.HandlerFunc {
 	return taskAction(s, audit.ActionTaskCancel, func(id int64, r *http.Request) error { return s.Task.Cancel(r.Context(), reqScope(r), id) })
+}
+
+// TaskRetry 重新执行失败/卡住的主机（可指定 task_host_ids，为空则全部可重试）。
+func TaskRetry(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.PathValue("id")
+		id, _ := strconv.ParseInt(idStr, 10, 64)
+		var req task.RetryRequest
+		if r.ContentLength != 0 {
+			if err := httpx.DecodeJSON(r, &req); err != nil && err != io.EOF {
+				httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+				return
+			}
+		}
+		res, err := s.Task.Retry(r.Context(), reqScope(r), id, req)
+		if err != nil {
+			auditOp(s, r, audit.ActionTaskRetry, "task", idStr, "", err)
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		auditOp(s, r, audit.ActionTaskRetry, "task", idStr, "", nil)
+		httpx.OK(w, res)
+	}
 }
 
 // TaskDelete 删除任务及其批次、逐机记录和历史指令。

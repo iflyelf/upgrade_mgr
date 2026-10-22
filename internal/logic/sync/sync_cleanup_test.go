@@ -103,8 +103,10 @@ func TestCleanupMissingHosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("清理失败: %v", err)
 	}
-	if deleted != 2 {
-		t.Fatalf("期望清理 2 台（stale + last_synced_at 为空），实际 %d", deleted)
+	// 清理是全库行为，测试库里可能还有其他测试遗留的过期 Consul 主机，
+	// 因此只断言本用例目标主机被删除，不锁定全局删除总数。
+	if deleted < 2 {
+		t.Fatalf("期望至少清理 2 台，实际 %d", deleted)
 	}
 
 	check := func(id int64, want int, name string) {

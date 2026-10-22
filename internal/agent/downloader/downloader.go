@@ -40,6 +40,19 @@ func Download(ctx context.Context, spec Spec) error {
 	ctx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
+	// 续传前先校验已有文件：
+	//   - 完整且校验和匹配 → 直接复用，避免对已下载完成的文件发 Range（会 416）；
+	//   - 校验和不匹配 → 删除，避免带着旧版本的残留文件继续续传。
+	// 这一步能显著减少“反复卡在下载”的概率（例如进程重启后再次执行同版本升级）。
+	if fi, err := os.Stat(spec.Dest); err == nil && fi.Size() > 0 {
+		if spec.SHA256 != "" || spec.MD5 != "" {
+			if verifyChecksum(spec.Dest, spec.MD5, spec.SHA256) == nil {
+				return nil
+			}
+			_ = os.Remove(spec.Dest)
+		}
+	}
+
 	if spec.UseWget || !goDownloadSupported() {
 		return downloadWget(ctx, spec)
 	}
@@ -55,8 +68,15 @@ func Download(ctx context.Context, spec Spec) error {
 			return fmt.Errorf("下载失败(尝试%d次): %w", spec.MaxRetries, err)
 		}
 		if err := verifyChecksum(spec.Dest, spec.MD5, spec.SHA256); err != nil {
+			// 校验失败可能是续传到了旧版本残留内容。删除后重新完整下载，
+			// 而不是直接失败等人工重试。
 			_ = os.Remove(spec.Dest)
-			return err
+			lastErr = err
+			if attempt < spec.MaxRetries {
+				time.Sleep(time.Duration(attempt) * 2 * time.Second)
+				continue
+			}
+			return fmt.Errorf("下载校验失败(尝试%d次): %w", spec.MaxRetries, err)
 		}
 		return nil
 	}
@@ -65,7 +85,7 @@ func Download(ctx context.Context, spec Spec) error {
 
 func downloadGo(ctx context.Context, spec Spec) error {
 	fi, _ := os.Stat(spec.Dest)
-	var offset int64
+	offset := int64(0)
 	if fi != nil {
 		offset = fi.Size()
 	}
@@ -84,6 +104,14 @@ func downloadGo(ctx context.Context, spec Spec) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// 416：本地残留文件比服务端文件还大（例如同名制品已换版本、上次下载中断在半截），
+	// 继续用同一个 Range 重试只会永远 416。清理残留后由外层重试完整下载。
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		if err := os.Remove(spec.Dest); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("HTTP 416，且清理残留文件失败: %w", err)
+		}
+		return fmt.Errorf("HTTP 416（本地残留文件 %d 字节，已清理并将重新下载）", offset)
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}

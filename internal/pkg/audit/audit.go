@@ -104,6 +104,7 @@ const (
 	ActionTaskPause       = "task.pause"
 	ActionTaskPromote     = "task.promote"
 	ActionTaskCancel      = "task.cancel"
+	ActionTaskRetry       = "task.retry"
 	ActionTaskDelete      = "task.delete"
 	ActionArtifactUpload  = "artifact.upload"
 	ActionAgentRegister   = "agent.register"
