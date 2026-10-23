@@ -471,12 +471,43 @@ func buildWindowsInstallCommand(safeURL, arch, token string, force bool) string 
 	//
 	// 用变量 $exe 保存临时路径，避免长表达式在控制台换行时被截断；
 	// 每条语句独立成行，逐行粘贴也能执行。
+	//
+	// 下载失败时（目标机到平台不通）必须给出明确提示并停止，
+	// 否则 Start-Process 只会报「系统找不到指定的文件」，掩盖真正的网络问题。
+	// 用单行 try/catch 与 if/else：逐行粘贴时不会进入多行输入模式。
 	return "$ErrorActionPreference = 'Stop'\n" +
 		"$exe = Join-Path $env:TEMP 'upgrade-agent.exe'\n" +
 		"Remove-Item -Force -ErrorAction SilentlyContinue $exe\n" +
-		"(New-Object System.Net.WebClient).DownloadFile(" + psQuote(binURL) + ", $exe)\n" +
-		"Start-Process -FilePath $exe -ArgumentList " +
-		strings.Join(args, ",") + " -Wait -NoNewWindow"
+		"try { (New-Object System.Net.WebClient).DownloadFile(" + psQuote(binURL) + ", $exe) } " +
+		"catch { Write-Host ('下载失败: ' + $_.Exception.Message) -ForegroundColor Red; " +
+		"Write-Host " + psQuote("请确认本机能访问 "+safeURL+"，可用 Test-NetConnection "+hostOnly(safeURL)+" -Port "+portOf(safeURL)+" 检查") + " -ForegroundColor Yellow }\n" +
+		"if (Test-Path $exe) { Start-Process -FilePath $exe -ArgumentList " +
+		strings.Join(args, ",") + " -Wait -NoNewWindow } " +
+		"else { Write-Host '未下载到安装包，请先解决本机到平台的网络连通性' -ForegroundColor Red }"
+}
+
+// hostOnly 从 URL 中取出主机名（用于生成 Test-NetConnection 提示）。
+func hostOnly(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return "<服务器IP>"
+	}
+	return u.Hostname()
+}
+
+// portOf 从 URL 中取出端口，缺省按协议返回 80/443。
+func portOf(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return "8090"
+	}
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
 }
 
 // psQuote 把值包成 PowerShell 单引号字符串（内部 ' 写成 ”）。

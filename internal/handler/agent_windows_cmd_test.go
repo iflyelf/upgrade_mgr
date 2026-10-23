@@ -12,19 +12,24 @@ import (
 func TestBuildWindowsInstallCommandPowerShellSyntax(t *testing.T) {
 	cmd := buildWindowsInstallCommand("http://10.1.230.50:8090", "amd64", "tok-abc", true)
 
+	// 注意：URL/token 本身不含单引号时不应出现 ''；含单引号时 '' 是合法转义（见下一个用例）。
 	if strings.Contains(cmd, "''") {
-		t.Fatalf("不应出现连续两个单引号（会破坏 PowerShell 参数）:\n%s", cmd)
+		t.Fatalf("URL/token 不含单引号时不应出现连续两个单引号:\n%s", cmd)
 	}
 	for _, want := range []string{
 		"$exe = Join-Path $env:TEMP 'upgrade-agent.exe'",
 		"(New-Object System.Net.WebClient).DownloadFile('http://10.1.230.50:8090/api/agent/binary/windows-amd64', $exe)",
 		"Start-Process -FilePath $exe -ArgumentList 'install','--server','http://10.1.230.50:8090','--enroll-token','tok-abc','--force' -Wait -NoNewWindow",
+		// 下载失败必须显式提示并跳过 Start-Process，否则只会报「找不到指定的文件」。
+		"catch { Write-Host ('下载失败: ' + $_.Exception.Message)",
+		"if (Test-Path $exe) { Start-Process",
+		"else { Write-Host '未下载到安装包",
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("缺少片段 %q:\n%s", want, cmd)
 		}
 	}
-	// 每条语句单独一行，便于逐行粘贴。
+	// 每类语句各占一行，便于逐行粘贴。
 	lines := strings.Split(strings.TrimSpace(cmd), "\n")
 	if len(lines) != 5 {
 		t.Fatalf("应为 5 行独立语句，实际 %d:\n%s", len(lines), cmd)
