@@ -227,6 +227,39 @@ Get-Content "$env:ProgramData\upgrade-agent\state.json"   # 注册凭据（仅�
 > 控制台必须能提供 `upgrade-agent-windows-amd64.exe`：即上文步骤 1.2/2 放到
 > `/opt/upgrade-mgr/dist/` 下的文件；否则 Windows 主机会下载 404。
 
+**Windows 主机下载失败 / 连不上平台怎么办**
+
+生成命令里的下载地址就是「控制台对外地址」，Windows 主机必须能访问它。若出现
+`DownloadFile ... 无法连接到远程服务器`，按顺序排查：
+
+```powershell
+# 1. Windows 主机 → 平台，端口是否可达（这一步失败就是网络问题，与 Agent 无关）
+Test-NetConnection 10.1.230.50 -Port 8090
+
+# 2. 若不通，检查：平台是否监听 0.0.0.0、防火墙/安全组是否放行、是否跨网段/跨区域
+#    服务端确认监听：
+#      ss -lntp | grep 8090        # 应为 0.0.0.0:8090 或 *:8090
+#      firewall-cmd --list-ports   # 或 ufw status
+
+# 3. 平台地址写错或需走别的入口时，用“Windows 主机能访问到的地址”重新生成命令
+#    例如内网地址、域名，或隧道/VPN 提供的地址：
+#      --server http://10.8.0.1:8090
+```
+
+要点：
+
+- **命令里的地址必须是 Windows 主机视角可达的地址**。服务端的 `external_url`
+  如果填的是公网域名，而 Windows 主机在内网，就会连不上；反之亦然。
+- **没有公网可达性时**：用隧道（WireGuard/IPSec/专线/frp 等）让 Windows 主机能访问平台，
+  然后直接用隧道地址安装：`--server http://<隧道地址>:8090`。
+  隧道本身由隧道软件建立，平台不参与。
+- **已经用旧地址装过**（服务已注册）：在控制台主机页「编辑」填「连接地址覆盖」
+  （`server_url_override`），保存后 Agent 约 30 秒自动切换；不需要重装。
+- 平台侧可先用 `POST /api/hosts/{id}/tunnel-test` 或页面「测试连接地址」验证地址本身可服务。
+
+> 命令生成逻辑已加保护：下载失败会打印「下载失败: …」并提示用 `Test-NetConnection`
+> 自检，不会再继续执行 `Start-Process` 报「系统找不到指定的文件」。
+
 ### 方式二：Docker（推荐用于快速体验）
 
 ```bash
@@ -1925,6 +1958,16 @@ MIT © iflyelf
 - 备用地址轮换不依赖服务端配置，避免「服务端推送错误覆盖地址」导致主机失联。
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
+
+### 2026-10-23 Windows 接入命令补充网络失败提示
+
+- `buildWindowsInstallCommand` 下载步骤改为单行 `try/catch`：失败时打印真实错误
+  并提示 `Test-NetConnection <host> -Port <port>` 自检，不再继续执行导致
+  「系统找不到指定的文件」误导排查方向。
+- `Start-Process` 增加 `if (Test-Path $exe)` 保护，未下载成功时直接给出结论。
+- README 增加「Windows 主机下载失败 / 连不上平台怎么办」排查小节：
+  地址必须是 Windows 主机视角可达、服务端监听与防火墙检查、隧道场景直接填隧道地址、
+  已安装旧地址可改用「连接地址覆盖」热切换。
 
 ### 2026-10-23 修复 Windows 接入命令引号错误
 
