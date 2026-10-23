@@ -24,7 +24,8 @@ func TestTenantIsolation_Components(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	ctx := context.Background()
 
 	// 准备两个租户

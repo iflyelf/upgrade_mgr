@@ -126,6 +126,17 @@ func TestFlyIAMPromisionCustomPassword(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Exec(`DELETE FROM local_users WHERE username='fly-b'`) })
 
+	// 过短密码 → 400
+	shortReq := httptest.NewRequest("POST", "/api/flyiam/users/fly-b/provision",
+		strings.NewReader(`{"password":"short"}`))
+	shortReq.SetPathValue("username", "fly-b")
+	shortReq = shortReq.WithContext(auth.WithUser(shortReq.Context(), hostTestUser(1)))
+	shortRec := httptest.NewRecorder()
+	FlyIAMProvisionLocalUser(sc)(shortRec, shortReq)
+	if shortRec.Code != http.StatusBadRequest {
+		t.Fatalf("过短密码应 400，实际 %d: %s", shortRec.Code, shortRec.Body.String())
+	}
+
 	req := httptest.NewRequest("POST", "/api/flyiam/users/fly-b/provision",
 		strings.NewReader(`{"password":"Secret123!"}`))
 	req.SetPathValue("username", "fly-b")
@@ -146,5 +157,29 @@ func TestFlyIAMPromisionCustomPassword(t *testing.T) {
 	}
 	if _, ok := out.Data["password"]; ok {
 		t.Fatal("指定密码时不应回显密码")
+	}
+}
+
+// TestGeneratePassword 随机密码长度与字符集。
+func TestGeneratePassword(t *testing.T) {
+	pwd, err := generatePassword(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pwd) != 16 {
+		t.Fatalf("长度应为 16, got %d", len(pwd))
+	}
+	for _, c := range pwd {
+		if !strings.ContainsRune(provisionPasswordCharset, c) {
+			t.Fatalf("非法字符 %q", c)
+		}
+	}
+	// 两次生成不应相同
+	other, err := generatePassword(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pwd == other {
+		t.Fatal("两次生成不应相同")
 	}
 }

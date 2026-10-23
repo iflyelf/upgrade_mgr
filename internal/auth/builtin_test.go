@@ -26,7 +26,8 @@ func openTestDB(t *testing.T) *sql.DB {
 // TestChangePassword 测试密码修改流程。
 func TestChangePassword(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	
 	ctx := context.Background()
 	b := NewBuiltin(db, "test-secret-32-bytes-long-1234", false)

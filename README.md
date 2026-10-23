@@ -1982,6 +1982,9 @@ MIT © iflyelf
   - 命令任务选项仅管理员可见。
 - **新增单测**：`/api/my/permissions`（管理员/团队授权）、任务列表可见性与
   `can_operate`、非管理员禁止命令任务、启动/重试的 deploy 复核、同团队共享。
+- **测试数据清理修复**：多处测试用 `defer db.Close()`，其执行早于 `t.Cleanup`
+  （关闭连接后清理 SQL 失败），会残留团队/组件/主机等数据并污染后续用例。
+  统一改为 `t.Cleanup(func(){ db.Close() })`（LIFO 保证先删数据再关连接）。
 
 ### 2026-10-24 团队级 owner 策略、多选标签与 FlyIAM 一键开通
 
