@@ -46,6 +46,7 @@ type hostRow struct {
 	IP           string
 	Hostname     string
 	AgentID      string
+	OSFamily     string
 	Arch         string
 	Kernel       string
 	BuildHash    string
@@ -101,7 +102,7 @@ func Enqueue(ctx context.Context, db *sql.DB, sc scope.Scope, resolver *Resolver
 	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT hosts.id, hosts.ip, COALESCE(hosts.hostname,''), hosts.agent_id,
-		       COALESCE(hosts.arch,''), COALESCE(hosts.kernel,''),
+		       COALESCE(hosts.os_family,''), COALESCE(hosts.arch,''), COALESCE(hosts.kernel,''),
 		       COALESCE(hosts.agent_build_hash,''), COALESCE(hosts.agent_build_variant,'')
 		FROM hosts
 		WHERE `+strings.Join(where, " AND ")+`
@@ -114,8 +115,8 @@ func Enqueue(ctx context.Context, db *sql.DB, sc scope.Scope, resolver *Resolver
 	hosts := []hostRow{}
 	for rows.Next() {
 		var h hostRow
-		if err := rows.Scan(&h.ID, &h.IP, &h.Hostname, &h.AgentID, &h.Arch, &h.Kernel,
-			&h.BuildHash, &h.BuildVariant); err != nil {
+		if err := rows.Scan(&h.ID, &h.IP, &h.Hostname, &h.AgentID, &h.OSFamily,
+			&h.Arch, &h.Kernel, &h.BuildHash, &h.BuildVariant); err != nil {
 			return res, err
 		}
 		hosts = append(hosts, h)
@@ -167,10 +168,11 @@ func AutoEnqueue(ctx context.Context, db *sql.DB, agentID string, resolver *Reso
 	var h hostRow
 	err := db.QueryRowContext(ctx, `
 		SELECT hosts.id, hosts.ip, COALESCE(hosts.hostname,''), hosts.agent_id,
-		       COALESCE(hosts.arch,''), COALESCE(hosts.kernel,''),
+		       COALESCE(hosts.os_family,''), COALESCE(hosts.arch,''), COALESCE(hosts.kernel,''),
 		       COALESCE(hosts.agent_build_hash,''), COALESCE(hosts.agent_build_variant,'')
 		FROM hosts WHERE hosts.agent_id=$1 LIMIT 1`, agentID).
-		Scan(&h.ID, &h.IP, &h.Hostname, &h.AgentID, &h.Arch, &h.Kernel, &h.BuildHash, &h.BuildVariant)
+		Scan(&h.ID, &h.IP, &h.Hostname, &h.AgentID, &h.OSFamily,
+			&h.Arch, &h.Kernel, &h.BuildHash, &h.BuildVariant)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -210,11 +212,16 @@ func resolveForHost(r *Resolver, h hostRow, forcedVariant, baseURL string) (Targ
 	if arch == "" {
 		return Target{}, fmt.Errorf("主机未上报 Agent 架构")
 	}
+	// 按主机上报的 os_family 选择平台二进制；Windows 固定为 windows。
+	osName := ChooseOS(h.OSFamily)
 	variant := forcedVariant
-	if variant == "" {
+	if osName == OSWindows {
+		// Windows 单套二进制覆盖 2008 R2~Win11，不存在 legacy 变体。
+		variant = ""
+	} else if variant == "" {
 		variant = ChooseVariant(h.BuildVariant, h.Kernel)
 	}
-	return r.Resolve(arch, variant, baseURL)
+	return r.ResolveOS(osName, arch, variant, baseURL)
 }
 
 func insertCommand(ctx context.Context, db *sql.DB, h hostRow, target Target) (bool, error) {

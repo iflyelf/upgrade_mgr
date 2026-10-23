@@ -58,6 +58,82 @@ func TestResolveRejectsTraversalAndInvalidArch(t *testing.T) {
 	}
 }
 
+func TestResolveWindowsTargetAndAvailable(t *testing.T) {
+	dir := t.TempDir()
+	body := []byte("fake-windows-agent")
+	for _, name := range []string{
+		"upgrade-agent-windows-amd64.exe",
+		"upgrade-agent-windows-arm64.exe",
+		"upgrade-agent-linux-amd64",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := NewResolver(dir, "v2.0.0")
+
+	win, err := r.ResolveOS("windows", "amd64", "", "https://mgr.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if win.Filename() != "upgrade-agent-windows-amd64.exe" {
+		t.Fatalf("Windows 文件名不符: %s", win.Filename())
+	}
+	if win.URL != "https://mgr.example.com/api/agent/binary/windows-amd64" {
+		t.Fatalf("Windows URL 不符: %s", win.URL)
+	}
+
+	// Windows 无 legacy 构建，且不支持 386。
+	if _, err := r.ResolveOS("windows", "amd64", "legacy", "https://mgr.example.com"); err == nil {
+		t.Fatal("Windows legacy 变体应被拒绝")
+	}
+	if _, err := r.ResolveOS("windows", "386", "", "https://mgr.example.com"); err == nil {
+		t.Fatal("Windows 386 应被拒绝")
+	}
+
+	available := r.Available("https://mgr.example.com")
+	if len(available) != 3 {
+		t.Fatalf("应发现 3 个二进制（2 Windows + 1 Linux），实际 %d: %+v", len(available), available)
+	}
+	// 排序：linux 在前，windows 在后
+	if available[0].OS != OSLinux || available[len(available)-1].OS != OSWindows {
+		t.Fatalf("排序不符: %+v", available)
+	}
+}
+
+func TestChooseOS(t *testing.T) {
+	cases := map[string]string{
+		"windows": "windows", "Windows": "windows", " winDOWS ": "windows",
+		"rhel": OSLinux, "debian": OSLinux, "": OSLinux,
+	}
+	for in, want := range cases {
+		if got := ChooseOS(in); got != want {
+			t.Errorf("ChooseOS(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseBinaryName(t *testing.T) {
+	cases := []struct {
+		name, osName, arch, variant string
+		ok                          bool
+	}{
+		{"upgrade-agent-linux-amd64", OSLinux, "amd64", "", true},
+		{"upgrade-agent-linux-amd64-legacy", OSLinux, "amd64", "legacy", true},
+		{"upgrade-agent-windows-amd64.exe", OSWindows, "amd64", "", true},
+		{"upgrade-agent-windows-arm64.exe", OSWindows, "arm64", "", true},
+		{"upgrade-agent-darwin-amd64", "", "", "", false},
+		{"other-file", "", "", "", false},
+	}
+	for _, c := range cases {
+		osName, arch, variant, ok := parseBinaryName(c.name)
+		if ok != c.ok || osName != c.osName || arch != c.arch || variant != c.variant {
+			t.Errorf("parseBinaryName(%q)=(%q,%q,%q,%v) want (%q,%q,%q,%v)",
+				c.name, osName, arch, variant, ok, c.osName, c.arch, c.variant, c.ok)
+		}
+	}
+}
+
 func TestChooseVariant(t *testing.T) {
 	cases := []struct {
 		reported, kernel, want string

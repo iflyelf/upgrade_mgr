@@ -184,6 +184,8 @@ make build-agent    # Agent
 make cross          # 交叉编译 amd64/arm64/arm 到 dist/
 make agent-legacy   # 用 Go 1.23 编译 CentOS 6 兼容 Agent（amd64/386/arm64）到 dist/*-legacy
 make test-agent-legacy  # 用 Go 1.23 跑 Agent 测试，防止误用 1.24+ API
+make agent-windows  # 用 Go 1.20 编译 Windows Agent（amd64/arm64）到 dist/*.exe
+make test-agent-windows # 用 Go 1.20 交叉编译 + vet 校验 Windows Agent
 make test           # 单测（集成测试需 DATABASE_URL / CONSUL_ADDRESS）
 ```
 
@@ -199,6 +201,53 @@ Agent 只依赖标准库，所以用独立 modfile `build/agent-legacy.mod`（`g
 - ⚠️ Go 1.23 已停止安全维护，legacy 产物只建议用于确实无法升级内核的主机
 - ⚠️ 还没有在真实 CentOS 6 主机上跑过，上线前请先实测 `install` / `run` / `watchdog`
 - CentOS 6 没有 systemd，也没有 `/etc/os-release`。服务管理走 upstart（`initctl`，缺失时回退 SysV `service`），系统识别回退到 `/etc/centos-release` / `/etc/redhat-release`
+
+### Windows Agent（Server 2008 R2 ~ Windows 11）
+
+Windows 的支持下限是 **Windows Server 2008 R2**，因此使用 Go 1.20（最后一个仍支持该系统的
+Go 版本）配合独立 modfile `build/agent-windows.mod` 编译。单套二进制同时覆盖
+Server 2008 R2 / 2012 / 2012 R2 / 2016 / 2019 / 2022 与 Windows 7 / 8.1 / 10 / 11，
+**不需要** Windows legacy 变体。
+
+- 支持架构：`amd64`、`arm64`（Windows on ARM）
+- 产物：`dist/upgrade-agent-windows-{amd64,arm64}.exe`，静态链接、无 CGO
+- 唯一第三方依赖：`golang.org/x/sys`（SCM 服务宿主与 `svc/mgr` 服务管理），`go.mod` 固定在 `go 1.20`
+- 服务形态：注册为 **Windows 服务**（SCM，LocalSystem），失败恢复动作 5s/10s/30s 自动重启；
+  自升级通过 `os.Exit(75)` + 「非崩溃失败也重启」触发
+- 看门狗：`schtasks` 每分钟以 SYSTEM 运行 `upgrade-agent watchdog`，独占文件句柄保证单实例
+- 默认路径：`%ProgramFiles%\upgrade-agent\upgrade-agent.exe`、
+  `%ProgramData%\upgrade-agent\state.json`、备份目录 `%ProgramData%\upgrade-agent\backup`
+
+**安装方式**（管理员 PowerShell；Server 2008 R2 自带 PowerShell 2.0 亦可）：
+
+```powershell
+# 控制台「接入主机」选择 Windows 后生成的命令形如：
+Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP 'upgrade-agent.exe')
+(New-Object System.Net.WebClient).DownloadFile('https://<server>/api/agent/binary/windows-amd64', (Join-Path $env:TEMP 'upgrade-agent.exe'))
+Start-Process -FilePath (Join-Path $env:TEMP 'upgrade-agent.exe') -ArgumentList 'install','--server','https://<server>','--enroll-token','<token>' -Wait -NoNewWindow
+```
+
+> `install` 会写入 state、创建服务 `upgrade-agent` 并启动。重复执行会先停服务、删除并重建，
+> 因此可安全重装；已注册凭据默认保留，需要重新注册请加 `--force`。
+> 卸载：`upgrade-agent.exe uninstall`。
+
+**脚本任务与组件部署**：
+
+| 项 | Linux | Windows |
+|---|---|---|
+| 默认解释器 | bash → sh | `powershell.exe`（缺失回退 `cmd.exe`） |
+| `interpreter` 白名单 | bash/sh/dash/ksh/zsh | powershell/pwsh/cmd |
+| 脚本扩展名 | `.sh` | `.ps1`（`.cmd`/`.bat` 自动走 cmd） |
+| 伪终端（TTY） | `script(1)` | 不支持，自动降级为普通执行 |
+| 部署命令首参数 | `/bin/sh`、`systemctl`… | `powershell.exe -NoProfile -Command ...`、`sc.exe`… |
+| `install_path` 校验 | 绝对路径 + 黑名单（/etc、/boot…）+ 白名单根 | 盘符绝对路径 + 禁止 UNC/`..` + 系统目录黑名单 + 程序目录白名单 |
+
+组件服务管理在 Windows 上使用 `golang.org/x/sys/windows/svc/mgr`（不解析本地化的 `sc.exe` 输出），
+`service_name` 直接填 SCM 服务名即可。PowerShell 脚本建议显式 `exit` 非零码，
+否则 Windows 不会把脚本内未捕获异常以外的失败反映到退出码上。
+
+⚠️ 尚未在真实 Server 2008 R2 主机上验证，上线前请先实测 `install` / `run` / `watchdog` /
+组件升级与自升级链路。
 
 ---
 
@@ -217,6 +266,7 @@ Agent 只依赖标准库，所以用独立 modfile `build/agent-legacy.mod`（`g
 | 控制台二进制 | `upgrade-mgr-linux-{amd64,arm64,arm}.tar.gz` |
 | Agent 二进制 | `upgrade-agent-linux-{amd64,arm64,arm}.tar.gz` |
 | Agent Legacy（CentOS 6） | `upgrade-agent-linux-{amd64,386,arm64}-legacy.tar.gz` |
+| Agent Windows | `upgrade-agent-windows-{amd64,arm64}.zip` |
 | 华为云 SWR 镜像 | `swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest` |
 | DockerHub 镜像（可选） | `iflyelf/upgrade-mgr:latest` |
 
@@ -522,7 +572,9 @@ POST /api/agents/self-update           # {host_ids:[1,2]} 或 {"all_outdated":tr
 GET  /api/agents/self-update           # 目标版本、可用二进制、最近 50 条升级记录
 ```
 
-下载地址由服务端生成绝对 URL：`/api/agent/binary/linux-<arch>`，legacy 追加 `-legacy`。
+下载地址由服务端生成绝对 URL：`/api/agent/binary/<os>-<arch>`（`linux` / `windows`），
+Linux legacy 追加 `-legacy`；Windows 文件名带 `.exe`。服务端按主机上报的 `os_family`
+自动选择平台二进制，同一个 fleet 可混合 Linux 与 Windows 主机。
 若使用 Nginx/域名，请正确设置 `server.external_url`，否则 Agent 可能无法访问下载地址。
 
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
@@ -1054,7 +1106,10 @@ GET  /api/agents/self-update           # 管理员；目标版本、可用二进
 ```
 
 - `POST` 返回 `enqueued`（已下发数）、`skipped_count`、`skipped`（最多 200 条原因）。
-- 可选 `force=true` 即使哈希一致也重新下发；`variant=legacy` 强制使用 legacy 构建。
+- 可选 `force=true` 即使哈希一致也重新下发。
+- 服务端按主机上报的 `os_family` 选择目标二进制：`windows` 主机取
+  `upgrade-agent-windows-<arch>.exe`（amd64/arm64，无 legacy），其余取
+  `upgrade-agent-linux-<arch>[-legacy]`。`variant=legacy` 只影响 Linux 主机。
 - 同一 Agent 同时只允许一条未结束的 `self_update`（数据库唯一索引兜底）。
 - 自升级成功由新 Agent 心跳中的 `build_hash` 与指令目标 SHA256 精确匹配确认。
 
@@ -1330,6 +1385,16 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
 
+### 2026-10-23 Windows Agent 支持
+
+- Agent 拆分平台实现：`osinfo`（注册表 ProductName + RtlGetNtVersionNumbers）、`svcmgr`（`x/sys/windows/svc/mgr`）、`watchdog`（独占文件句柄 + `DETACHED_PROCESS`）、`installer`（SCM 服务 + 恢复动作 + `schtasks`）、`agentpath`（Program Files/ProgramData 默认路径）、`winsvc`（服务宿主）。
+- 新增 `--service` 与 `winsvc.RunIfService`：由 SCM 启动时以服务模式运行，前台手工执行时保持普通进程行为。
+- 执行器按平台选择解释器：Windows 优先 `powershell.exe`（`-NoProfile -ExecutionPolicy Bypass -File`），`.cmd/.bat` 走 `cmd.exe /c`；TTY 在 Windows 自动降级；`install_path` 使用盘符 + 系统目录黑名单 + 程序目录白名单校验，并拒绝 UNC 与 `..`。
+- 自升级在 Windows 上改为「旧 exe 改名 `.old` → 新 exe 就位 → exit 75」，由 SCM 恢复动作重启，启动时清理 `.old`；备份目录改用 `agentpath.BackupDir()`，Windows 跳过 POSIX 权限位检查。
+- 服务端 `agentupdate.Target` 增加 `os`，新增 `ResolveOS`/`ChooseOS`/`parseBinaryName`；下发按 `hosts.os_family` 选择平台二进制；`/api/agent/binary/{name}` 支持 `windows-{amd64,arm64}`（`.exe`）。
+- 接入命令支持 `?os=windows&arch=amd64`，生成 PowerShell 2.0 兼容命令（`System.Net.WebClient`）；前端新增操作系统选择，切换时联动可用架构。
+- 新增 `build/agent-windows.mod`（Go 1.20 + `x/sys v0.18.0`）、Makefile `agent-windows` / `test-agent-windows`、CI Windows 作业与 `.zip` 发布产物。
+
 ### 2026-10-22 执行命令/脚本任务
 
 - 新增 `kind=command` 一次性命令任务：不绑定组件/制品，选中主机后下发任意 Shell 脚本，复用任务列表、批次灰度、暂停/取消/重试与详情日志。
@@ -1502,6 +1567,7 @@ scripts/      工具脚本
 
 ## 进度
 
+- [x] **P7**：Windows Agent（Server 2008 R2 ~ Windows 11，amd64/arm64）：SCM 服务宿主与安装/卸载、失败自动重启、计划任务看门狗、PowerShell/cmd 脚本执行、Windows 自升级（`.old` 让位 + exit 75）、服务端 OS 维度二进制解析与接入命令、CI 与发布打包
 - [x] **P0**：骨架、配置分层、独立启动、PG schema、IP 解析、Consul 可选同步、内置认证、三主题内嵌前端
 - [x] **P1**：协议定义、Agent 核心包、Agent 主循环（注册/心跳/poll）、服务端 Agent 网关 API
 - [x] **P2**：组件/制品完整 CRUD、任务模型、长轮询原子取件、维护租约、ack/stage/report 闭环、端到端验证
