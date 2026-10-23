@@ -37,7 +37,7 @@
     compQ: '', compPage: 1, compSize: 50,
     artifactQ: '', artifactFilterComp: '', artifactPage: 1, artifactSize: 50,
     artifactPages: 1, artifactTotal: 0,
-    guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
+    guideOpen: null, guideOS: '', enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
     taskDetailOpenLogs: {},
@@ -690,56 +690,143 @@
         extra || null
       ]);
     }
-    var d = h('details', { class: 'card help' }, [
-      h('summary', {}, ['📘 快速上手：接入主机 → 组件 →（可选）制品 → 任务（以 node_exporter 为例）']),
-      step('1', '主机 接入 Agent', 'hosts', [
-        '管理员在“主机”页选择目标机器架构，点“生成接入命令”，复制到目标机器用 root 执行。',
-        'Agent 注册成功后主机自动出现在列表：IP 取服务端看到的来源地址，主机名、OS、ARCH 由 Agent 上报。',
-        '接入令牌一次性使用，默认 15 分钟有效，每台机器单独生成一次。',
-        '“同步 Consul”也能导入主机，但没装 Agent 的主机在任务下发时会被跳过。'
-      ]),
-      step('2', '组件 定义装什么、装到哪', 'components', [
-        '组件示例提供「只执行命令」三种动作，与「任务」页的示例按钮一一对应：安装（exec_args=["install"]）、更新（["update"]，备份旧二进制并在启动失败时自动回滚）、卸载（["uninstall","-y"]，跳过交互确认）。三者都只需 script_url + 一个动作参数，Agent 下载 install.sh 后按参数执行，不再需要把整段 shell 写进 exec_args。',
-        '任务页在组件模式下也提供「填入示例：安装组件 / 更新组件 / 卸载组件」，会选中对应组件；动作由组件自身配置决定。',
-        '卸载示例不带服务名、health_cmd、version_cmd：exec 模式没有 stdin，因此传 -y；卸载后服务已不存在，保留健康检查会让任务必然失败。',
-        '脚本模式同样提供「脚本安装 / 脚本更新 / 脚本卸载」三个示例：都只填 script_url，用 exec_args 区分动作（install / update / uninstall -y）。脚本更新会备份旧二进制并在启动失败时自动回滚；脚本卸载不带服务名与 health/version 检查，避免卸载后平台又去启服或做健康检查。',
-        '点“填入示例：脚本安装”：部署模式 script，安装路径 /opt/monitor/exporter，服务名 node_exporter；高级配置 JSON 会预填真实可用的 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd。',
-        '示例 script_url 指向 https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh，目标机需要能访问 proxy.xiaonuo.live；不需要上传制品。',
-        '适用 systemd 系统：CentOS/RHEL 7+、Rocky 8+、openEuler 20.03+、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+，脚本自动写 node_exporter.service。',
-        'CentOS/RHEL 6、Ubuntu 14.04、Debian 7、SLES 11：无 systemd，脚本自动写 /etc/init.d/node_exporter。',
-        'agent.allow_exec_mode 默认开启：Agent 会下载安装脚本并以 Shell 执行（优先 bash，缺失时 sh）；如需禁止可在“设置”里关闭。',
-        '高级配置 JSON 的 exec_args / exec_env / exec_timeout / work_dir 会直接控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。',
-        '安装脚本支持 install / update / uninstall / status 四个动作：install 安装或覆盖升级，update 会备份旧二进制并在启动失败时自动回滚，uninstall 停止并删除服务与文件（加 -y 跳过确认），status 查看安装状态与版本。',
-        '需要平台备份/回滚时改用“填入二进制替换示例”：服务注册逻辑放在独立的 post_install 脚本文本框里，不再写进高级配置 JSON。',
-        '脚本输出会记录在任务日志；登录目标机后也可以用 systemctl/service 查看服务状态。'
-      ]),
-      step('3', '制品（可选）上传安装脚本', 'artifacts', [
-        '脚本示例已预填真实 script_url，通常可以跳过本页，直接去“任务”创建。',
-        '如果不想依赖外链，删除组件高级 JSON 中的 script_url，再在这里上传 examples/node_exporter/install.sh：版本 latest，架构 all（通用脚本）。',
-        '不需要另外上传 node_exporter 二进制：脚本会自动从 proxy 下载 iflyelf latest 静态二进制（amd64/arm64）。',
-        '脚本用 uname -m 自动识别目标机架构；如果要固定架构，可在组件 exec_args 里传 amd64 / arm64。',
-        '安装脚本是纯文本文件，直接上传即可；平台不会解压文件，也不需要 tar.gz。'
+
+    // 按现有主机自动选择示例系统；无主机时默认 Linux。
+    var os = state.guideOS;
+    if (!os) {
+      var winCount = 0, linuxCount = 0;
+      (state.hosts || []).forEach(function (h) {
+        if ((h.os_family || '').toLowerCase() === 'windows') winCount++; else linuxCount++;
+      });
+      os = (winCount > 0 && linuxCount === 0) ? 'windows' : 'linux';
+    }
+
+    var osBar = h('div', { class: 'toolbar' }, [
+      h('span', { class: 'muted' }, ['示例系统：']),
+      h('button', {
+        type: 'button', class: 'btn small' + (os === 'linux' ? '' : ' ghost'),
+        onclick: function () { state.guideOS = 'linux'; render(); }
+      }, ['Linux']),
+      h('button', {
+        type: 'button', class: 'btn small' + (os === 'windows' ? '' : ' ghost'),
+        onclick: function () { state.guideOS = 'windows'; render(); }
+      }, ['Windows']),
+      h('span', { class: 'muted' }, ['示例命令中的 <控制台>、<令牌> 以「主机 → 生成接入命令」为准。'])
+    ]);
+
+    var linuxSteps = [
+      step('1', '主机 接入 Linux Agent', 'hosts', [
+        '在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。',
+        '到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。',
+        '主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。',
+        '「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。'
       ], codeBlock([
-        '# 仓库里已经自带单文件安装脚本（内嵌 systemd unit 与 SysV init）',
+        '# 控制台会生成完整的一键命令；手工执行等价于：',
+        "curl -fsSL -o /tmp/upgrade-agent 'http://<控制台>:8090/api/agent/binary/linux-amd64'",
+        'chmod +x /tmp/upgrade-agent',
+        'sudo /tmp/upgrade-agent install \\',
+        "  --server 'http://<控制台>:8090' \\",
+        "  --enroll-token '<页面生成的令牌>'",
+        '',
+        'sudo /tmp/upgrade-agent status    # 查看注册/连接状态',
+        'sudo /tmp/upgrade-agent diagnose  # 诊断到控制台的链路'
+      ].join('\n'))),
+
+      step('2', '组件 选择 Linux 示例', 'components', [
+        '组件页顶部「Linux 示例」提供：只执行命令（安装 / 更新 / 卸载）、脚本（安装 / 更新 / 卸载）、二进制替换。',
+        '推荐先用「脚本安装」：script_url 指向仓库 examples/node_exporter/install.sh（经 proxy 代理），不需要上传制品。',
+        'install.sh 支持 install / update / uninstall / status：update 备份旧二进制并在启动失败时回滚，uninstall 传 -y 跳过确认。',
+        '脚本自动识别 systemd / SysV：CentOS/RHEL 7+、Rocky、openEuler、Ubuntu 16.04+、Debian 8+、SLES 12+ 写 systemd；CentOS 6、Ubuntu 14.04、Debian 7、SLES 11 写 /etc/init.d。',
+        '「只执行命令」用 exec + script_url + exec_args（install / update / uninstall -y），不下载制品，适合最小化安装。',
+        '「二进制替换」用于需要平台备份/回滚的场景：服务注册放在 post_install 脚本里，由平台备份 install_path 下的旧文件。',
+        '高级 JSON 的 exec_args / exec_env / exec_timeout / work_dir 控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。',
+        'agent.allow_exec_mode 默认开启；如需禁止脚本/exec 模式，可在「设置 → Agent」关闭（关闭后命令任务也会禁用）。'
+      ]),
+
+      step('3', '制品 上传安装脚本（可选）', 'artifacts', [
+        '脚本示例已填真实 script_url，通常可跳过本页。',
+        '不想依赖外链时：删除组件高级 JSON 中的 script_url，在制品页上传 examples/node_exporter/install.sh（版本 latest，架构 all）。',
+        '平台不会解压 tar.gz；请上传可直接执行的脚本或解压后的二进制。',
+        '如果上传二进制：架构必须与目标机一致（amd64 / arm64 / arm），OS 选 linux 或留空。'
+      ], codeBlock([
+        '# 仓库自带单文件安装脚本（内嵌 systemd unit 与 SysV init）',
         'ls -l examples/node_exporter/install.sh',
         '',
-        '# 可选：先在目标机手动试跑（需要 root，会自动下载并安装）',
+        '# 可选：先在目标机手动试跑（需要 root）',
         'sudo bash examples/node_exporter/install.sh install',
-        'sudo bash examples/node_exporter/install.sh update     # 升级，失败自动回滚',
-        'sudo bash examples/node_exporter/install.sh status     # 查看状态与版本',
-        'sudo bash examples/node_exporter/install.sh uninstall -y  # 卸载',
-        '',
-        '# 平台默认流程：组件高级 JSON 已用真实 script_url，无需上传制品',
-        '# 备用流程：删除 script_url 后，在制品页上传 install.sh（版本 latest，架构 all）'
+        'sudo bash examples/node_exporter/install.sh status',
+        'sudo bash examples/node_exporter/install.sh uninstall -y'
       ].join('\n'))),
-      step('4', '任务 选择主机并执行', 'tasks', [
-        '组件模式：点“填入示例：安装组件 / 更新组件 / 卸载组件”可直接选中对应示例组件，动作由组件的 script_url + exec_args 决定。',
-        '组件选 node_exporter_cmd（安装）、node_exporter_update（更新）或 node_exporter_uninstall（卸载），版本选 latest，IP 段填 10.1.255.24-26 或 10.1.255.0/24。',
-        '先点“预览”确认命中的主机数和分批，再点“创建任务”，最后在列表里点“启动”。',
-        '想先装一台观察：策略选“金丝雀”、首批 1 台并取消“自动推进”，首批成功后任务暂停，确认无误再点“推进”。',
-        '只想临时执行一条命令、不创建组件时，直接在任务页把“任务类型”切到“执行命令/脚本”，填脚本后启动；命令任务支持 stdin 与伪终端，适合交互式卸载。'
+
+      step('4', '任务 创建并启动', 'tasks', [
+        '任务页「Linux 示例」提供安装 / 更新 / 卸载组件，点击后自动选中对应组件与版本 latest。',
+        'IP 段支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；先点「预览」确认命中主机与分批。',
+        '首次建议：灰度策略选「金丝雀」、首批 1 台、取消「自动推进」；首批成功后点「推进」继续。',
+        '命令任务：把任务类型切到「执行命令/脚本」，解释器留空自动 bash（缺失回退 sh），支持 stdin 与伪终端。',
+        '命令任务仅管理员可创建/查看，脚本与输出不会展示给普通用户。'
       ])
-    ]);
+    ];
+
+    var windowsSteps = [
+      step('1', '主机 接入 Windows Agent', 'hosts', [
+        '在「主机」页选择 Windows 与架构（绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」，在目标机以管理员 PowerShell 执行。',
+        'Server 2008 R2 ~ Windows 11 通用；2008 R2 + PowerShell 2.0 不支持 TLS 1.2 时，页面命令直接从控制台下载 Agent（HTTP 即可），不依赖 GitHub；windows_exporter 安装脚本也可回退平台地址。',
+        'Agent 注册为 Windows 服务 upgrade-agent（LocalSystem，失败 5s/10s/30s 自动重启），并安装每分钟运行的计划任务看门狗。',
+        '可选 MSI：msiexec /i upgrade-agent-<版本>-x64.msi SERVERURL=https://<控制台> ENROLLTOKEN=<令牌>。',
+        '可选低权限账户：install --service-account "DOMAIN\\svc" --service-password "<密码>"（需先授予「作为服务登录」）。',
+        "卸载：& 'C:\\Program Files\\upgrade-agent\\upgrade-agent.exe' uninstall（或 msiexec /x）。"
+      ], codeBlock([
+        '# 管理员 PowerShell；控制台会生成完整命令，手工执行等价于：',
+        "$exe = Join-Path $env:TEMP 'upgrade-agent.exe'",
+        'Remove-Item -Force -ErrorAction SilentlyContinue $exe',
+        "(New-Object System.Net.WebClient).DownloadFile('http://<控制台>:8090/api/agent/binary/windows-amd64', $exe)",
+        "Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制台>:8090','--enroll-token','<令牌>' -Wait -NoNewWindow",
+        '',
+        "& 'C:\\Program Files\\upgrade-agent\\upgrade-agent.exe' status",
+        "& 'C:\\Program Files\\upgrade-agent\\upgrade-agent.exe' diagnose"
+      ].join('\n'))),
+
+      step('2', '组件 选择 Windows 示例', 'components', [
+        '组件页顶部「Windows 示例」提供：windows_exporter_script（安装）、windows_exporter_script_update（更新，失败自动回滚）、windows_exporter_script_uninstall（卸载，-Yes 非交互）。',
+        '示例 script_url 指向 examples/windows_exporter/install.ps1（经 proxy 代理）；Agent 默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行。',
+        'install.ps1 支持 install / update / uninstall / status；安装到 C:\\Program Files\\windows_exporter，服务名 windows_exporter，端口 16666，自动创建防火墙规则。',
+        'textfile 采集目录：C:\\monitor\\windows_exporter\\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。',
+        '兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 统一转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。',
+        '2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl，控制台「外部文件」也能代缓存 exe 与脚本。',
+        '低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\\LocalService"（或域账户 + -ServicePassword）。',
+        '更新示例会先备份 windows_exporter.exe.bak，替换后启动失败自动回滚；卸载示例不带 health/version 检查，避免卸载后必然失败。'
+      ]),
+
+      step('3', '制品 上传安装包（可选）', 'artifacts', [
+        '脚本示例已填真实 script_url，通常可跳过本页。',
+        '不想依赖外链时：删除 script_url，在制品页上传 examples/windows_exporter/install.ps1（版本 latest，架构 all）。',
+        '上传 windows_exporter.exe 时：OS 选 windows，架构选 amd64 或 arm64（必须与目标机一致）；平台不会解压 zip。',
+        'Server 2008 R2 无法访问 GitHub 时，用「外部文件」代缓存 exe/脚本，再在组件里用平台地址或 -BinaryUrl 指定。'
+      ], codeBlock([
+        '# 仓库自带单文件 PowerShell 安装脚本（PS 2.0 兼容）',
+        'dir examples\\windows_exporter\\install.ps1',
+        '',
+        '# 可选：在目标机手动试跑（管理员 PowerShell）',
+        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 install',
+        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 status',
+        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 update',
+        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 uninstall -Yes'
+      ].join('\n'))),
+
+      step('4', '任务 创建并启动', 'tasks', [
+        '任务页「Windows 示例」提供安装 / 更新 / 卸载脚本，点击后自动选中对应 Windows 组件与版本 latest。',
+        '解释器保持 powershell（旧系统用 powershell.exe，新系统也可填 pwsh）；.ps1 会自动加 BOM/CRLF。',
+        'IP 段支持 10.1.255.24-26、10.1.255.0/24；先预览再创建，首次建议金丝雀 1 台并关闭自动推进。',
+        '命令任务示例（仅管理员）：解释器 powershell，脚本 Get-Service windows_exporter | Select-Object Status,Name。',
+        'Windows 不支持伪终端（TTY）；需要交互确认时改用脚本参数（如 uninstall -Yes）或标准输入。',
+        '自升级灰度：设置页「Agent → 自动升级灰度比例」按 agent_id 稳定哈希放量（5% → 25% → 100%）。'
+      ])
+    ];
+
+    var d = h('details', { class: 'card help' }, [
+      h('summary', {}, ['📘 快速上手：接入主机 → 组件 →（可选）制品 → 任务（Linux / Windows 示例）']),
+      osBar
+    ].concat(os === 'windows' ? windowsSteps : linuxSteps));
     d.open = open;
     d.ontoggle = function () { state.guideOpen = d.open; };
     return d;

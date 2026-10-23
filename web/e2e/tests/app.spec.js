@@ -61,3 +61,22 @@ test('英文模式切换', async ({ page }) => {
   await page.locator('button[title^="Switch language"]').click();
   await expect(page.getByRole('tab', { name: '主机' })).toBeVisible();
 });
+
+test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {
+  await login(page);
+  const guide = page.locator('details.help');
+  await expect(guide).toBeVisible();
+  if (!(await guide.evaluate(el => el.open))) {
+    await guide.locator('summary').click();
+  }
+  const g = page.locator('details.help');
+  await g.getByRole('button', { name: 'Windows', exact: true }).click();
+  await expect(g.locator('.guide-title', { hasText: '主机 接入 Windows Agent' })).toBeVisible();
+  await expect(g.locator('.guide-title', { hasText: '组件 选择 Windows 示例' })).toBeVisible();
+  await expect(g.getByText('windows-amd64', { exact: false }).first()).toBeVisible();
+
+  await g.getByRole('button', { name: 'Linux', exact: true }).click();
+  await expect(g.locator('.guide-title', { hasText: '主机 接入 Linux Agent' })).toBeVisible();
+  await expect(g.locator('.guide-title', { hasText: '组件 选择 Linux 示例' })).toBeVisible();
+  await expect(g.getByText('linux-amd64', { exact: false }).first()).toBeVisible();
+});
