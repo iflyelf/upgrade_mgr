@@ -56,6 +56,19 @@ func effectiveExternalHosts(cfg *config.Config) []string {
 	return extbin.DefaultHosts
 }
 
+// externalAllowRule 返回内网放行策略。
+//
+// 默认严格（拒绝内网）；内网镜像站通过 allow_private 或 allow_cidrs 显式放行。
+func externalAllowRule(cfg *config.Config) extbin.AllowRule {
+	rule := extbin.AllowRule{}
+	if cfg == nil {
+		return rule
+	}
+	rule.AllowPrivate = cfg.Server.ExternalBinaryAllowPrivate
+	rule.AllowCIDRs = cfg.Server.ExternalBinaryAllowCIDRs
+	return rule
+}
+
 // effectiveExternalTTL 返回缓存有效期。
 func effectiveExternalTTL(cfg *config.Config) time.Duration {
 	ttl := time.Duration(extbin.DefaultTTLSeconds) * time.Second
@@ -137,7 +150,7 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 			defer unlock()
 			if !freshFile(target, ttl) {
 				if fetchErr := fetchExternalBinary(r.Context(), asset.URL, target, asset.Script,
-					effectiveExternalHosts(cfg)); fetchErr != nil {
+					effectiveExternalHosts(cfg), externalAllowRule(cfg)); fetchErr != nil {
 					log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
 					httpx.Fail(w, http.StatusBadGateway,
 						"控制台下载外部文件失败（请确认控制台能访问该地址）: "+fetchErr.Error())
@@ -180,11 +193,9 @@ func freshFile(path string, ttl time.Duration) bool {
 //
 // hosts 是允许的上游域名白名单；下载前同时校验域名与目标 IP（拒绝内网），
 // 防止这项能力被当作 SSRF 跳板。
-func fetchExternalBinary(ctx context.Context, source, target string, script bool, hosts []string) error {
-	if err := extbin.HostAllowed(source, hosts); err != nil {
-		return err
-	}
-	if err := extbin.EnsureNotInternal(source); err != nil {
+func fetchExternalBinary(ctx context.Context, source, target string, script bool, hosts []string, rule extbin.AllowRule) error {
+	// 域名白名单 + 内网策略：页面「测试下载」使用同一函数，保证测通即可下载。
+	if err := extbin.CheckHost(source, hosts, rule); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {

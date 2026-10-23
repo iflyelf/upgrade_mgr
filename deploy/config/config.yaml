@@ -33,6 +33,13 @@ server:
   external_binary_hosts: []
   # 缓存有效期（env EXTERNAL_BINARY_TTL）；留空默认 24h。
   external_binary_ttl: 24h
+  # 是否允许代下载内网/环回地址；默认 false（防 SSRF）。
+  # 内网镜像站（http://nexus.corp:8081）可选择：
+  #   1) 只放行网段（推荐）：external_binary_allow_cidrs: ["10.0.0.0/8"]
+  #   2) 或整体放开：external_binary_allow_private: true
+  external_binary_allow_private: false
+  # 允许访问的内网网段/IP（逗号分隔或 YAML 列表）。为空表示拒绝所有内网地址。
+  external_binary_allow_cidrs: []
 
 database:                     # 必填
   dsn: ""                     # 优先使用；如 postgresql://user:pass@host:5432/upgrade_mgr?sslmode=disable
