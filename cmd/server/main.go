@@ -172,6 +172,13 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/agent/binary/{name}", handler.AgentBinaryDownload(sc))
 	// 白名单外部二进制（控制台代为下载缓存）：供无法 TLS 1.2 的老系统用 HTTP 拉取
 	mux.HandleFunc("GET /api/external/binary/{name}", handler.ExternalBinaryDownload(sc))
+	// 白名单管理（页面表格页）：查看 / 保存（热加载）/ 测试下载
+	mux.HandleFunc("GET /api/external/binaries",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListExternalBinaries(sc))))
+	mux.HandleFunc("PUT /api/external/binaries",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SaveExternalBinaries(sc))))
+	mux.HandleFunc("POST /api/external/binaries/test",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestExternalBinary(sc))))
 
 	// 组件管理
 	mux.HandleFunc("GET /api/components", middleware.RequireAuth(auth, handler.ComponentList(sc)))

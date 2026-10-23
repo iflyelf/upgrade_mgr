@@ -39,7 +39,11 @@
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
     // 任务页按组件筛选：'' 表示全部；用于删除组件前核对引用。
-    taskFilterComp: '', taskFilterKind: '' };
+    taskFilterComp: '', taskFilterKind: '',
+    // 外部文件白名单表格（页面增删行）
+    extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
+    extbinDraft: null, extbinHosts: null, extbinTTL: null,
+    extbinAllowPrivate: null, extbinCIDRs: null };
 
   function h(tag, attrs, children) {
     var el = document.createElement(tag);
@@ -173,7 +177,8 @@
   }
 
   function tabs() {
-    var items = [['hosts', '主机'], ['components', '组件'], ['artifacts', '制品'], ['tasks', '任务'], ['settings', '设置']];
+    var items = [['hosts', '主机'], ['components', '组件'], ['artifacts', '制品'], ['tasks', '任务'],
+      ['extbin', '外部文件'], ['settings', '设置']];
     return h('div', { class: 'tabs' }, items.map(function (it) {
       return h('div', {
         class: 'tab' + (state.view === it[0] ? ' active' : ''),
@@ -718,6 +723,7 @@
     else if (v === 'components') loadComponents();
     else if (v === 'artifacts') loadArtifacts();
     else if (v === 'tasks') loadTasks();
+    else if (v === 'extbin') loadExternalBinaries();
     else if (v === 'password') render();
     else loadHosts();
   }
@@ -1233,6 +1239,213 @@
         hint('执行完成后点上方“搜索”刷新列表。如果 IP 显示成了代理地址，检查服务端 server.trust_proxy 配置。'),
         hint('目标机已注册时，普通命令会保留原身份（本次令牌不会被使用）；需要覆盖重注册请勾选“强制重新注册”后重新生成。')
       ]) : null
+    ]);
+  }
+
+  // ---------- 外部文件代缓存（表格页：增删行 + 测试下载） ----------
+  //
+  // 用途：老系统（Windows Server 2008 R2 + PowerShell 2.0）不支持 TLS 1.2，
+  // 由控制台代下载公网文件，主机用 http 从 /api/external/binary/<name> 拉取。
+  function loadExternalBinaries() {
+    state.extbinErr = '';
+    state.extbinDraft = null;
+    state.extbinHosts = null;
+    state.extbinTTL = null;
+    state.extbinAllowPrivate = null;
+    state.extbinCIDRs = null;
+    api('/api/external/binaries')
+      .then(function (d) { state.extbin = d; state.extbinBusy = false; render(); })
+      .catch(function (e) {
+        state.extbinErr = e.message;
+        state.extbinBusy = false;
+        render();
+      });
+  }
+
+  function fmtBytes(n) {
+    if (!n) return '-';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  function externalBinariesView() {
+    var d = state.extbin;
+    if (!d && !state.extbinErr) {
+      return h('div', { class: 'card' }, [h('h3', {}, ['外部文件代缓存']),
+        h('div', { class: 'muted' }, ['加载中…'])]);
+    }
+
+    // 草稿放 state.extbinDraft：新增/编辑行后 render 仍保留，保存时整体提交。
+    var draft = state.extbinDraft;
+    if (!draft) {
+      draft = (d && d.items ? d.items : []).map(function (x) {
+        return { name: x.name, url: x.url, script: !!x.script,
+          cached: x.cached, cached_size: x.cached_size, platform_url: x.platform_url };
+      });
+      state.extbinDraft = draft;
+    }
+    var hostsText = state.extbinHosts != null ? state.extbinHosts
+      : ((d && d.hosts) || []).join(', ');
+    var ttlText = state.extbinTTL != null ? state.extbinTTL : ((d && d.ttl) || '24h');
+    var allowPrivate = state.extbinAllowPrivate != null ? state.extbinAllowPrivate
+      : !!(d && d.allow_private);
+    var cidrsText = state.extbinCIDRs != null ? state.extbinCIDRs
+      : ((d && d.allow_cidrs) || []).join(', ');
+
+    var hostsEl = h('input', {
+      value: hostsText, placeholder: 'github.com, raw.githubusercontent.com',
+      oninput: function () { state.extbinHosts = hostsEl.value; }
+    }, []);
+    var ttlEl = h('input', {
+      value: ttlText, placeholder: '24h',
+      oninput: function () { state.extbinTTL = ttlEl.value; }
+    }, []);
+    var allowPrivateEl = h('input', {
+      type: 'checkbox', checked: allowPrivate,
+      onchange: function () { state.extbinAllowPrivate = allowPrivateEl.checked; }
+    }, []);
+    var cidrsEl = h('input', {
+      value: cidrsText, placeholder: '如 10.0.0.0/8,192.168.1.10',
+      oninput: function () { state.extbinCIDRs = cidrsEl.value; }
+    }, []);
+
+    var rows = draft.map(function (row, idx) {
+      var nameEl = h('input', {
+        value: row.name || '', placeholder: '如 custom-tool',
+        oninput: function () { row.name = nameEl.value; }
+      }, []);
+      var urlEl = h('input', {
+        value: row.url || '', placeholder: 'https://github.com/.../tool.exe',
+        oninput: function () { row.url = urlEl.value; }
+      }, []);
+      var scriptEl = h('input', {
+        type: 'checkbox', checked: !!row.script,
+        onchange: function () { row.script = scriptEl.checked; }
+      }, []);
+      var testOut = h('div', { class: 'muted' }, []);
+
+      return h('tr', {}, [
+        h('td', {}, [nameEl]),
+        h('td', {}, [urlEl]),
+        h('td', {}, [h('label', { class: 'check' }, [scriptEl, ' 脚本'])]),
+        h('td', {}, [h('div', { class: 'muted' }, [row.platform_url || ('/api/external/binary/' + (row.name || '<name>'))])]),
+        h('td', {}, [row.cached
+          ? h('span', { class: 'tag status-success' }, ['已缓存 ' + fmtBytes(row.cached_size)])
+          : h('span', { class: 'muted' }, ['未缓存'])]),
+        h('td', {}, [h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              testOut.textContent = '测试中…';
+              api('/api/external/binaries/test', {
+                method: 'POST',
+                body: JSON.stringify({ name: nameEl.value.trim(), url: urlEl.value.trim(), force: true })
+              }).then(function (r) {
+                testOut.textContent = '';
+                if (r.ok) {
+                  testOut.appendChild(h('span', { class: 'tag tunnel-ok' }, [
+                    '✓ 可用' + (r.status_code ? '（HTTP ' + r.status_code + '）' : '') +
+                    '，大小 ' + fmtBytes(r.size) + '，耗时 ' + r.elapsed_ms + 'ms']));
+                } else {
+                  testOut.appendChild(h('span', { class: 'tag tunnel-fail' }, ['✗ ' + (r.error || '测试失败')]));
+                  if (r.hint) testOut.appendChild(h('div', { class: 'muted' }, [r.hint]));
+                }
+              }).catch(function (e) {
+                testOut.textContent = '';
+                testOut.appendChild(h('span', { class: 'tag tunnel-fail' }, ['✗ ' + e.message]));
+              });
+            }
+          }, ['测试']),
+          h('button', {
+            class: 'btn danger small', onclick: function () {
+              draft.splice(idx, 1);
+              render();
+            }
+          }, ['删除'])
+        ]), testOut])
+      ]);
+    });
+
+    var doSave = function () {
+      var payload = {
+        items: draft.map(function (r) {
+          return { name: (r.name || '').trim(), url: (r.url || '').trim(), script: !!r.script };
+        }).filter(function (x) { return x.name || x.url; }),
+        hosts: hostsEl.value.split(',').map(function (x) { return x.trim(); })
+          .filter(function (x) { return x; }),
+        ttl: ttlEl.value.trim(),
+        allow_private: allowPrivateEl.checked,
+        allow_cidrs: cidrsEl.value.split(',').map(function (x) { return x.trim(); })
+          .filter(function (x) { return x; })
+      };
+      state.extbinBusy = true;
+      state.extbinErr = '';
+      render();
+      api('/api/external/binaries', { method: 'PUT', body: JSON.stringify(payload) })
+        .then(function () {
+          state.extbinBusy = false;
+          state.extbin = null;
+          state.extbinDraft = null;
+          loadExternalBinaries();
+        })
+        .catch(function (e) {
+          state.extbinBusy = false;
+          state.extbinErr = e.message;
+          render();
+        });
+    };
+
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['外部文件代缓存']),
+        hint('由控制台代下载公网/内网文件，目标主机通过 http 从「平台地址」拉取。' +
+          '用于老系统（Windows Server 2008 R2 + PowerShell 2.0 不支持 TLS 1.2）' +
+          '或无外网出口的场景。白名单保存后立即生效，无需重启。'),
+        d && d.source === 'default'
+          ? hint('当前使用内置默认白名单（windows_exporter amd64/arm64 + install.ps1）；保存后以本页配置为准。')
+          : null,
+        d && d.dir ? hint('缓存目录：' + d.dir + '/.external-cache') : null,
+        state.extbinErr ? h('div', { class: 'err field', role: 'alert' }, [state.extbinErr]) : null
+      ]),
+      h('div', { class: 'card' }, [
+        h('div', { class: 'toolbar' }, [
+          h('button', {
+            class: 'btn', onclick: function () {
+              state.extbinDraft = draft.concat([{ name: '', url: '', script: false }]);
+              render();
+            }
+          }, ['新增一行']),
+          h('button', {
+            class: 'btn', disabled: state.extbinBusy ? 'disabled' : null, onclick: doSave
+          }, [state.extbinBusy ? '保存中…' : '保存']),
+          h('span', { class: 'muted' }, ['共 ' + draft.length + ' 条']),
+          h('span', { class: 'muted' }, ['保存后立即生效（热加载）'])
+        ]),
+        h('div', { class: 'table-wrap' }, [h('table', {}, [
+          h('thead', {}, [h('tr', {}, [
+            h('th', {}, ['名称 (name)']), h('th', {}, ['上游地址']), h('th', {}, ['类型']),
+            h('th', {}, ['平台地址']), h('th', {}, ['缓存']), h('th', {}, ['操作'])
+          ])]),
+          h('tbody', {}, rows)
+        ])]),
+        draft.length === 0 ? h('div', { class: 'muted empty' }, ['还没有条目，点「新增一行」添加。']) : null
+      ]),
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['安全设置']),
+        h('div', { class: 'grid2' }, [
+          field('允许的上游域名', hostsEl, '逗号分隔。只允许这些域名被代下载；留空用默认 github.com / raw.githubusercontent.com / proxy.xiaonuo.live。内网镜像需把其域名/主机加进来。'),
+          field('缓存有效期', ttlEl, '如 24h / 30m。过期后下次请求重新下载。')
+        ]),
+        h('div', { class: 'grid2' }, [
+          h('div', { class: 'field' }, [
+            h('label', { class: 'check' }, [allowPrivateEl, ' 允许访问内网/环回地址']),
+            hint('内网镜像站（如 http://nexus.corp:8081）的域名解析到私网 IP 时需要。建议优先用下方「放行网段」精确放开。')
+          ]),
+          field('放行网段', cidrsEl, '逗号分隔，如 10.0.0.0/8,192.168.1.10。仅这些内网地址可被代下载，其余内网地址仍拒绝。')
+        ]),
+        hint('⚠️ 代下载是服务端主动出网能力：只放行确实需要的域名与网段，避免被当作访问内网或云元数据的跳板。')
+      ])
     ]);
   }
 
@@ -2345,6 +2558,7 @@
     var body;
     switch (state.view) {
       case 'settings': body = settingsView(); break;
+      case 'extbin': body = externalBinariesView(); break;
       case 'components': body = componentsView(); break;
       case 'artifacts': body = artifactsView(); break;
       case 'tasks': body = tasksView(); break;
@@ -2750,7 +2964,7 @@
       return;
     }
     if (state.user && state.view !== 'settings' && state.view !== 'components' &&
-        state.view !== 'artifacts' && state.view !== 'password') {
+        state.view !== 'artifacts' && state.view !== 'extbin' && state.view !== 'password') {
       // 先清掉可能仍在排队的定时器，避免同一时刻触发两次请求。
       stopAutoRefresh();
       autoRefreshTick();

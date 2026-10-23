@@ -76,6 +76,14 @@ type ServerConfig struct {
 	ExternalBinaryHosts []string `yaml:"external_binary_hosts"`
 	// ExternalBinaryTTL 缓存有效期（如 24h）；<=0 使用默认 24h。
 	ExternalBinaryTTL string `yaml:"external_binary_ttl"`
+	// ExternalBinaryAllowPrivate 是否允许代下载内网/环回地址。
+	//
+	// 默认 false（拒绝内网，防 SSRF）。内网镜像站（如 http://nexus.corp:8081）
+	// 需要放开时，建议只配置 ExternalBinaryAllowCIDRs 精确放行网段；
+	// 只有确实无法枚举网段时才打开本开关。
+	ExternalBinaryAllowPrivate bool `yaml:"external_binary_allow_private"`
+	// ExternalBinaryAllowCIDRs 允许访问的内网网段/IP（逗号分隔，如 10.0.0.0/8,192.168.1.10）。
+	ExternalBinaryAllowCIDRs []string `yaml:"external_binary_allow_cidrs"`
 	// ---- 可选 HTTPS / 双向 TLS ----
 	//
 	// 留空 TLSCert/TLSKey 时以 HTTP 提供服务（与历史行为一致）。
@@ -236,6 +244,9 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("external_binaries 配置错误: %w", err)
 		}
 	}
+	if err := extbin.ValidateCIDRs(c.Server.ExternalBinaryAllowCIDRs); err != nil {
+		return nil, fmt.Errorf("external_binary_allow_cidrs 配置错误: %w", err)
+	}
 	return c, nil
 }
 
@@ -273,6 +284,10 @@ func (c *Config) applyEnv() {
 		c.Server.ExternalBinaryHosts = splitTrim(v)
 	}
 	setStr(&c.Server.ExternalBinaryTTL, "EXTERNAL_BINARY_TTL")
+	setBool(&c.Server.ExternalBinaryAllowPrivate, "EXTERNAL_BINARY_ALLOW_PRIVATE")
+	if v := os.Getenv("EXTERNAL_BINARY_ALLOW_CIDRS"); v != "" {
+		c.Server.ExternalBinaryAllowCIDRs = splitTrim(v)
+	}
 
 	setStr(&c.Database.DSN, "DATABASE_URL")
 	setStr(&c.Database.Host, "DB_HOST")

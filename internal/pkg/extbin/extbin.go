@@ -186,40 +186,117 @@ func HostAllowed(raw string, hosts []string) error {
 	return fmt.Errorf("主机 %s 不在 external_binary_hosts 白名单内", host)
 }
 
-// EnsureNotInternal 拒绝解析到环回/私网/链路本地地址的主机。
+// AllowRule 内网放行规则。
 //
-// 这是 SSRF 的第二道防线：即使白名单被改成内网域名，也不能访问内网。
-// 主机名解析失败时放行（由实际下载失败兜底），避免 DNS 抖动导致误拒。
+// 背景：很多企业的镜像站/制品库在私网（如 http://nexus.corp:8081、10.8.0.5），
+// 一刀切拒绝内网会把正常用法挡掉。因此提供显式开关与 CIDR 白名单：
+//   - AllowPrivate=true：完全放开内网/环回（最宽松，仅建议内网部署使用）；
+//   - AllowCIDRs 非空：只放行列出的网段（推荐，最小权限）；
+//   - 两者都未配置：保持原有防护，拒绝一切内网地址。
+type AllowRule struct {
+	AllowPrivate bool
+	AllowCIDRs   []string
+}
+
+// permits 判断 target IP 是否被显式放行。
+func (r AllowRule) permits(ip net.IP) bool {
+	// 精确放行优先：放行网段内的一律允许（即使 AllowPrivate 未开）。
+	for _, cidr := range r.AllowCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		if _, ipnet, err := net.ParseCIDR(cidr); err == nil && ipnet.Contains(ip) {
+			return true
+		}
+		if single := net.ParseIP(cidr); single != nil && single.Equal(ip) {
+			return true
+		}
+	}
+	if r.AllowPrivate {
+		return true
+	}
+	return false
+}
+
+// ValidateCIDRs 校验 CIDR/IP 列表格式。
+func ValidateCIDRs(list []string) error {
+	for _, cidr := range list {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		if net.ParseIP(cidr) != nil {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("网段 %q 格式错误（示例 10.0.0.0/8 或 10.8.0.5）", cidr)
+		}
+	}
+	return nil
+}
+
+// CheckHost 完整校验上游地址：域名白名单 + 内网地址策略。
+//
+// 页面「测试下载」与实际下载共用本函数，保证测试通过即真实可下载。
+func CheckHost(raw string, hosts []string, rule AllowRule) error {
+	if err := HostAllowed(raw, hosts); err != nil {
+		return err
+	}
+	return checkInternal(raw, rule)
+}
+
+// EnsureNotInternal 拒绝解析到环回/私网/链路本地地址的主机（默认严格模式）。
 func EnsureNotInternal(raw string) error {
+	return checkInternal(raw, AllowRule{})
+}
+
+// checkInternal 按放行规则检查目标地址。
+//
+// 主机名解析失败时放行（由实际下载失败兜底），避免 DNS 抖动导致误拒。
+func checkInternal(raw string, rule AllowRule) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" {
 		return fmt.Errorf("地址格式错误")
 	}
 	host := u.Hostname()
 	if ip := net.ParseIP(host); ip != nil {
-		return checkIP(ip)
+		return rule.checkIP(ip)
 	}
 	addrs, err := net.LookupIP(host)
 	if err != nil {
 		return nil
 	}
 	for _, ip := range addrs {
-		if err := checkIP(ip); err != nil {
+		if err := rule.checkIP(ip); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func checkIP(ip net.IP) error {
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-		return fmt.Errorf("拒绝访问内网/环回地址 %s", ip)
+// checkIP 判定单个 IP：非内网直接放行；内网需被 AllowRule 显式放行。
+func (r AllowRule) checkIP(ip net.IP) error {
+	internal := ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+	if !internal {
+		return nil
 	}
-	return nil
+	if r.permits(ip) {
+		return nil
+	}
+	// 提示如何放行，避免运维反复试错。
+	hint := "如需访问内网镜像，请勾选「允许内网地址」或把网段加入「放行网段」"
+	if ip.IsLoopback() {
+		hint = "回环地址仅用于本机调试；确需访问请勾选「允许内网地址」"
+	}
+	return fmt.Errorf("拒绝访问内网/环回地址 %s（%s）", ip, hint)
 }
 
 // ValidateConfig 校验整套白名单（配置文件与设置页保存时使用）。
+//
+// 注意：这里只校验域名白名单，不解析 DNS（保存时不应依赖网络）。
+// 内网地址策略在保存时只校验网段格式，实际解析在下载/测试时进行。
 func ValidateConfig(raw map[string]string, hosts []string) error {
 	if _, err := Parse(raw); err != nil {
 		return err
@@ -234,4 +311,12 @@ func ValidateConfig(raw map[string]string, hosts []string) error {
 		}
 	}
 	return nil
+}
+
+// ValidateConfigWithRule 校验白名单 + 内网放行规则（页面保存时使用）。
+func ValidateConfigWithRule(raw map[string]string, hosts []string, rule AllowRule) error {
+	if err := ValidateCIDRs(rule.AllowCIDRs); err != nil {
+		return err
+	}
+	return ValidateConfig(raw, hosts)
 }

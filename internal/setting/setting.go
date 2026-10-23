@@ -116,11 +116,14 @@ var Registry = []Item{
 			}
 		},
 		Validate: func(v string) error {
+			// 仅校验名称与地址格式；域名白名单校验放在 Apply 中，
+			// 因为需要读取"本次提交的 hosts"或当前配置（Item.Validate 拿不到 Config）。
 			m, err := extbin.ParseText(v)
 			if err != nil {
 				return err
 			}
-			return extbin.ValidateConfig(m, nil)
+			_, err = extbin.Parse(m)
+			return err
 		}},
 	{Key: "server.external_binary_hosts", Group: "外部文件代缓存",
 		Label: "允许的上游域名（逗号分隔；留空用默认 github.com/raw.githubusercontent.com/proxy.xiaonuo.live）",
@@ -132,6 +135,21 @@ var Registry = []Item{
 				return
 			}
 			c.Server.ExternalBinaryHosts = splitComma(v)
+		}},
+	{Key: "server.external_binary_allow_private", Group: "外部文件代缓存",
+		Label: "允许访问内网/环回地址（内网镜像站需要；建议优先用“放行网段”精确放开）", Type: "bool",
+		Get: func(c *config.Config) string { return b2s(c.Server.ExternalBinaryAllowPrivate) },
+		Set: func(c *config.Config, v string) { c.Server.ExternalBinaryAllowPrivate = v == "true" }},
+	{Key: "server.external_binary_allow_cidrs", Group: "外部文件代缓存",
+		Label: "放行网段（逗号分隔，如 10.0.0.0/8,192.168.1.10；仅这些内网地址可代下载）",
+		Type:  "string",
+		Get:   func(c *config.Config) string { return strings.Join(c.Server.ExternalBinaryAllowCIDRs, ",") },
+		Set:   func(c *config.Config, v string) { c.Server.ExternalBinaryAllowCIDRs = splitComma(v) },
+		Validate: func(v string) error {
+			if v == "" {
+				return nil
+			}
+			return extbin.ValidateCIDRs(splitComma(v))
 		}},
 	{Key: "server.external_binary_ttl", Group: "外部文件代缓存",
 		Label: "缓存有效期（如 24h；留空默认 24h）", Type: "string",
@@ -202,6 +220,22 @@ func (s *Service) Load(ctx context.Context) error {
 func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 白名单与域名白名单可能同批提交：先用"本次提交值（否则当前值）"做域名校验，
+	// 避免保存自定义镜像域名时被旧 hosts 误拒。
+	if binRaw, ok := kv["server.external_binaries"]; ok && !(s.items["server.external_binaries"].Secret && IsMasked(binRaw)) {
+		hosts := s.cfg.Server.ExternalBinaryHosts
+		if hv, ok2 := kv["server.external_binary_hosts"]; ok2 {
+			hosts = splitComma(hv)
+		}
+		m, perr := extbin.ParseText(binRaw)
+		if perr != nil {
+			return nil, fmt.Errorf("设置 server.external_binaries 无效: %w", perr)
+		}
+		if verr := extbin.ValidateConfig(m, hosts); verr != nil {
+			return nil, fmt.Errorf("设置 server.external_binaries 无效: %w", verr)
+		}
+	}
 
 	// 先整体校验，再落库：避免某一项非法时，其他项已经部分生效。
 	for k, v := range kv {

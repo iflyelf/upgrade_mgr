@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 )
 
 // TestExternalBinariesSettingValidate 白名单设置项：解析、校验、热加载写回。
@@ -38,8 +39,12 @@ func TestExternalBinariesSettingValidate(t *testing.T) {
 	if err := it.Validate("bad-line"); err == nil {
 		t.Fatal("缺少 = 应报错")
 	}
-	if err := it.Validate("x=https://evil.example.com/tool.exe"); err == nil {
-		t.Fatal("非白名单域名应报错（默认只允许 github / proxy）")
+	// 域名白名单校验发生在 Apply（需要结合本次提交的 hosts），Item.Validate 只校验格式。
+	if err := it.Validate("x=https://evil.example.com/tool.exe"); err != nil {
+		t.Fatalf("Item.Validate 只校验格式，不应因域名报错: %v", err)
+	}
+	if err := extbin.ValidateConfig(map[string]string{"x": "https://evil.example.com/tool.exe"}, nil); err == nil {
+		t.Fatal("非白名单域名应被 ValidateConfig 拒绝")
 	}
 }
 

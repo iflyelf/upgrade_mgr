@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
 
@@ -120,7 +121,7 @@ func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 // TestFetchExternalBinaryRejectsNonWhitelistedHost 上游域名不在白名单时拒绝。
 func TestFetchExternalBinaryRejectsNonWhitelistedHost(t *testing.T) {
 	err := fetchExternalBinary(context.Background(),
-		"https://evil.example.com/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, nil)
+		"https://evil.example.com/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, nil, extbin.AllowRule{})
 	if err == nil || !strings.Contains(err.Error(), "白名单") {
 		t.Fatalf("应拒绝非白名单域名，got %v", err)
 	}
@@ -130,7 +131,7 @@ func TestFetchExternalBinaryRejectsNonWhitelistedHost(t *testing.T) {
 func TestFetchExternalBinaryRejectsInternalHost(t *testing.T) {
 	hosts := []string{"127.0.0.1"}
 	err := fetchExternalBinary(context.Background(),
-		"http://127.0.0.1:1/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, hosts)
+		"http://127.0.0.1:1/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, hosts, extbin.AllowRule{})
 	if err == nil || !strings.Contains(err.Error(), "内网") {
 		t.Fatalf("应拒绝内网地址，got %v", err)
 	}
