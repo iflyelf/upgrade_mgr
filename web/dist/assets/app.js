@@ -37,7 +37,7 @@
     compQ: '', compPage: 1, compSize: 50,
     artifactQ: '', artifactFilterComp: '', artifactPage: 1, artifactSize: 50,
     artifactPages: 1, artifactTotal: 0,
-    guideOpen: null, guideOS: '', enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
+    guideOpen: null, guideOS: '', quickstart: undefined, quickstartErr: '', enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
     taskDetailOpenLogs: {},
@@ -105,10 +105,16 @@
     document.body.removeChild(ta);
     return ok;
   }
+  function copyBaseLabel() {
+    return state.lang === 'en' ? 'Copy command' : '复制命令';
+  }
   function copyText(text, btn) {
+    var base = copyBaseLabel();
     function done(ok) {
-      btn.textContent = ok ? '已复制' : '复制失败，请手动选中';
-      setTimeout(function () { btn.textContent = '复制'; }, 1500);
+      btn.textContent = ok
+        ? (state.lang === 'en' ? 'Copied' : '已复制')
+        : (state.lang === 'en' ? 'Copy failed; select manually' : '复制失败，请手动选中');
+      setTimeout(function () { btn.textContent = base; }, 1500);
     }
     // 非 HTTPS 页面没有 navigator.clipboard，回退到 execCommand
     if (navigator.clipboard && window.isSecureContext) {
@@ -118,7 +124,8 @@
     }
   }
   function codeBlock(text) {
-    var btn = h('button', { type: 'button', class: 'btn ghost small copy-btn', 'aria-label': '复制代码' }, ['复制']);
+    var label = copyBaseLabel();
+    var btn = h('button', { type: 'button', class: 'btn ghost small copy-btn', 'aria-label': label }, [label]);
     btn.onclick = function () { copyText(text, btn); };
     return h('div', { class: 'code-wrap' }, [btn, h('pre', { class: 'code' }, [text])]);
   }
@@ -683,11 +690,34 @@
     function jump(view, text) {
       return h('button', { type: 'button', class: 'btn ghost small', onclick: function () { switchView(view); } }, [text]);
     }
-    function step(no, title, view, lines, extra) {
+    function step(no, title, view, lines, extra, jumpLabel) {
       return h('div', { class: 'guide-step' }, [
-        h('div', { class: 'guide-title' }, [h('span', { class: 'guide-no' }, [no]), title, view ? jump(view, '去' + title.split(' ')[0]) : null]),
+        h('div', { class: 'guide-title' }, [
+          h('span', { class: 'guide-no' }, [no]), title,
+          view ? jump(view, jumpLabel || ('去' + title.split(' ')[0])) : null
+        ]),
         h('ul', {}, lines.map(function (l) { return h('li', {}, [l]); })),
         extra || null
+      ]);
+    }
+
+    var qs = state.quickstart;
+    var lang = state.lang === 'en' ? 'en' : 'zh';
+    function pick(v) {
+      if (v == null) return '';
+      if (typeof v === 'string') return v;
+      return v[lang] || v.zh || '';
+    }
+    function pickList(v) {
+      if (!v) return [];
+      return v[lang] || v.zh || [];
+    }
+    if (!qs || !qs.systems || !qs.systems.linux) {
+      return h('details', { class: 'card help' }, [
+        h('summary', {}, ['📘 ' + (lang === 'en' ? 'Quick start' : '快速上手')]),
+        h('div', { class: 'muted' }, [state.quickstartErr
+          ? (lang === 'en' ? 'Failed to load quick start: ' : '快速上手加载失败：') + state.quickstartErr
+          : (lang === 'en' ? 'Loading quick start…' : '正在加载快速上手…')])
       ]);
     }
 
@@ -700,9 +730,10 @@
       });
       os = (winCount > 0 && linuxCount === 0) ? 'windows' : 'linux';
     }
+    var sys = qs.systems[os] || qs.systems.linux;
 
     var osBar = h('div', { class: 'toolbar' }, [
-      h('span', { class: 'muted' }, ['示例系统：']),
+      h('span', { class: 'muted' }, [pick(qs.labels && qs.labels.system)]),
       h('button', {
         type: 'button', class: 'btn small' + (os === 'linux' ? '' : ' ghost'),
         onclick: function () { state.guideOS = 'linux'; render(); }
@@ -710,123 +741,23 @@
       h('button', {
         type: 'button', class: 'btn small' + (os === 'windows' ? '' : ' ghost'),
         onclick: function () { state.guideOS = 'windows'; render(); }
-      }, ['Windows']),
-      h('span', { class: 'muted' }, ['示例命令中的 <控制台>、<令牌> 以「主机 → 生成接入命令」为准。'])
+      }, ['Windows'])
     ]);
 
-    var linuxSteps = [
-      step('1', '主机 接入 Linux Agent', 'hosts', [
-        '在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。',
-        '到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。',
-        '主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。',
-        '「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。'
-      ], codeBlock([
-        '# 控制台会生成完整的一键命令；手工执行等价于：',
-        "curl -fsSL -o /tmp/upgrade-agent 'http://<控制台>:8090/api/agent/binary/linux-amd64'",
-        'chmod +x /tmp/upgrade-agent',
-        'sudo /tmp/upgrade-agent install \\',
-        "  --server 'http://<控制台>:8090' \\",
-        "  --enroll-token '<页面生成的令牌>'",
-        '',
-        'sudo /tmp/upgrade-agent status    # 查看注册/连接状态',
-        'sudo /tmp/upgrade-agent diagnose  # 诊断到控制台的链路'
-      ].join('\n'))),
-
-      step('2', '组件 选择 Linux 示例', 'components', [
-        '组件页顶部「Linux 示例」提供：只执行命令（安装 / 更新 / 卸载）、脚本（安装 / 更新 / 卸载）、二进制替换。',
-        '推荐先用「脚本安装」：script_url 指向仓库 examples/node_exporter/install.sh（经 proxy 代理），不需要上传制品。',
-        'install.sh 支持 install / update / uninstall / status：update 备份旧二进制并在启动失败时回滚，uninstall 传 -y 跳过确认。',
-        '脚本自动识别 systemd / SysV：CentOS/RHEL 7+、Rocky、openEuler、Ubuntu 16.04+、Debian 8+、SLES 12+ 写 systemd；CentOS 6、Ubuntu 14.04、Debian 7、SLES 11 写 /etc/init.d。',
-        '「只执行命令」用 exec + script_url + exec_args（install / update / uninstall -y），不下载制品，适合最小化安装。',
-        '「二进制替换」用于需要平台备份/回滚的场景：服务注册放在 post_install 脚本里，由平台备份 install_path 下的旧文件。',
-        '高级 JSON 的 exec_args / exec_env / exec_timeout / work_dir 控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。',
-        'agent.allow_exec_mode 默认开启；如需禁止脚本/exec 模式，可在「设置 → Agent」关闭（关闭后命令任务也会禁用）。'
-      ]),
-
-      step('3', '制品 上传安装脚本（可选）', 'artifacts', [
-        '脚本示例已填真实 script_url，通常可跳过本页。',
-        '不想依赖外链时：删除组件高级 JSON 中的 script_url，在制品页上传 examples/node_exporter/install.sh（版本 latest，架构 all）。',
-        '平台不会解压 tar.gz；请上传可直接执行的脚本或解压后的二进制。',
-        '如果上传二进制：架构必须与目标机一致（amd64 / arm64 / arm），OS 选 linux 或留空。'
-      ], codeBlock([
-        '# 仓库自带单文件安装脚本（内嵌 systemd unit 与 SysV init）',
-        'ls -l examples/node_exporter/install.sh',
-        '',
-        '# 可选：先在目标机手动试跑（需要 root）',
-        'sudo bash examples/node_exporter/install.sh install',
-        'sudo bash examples/node_exporter/install.sh status',
-        'sudo bash examples/node_exporter/install.sh uninstall -y'
-      ].join('\n'))),
-
-      step('4', '任务 创建并启动', 'tasks', [
-        '任务页「Linux 示例」提供安装 / 更新 / 卸载组件，点击后自动选中对应组件与版本 latest。',
-        'IP 段支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；先点「预览」确认命中主机与分批。',
-        '首次建议：灰度策略选「金丝雀」、首批 1 台、取消「自动推进」；首批成功后点「推进」继续。',
-        '命令任务：把任务类型切到「执行命令/脚本」，解释器留空自动 bash（缺失回退 sh），支持 stdin 与伪终端。',
-        '命令任务仅管理员可创建/查看，脚本与输出不会展示给普通用户。'
-      ])
-    ];
-
-    var windowsSteps = [
-      step('1', '主机 接入 Windows Agent', 'hosts', [
-        '在「主机」页选择 Windows 与架构（绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」，在目标机以管理员 PowerShell 执行。',
-        'Server 2008 R2 ~ Windows 11 通用；2008 R2 + PowerShell 2.0 不支持 TLS 1.2 时，页面命令直接从控制台下载 Agent（HTTP 即可），不依赖 GitHub；windows_exporter 安装脚本也可回退平台地址。',
-        'Agent 注册为 Windows 服务 upgrade-agent（LocalSystem，失败 5s/10s/30s 自动重启），并安装每分钟运行的计划任务看门狗。',
-        '可选 MSI：msiexec /i upgrade-agent-<版本>-x64.msi SERVERURL=https://<控制台> ENROLLTOKEN=<令牌>。',
-        '可选低权限账户：install --service-account "DOMAIN\\svc" --service-password "<密码>"（需先授予「作为服务登录」）。',
-        "卸载：& 'C:\\Program Files\\upgrade-agent\\upgrade-agent.exe' uninstall（或 msiexec /x）。"
-      ], codeBlock([
-        '# 管理员 PowerShell；控制台会生成完整命令，手工执行等价于：',
-        "$exe = Join-Path $env:TEMP 'upgrade-agent.exe'",
-        'Remove-Item -Force -ErrorAction SilentlyContinue $exe',
-        "(New-Object System.Net.WebClient).DownloadFile('http://<控制台>:8090/api/agent/binary/windows-amd64', $exe)",
-        "Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制台>:8090','--enroll-token','<令牌>' -Wait -NoNewWindow",
-        '',
-        "& 'C:\\Program Files\\upgrade-agent\\upgrade-agent.exe' status",
-        "& 'C:\\Program Files\\upgrade-agent\\upgrade-agent.exe' diagnose"
-      ].join('\n'))),
-
-      step('2', '组件 选择 Windows 示例', 'components', [
-        '组件页顶部「Windows 示例」提供：windows_exporter_script（安装）、windows_exporter_script_update（更新，失败自动回滚）、windows_exporter_script_uninstall（卸载，-Yes 非交互）。',
-        '示例 script_url 指向 examples/windows_exporter/install.ps1（经 proxy 代理）；Agent 默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行。',
-        'install.ps1 支持 install / update / uninstall / status；安装到 C:\\Program Files\\windows_exporter，服务名 windows_exporter，端口 16666，自动创建防火墙规则。',
-        'textfile 采集目录：C:\\monitor\\windows_exporter\\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。',
-        '兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 统一转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。',
-        '2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl，控制台「外部文件」也能代缓存 exe 与脚本。',
-        '低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\\LocalService"（或域账户 + -ServicePassword）。',
-        '更新示例会先备份 windows_exporter.exe.bak，替换后启动失败自动回滚；卸载示例不带 health/version 检查，避免卸载后必然失败。'
-      ]),
-
-      step('3', '制品 上传安装包（可选）', 'artifacts', [
-        '脚本示例已填真实 script_url，通常可跳过本页。',
-        '不想依赖外链时：删除 script_url，在制品页上传 examples/windows_exporter/install.ps1（版本 latest，架构 all）。',
-        '上传 windows_exporter.exe 时：OS 选 windows，架构选 amd64 或 arm64（必须与目标机一致）；平台不会解压 zip。',
-        'Server 2008 R2 无法访问 GitHub 时，用「外部文件」代缓存 exe/脚本，再在组件里用平台地址或 -BinaryUrl 指定。'
-      ], codeBlock([
-        '# 仓库自带单文件 PowerShell 安装脚本（PS 2.0 兼容）',
-        'dir examples\\windows_exporter\\install.ps1',
-        '',
-        '# 可选：在目标机手动试跑（管理员 PowerShell）',
-        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 install',
-        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 status',
-        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 update',
-        'powershell -ExecutionPolicy Bypass -File .\\install.ps1 uninstall -Yes'
-      ].join('\n'))),
-
-      step('4', '任务 创建并启动', 'tasks', [
-        '任务页「Windows 示例」提供安装 / 更新 / 卸载脚本，点击后自动选中对应 Windows 组件与版本 latest。',
-        '解释器保持 powershell（旧系统用 powershell.exe，新系统也可填 pwsh）；.ps1 会自动加 BOM/CRLF。',
-        'IP 段支持 10.1.255.24-26、10.1.255.0/24；先预览再创建，首次建议金丝雀 1 台并关闭自动推进。',
-        '命令任务示例（仅管理员）：解释器 powershell，脚本 Get-Service windows_exporter | Select-Object Status,Name。',
-        'Windows 不支持伪终端（TTY）；需要交互确认时改用脚本参数（如 uninstall -Yes）或标准输入。',
-        '自升级灰度：设置页「Agent → 自动升级灰度比例」按 agent_id 稳定哈希放量（5% → 25% → 100%）。'
-      ])
-    ];
+    var steps = (sys.steps || []).map(function (st) {
+      var code = pick(st.code);
+      return step(
+        st.no, pick(st.title), st.view, pickList(st.lines),
+        code && code.trim() ? codeBlock(code) : null,
+        pick(st.jump)
+      );
+    });
+    var footers = pickList(qs.footer).map(function (t) { return hint(t); });
 
     var d = h('details', { class: 'card help' }, [
-      h('summary', {}, ['📘 快速上手：接入主机 → 组件 →（可选）制品 → 任务（Linux / Windows 示例）']),
+      h('summary', {}, ['📘 ' + (pick(qs.summary) || (lang === 'en' ? 'Quick start' : '快速上手'))]),
       osBar
-    ].concat(os === 'windows' ? windowsSteps : linuxSteps));
+    ].concat(steps).concat(footers));
     d.open = open;
     d.ontoggle = function () { state.guideOpen = d.open; };
     return d;
@@ -950,6 +881,8 @@
         .then(function (u) {
           state.user = u;
           state.myPerms = undefined;
+          state.quickstart = undefined;
+          state.quickstartErr = '';
           state.taskForm = null;
           state.loginBusy = false;
           state.loginName = '';
@@ -4353,6 +4286,12 @@
   function render() {
     app.innerHTML = '';
     if (!state.user) { app.appendChild(loginView()); return; }
+    if (state.quickstart === undefined) {
+      state.quickstart = null;
+      api('/api/quickstart')
+        .then(function (q) { state.quickstart = q || {}; state.quickstartErr = ''; render(); })
+        .catch(function (e) { state.quickstart = {}; state.quickstartErr = e.message; render(); });
+    }
     app.appendChild(topbar());
     var body;
     switch (state.view) {
@@ -4825,6 +4764,8 @@
     api('/api/auth/logout', { method: 'POST' }).then(function () {
       state.user = null;
       state.myPerms = undefined;
+      state.quickstart = undefined;
+      state.quickstartErr = '';
       state.taskForm = null;
       state.taskDetailId = null;
       state.taskDetail = null;

@@ -10,6 +10,7 @@ module.exports = defineConfig({
     baseURL: process.env.BASE_URL || 'http://127.0.0.1:18090',
     headless: true,
     screenshot: 'only-on-failure',
-    trace: 'retain-on-failure'
+    trace: 'retain-on-failure',
+    permissions: ['clipboard-read', 'clipboard-write']
   }
 });

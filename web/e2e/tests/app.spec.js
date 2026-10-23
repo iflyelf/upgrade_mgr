@@ -54,12 +54,22 @@ test('审计日志与组织架构页面可打开', async ({ page }) => {
   await expect(page.getByRole('button', { name: '从 FlyIAM 同步组织' })).toBeVisible();
 });
 
-test('英文模式切换', async ({ page }) => {
+test('英文模式切换（含快速上手与复制按钮）', async ({ page }) => {
   await login(page);
   await page.locator('button[title^="Switch language"]').click();
   await expect(page.getByRole('tab', { name: 'Hosts' })).toBeVisible();
+
+  const guide = page.locator('details.help');
+  if (!(await guide.evaluate(el => el.open))) {
+    await guide.locator('summary').click();
+  }
+  await expect(page.locator('.guide-title', { hasText: 'Host: enroll Linux agent' })).toBeVisible();
+  await expect(guide.getByRole('button', { name: 'Copy command' }).first()).toBeVisible();
+
   await page.locator('button[title^="Switch language"]').click();
   await expect(page.getByRole('tab', { name: '主机' })).toBeVisible();
+  await expect(page.locator('.guide-title', { hasText: '主机 接入 Linux Agent' })).toBeVisible();
+  await expect(page.locator('details.help').getByRole('button', { name: '复制命令' }).first()).toBeVisible();
 });
 
 test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {
@@ -79,4 +89,8 @@ test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {
   await expect(g.locator('.guide-title', { hasText: '主机 接入 Linux Agent' })).toBeVisible();
   await expect(g.locator('.guide-title', { hasText: '组件 选择 Linux 示例' })).toBeVisible();
   await expect(g.getByText('linux-amd64', { exact: false }).first()).toBeVisible();
+  const copyBtn = g.getByRole('button', { name: '复制命令' }).first();
+  await expect(copyBtn).toBeVisible();
+  await copyBtn.click();
+  await expect(copyBtn).toHaveText('已复制');
 });

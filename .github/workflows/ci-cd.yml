@@ -68,6 +68,9 @@ jobs:
       - name: 前端语法检查
         run: node --check web/dist/assets/app.js
 
+      - name: 快速上手文案一致性
+        run: go run ./cmd/quickstart-gen -check
+
       - name: Go 静态检查
         run: go vet ./...
 

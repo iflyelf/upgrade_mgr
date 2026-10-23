@@ -9,3 +9,8 @@ import "embed"
 //
 //go:embed all:dist
 var DistFS embed.FS
+
+// QuickstartJSON 快速上手结构化文案（由 web/quickstart.yaml 通过 make docs-quickstart 生成）。
+//
+//go:embed quickstart.json
+var QuickstartJSON []byte
