@@ -203,6 +203,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 
 	// 升级任务：登录即可访问；组件 deploy 权限、主机分组范围与 owner 策略由服务层校验。
 	mux.HandleFunc("GET /api/tasks", middleware.RequireAuth(auth, handler.TaskList(sc)))
+	mux.HandleFunc("GET /api/tasks/creators", middleware.RequireAuth(auth, handler.TaskCreators(sc)))
 	mux.HandleFunc("GET /api/tasks/{id}", middleware.RequireAuth(auth, handler.TaskDetail(sc)))
 	mux.HandleFunc("POST /api/tasks/preview", middleware.RequireAuth(auth, handler.TaskPreview(sc)))
 	mux.HandleFunc("POST /api/tasks", middleware.RequireAuth(auth, handler.TaskCreate(sc)))

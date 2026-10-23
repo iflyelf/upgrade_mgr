@@ -39,8 +39,8 @@
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
     // 任务页按组件/类型/名称筛选与服务端分页。
-    taskFilterComp: '', taskFilterKind: '', taskQ: '',
-    taskPage: 1, taskSize: 50, taskPages: 1, taskTotal: 0,
+    taskFilterComp: '', taskFilterKind: '', taskFilterCreator: '', taskQ: '',
+    taskPage: 1, taskSize: 50, taskPages: 1, taskTotal: 0, taskCreators: null,
     // 外部文件白名单表格（页面增删行）
     extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
     orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
@@ -3451,6 +3451,20 @@
       h('option', { value: 'upgrade' }, ['组件']),
       h('option', { value: 'command' }, ['执行命令'])
     ]);
+    var filterCreatorEl = h('select', {
+      value: state.taskFilterCreator,
+      onchange: function () {
+        state.taskFilterCreator = filterCreatorEl.value;
+        state.taskPage = 1;
+        loadTasks();
+      }
+    }, [h('option', { value: '' }, ['全部创建者'])].concat(
+      (state.taskCreators || []).map(function (u) {
+        return h('option', { value: u }, [
+          u + (state.user && u === state.user.Username ? '（我）' : '')
+        ]);
+      })
+    ));
 
     var taskQEl = h('input', {
       value: state.taskQ || '', placeholder: '按任务名搜索',
@@ -3477,18 +3491,20 @@
     var list = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, [
-          (state.taskFilterComp || state.taskFilterKind || state.taskQ)
+          (state.taskFilterComp || state.taskFilterKind || state.taskFilterCreator || state.taskQ)
             ? ('筛选结果 ' + state.taskTotal + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
             : ('共 ' + state.taskTotal + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
         ]),
         h('label', { class: 'muted' }, ['按组件筛选：', filterCompEl]),
         h('label', { class: 'muted' }, ['类型：', filterKindEl]),
+        h('label', { class: 'muted' }, ['创建者：', filterCreatorEl]),
         h('label', { class: 'muted' }, ['搜索：', taskQEl]),
-        state.taskFilterComp || state.taskFilterKind || state.taskQ
+        state.taskFilterComp || state.taskFilterKind || state.taskFilterCreator || state.taskQ
           ? h('button', {
             class: 'btn ghost small', onclick: function () {
               state.taskFilterComp = '';
               state.taskFilterKind = '';
+              state.taskFilterCreator = '';
               state.taskQ = '';
               state.taskPage = 1;
               loadTasks();
@@ -3713,6 +3729,7 @@
     var qs = [];
     if (state.taskFilterComp) qs.push('component_id=' + encodeURIComponent(state.taskFilterComp));
     if (state.taskFilterKind) qs.push('kind=' + encodeURIComponent(state.taskFilterKind));
+    if (state.taskFilterCreator) qs.push('created_by=' + encodeURIComponent(state.taskFilterCreator));
     if (state.taskQ) qs.push('q=' + encodeURIComponent(state.taskQ));
     qs.push('page=' + (state.taskPage || 1));
     qs.push('size=' + (state.taskSize || 50));
@@ -3725,8 +3742,9 @@
     // 自动刷新只需要任务状态；组件/制品变化很少，沿用已有数据，
     // 避免每 4 秒重复拉取两个较大的列表。
     var reqs = quiet
-      ? [tasksReq, Promise.resolve(state.components), Promise.resolve(state.artifacts)]
-      : [tasksReq, api('/api/components'), api('/api/artifacts')];
+      ? [tasksReq, Promise.resolve(state.components), Promise.resolve(state.artifacts),
+         Promise.resolve(state.taskCreators)]
+      : [tasksReq, api('/api/components'), api('/api/artifacts'), api('/api/tasks/creators')];
     return Promise.all(reqs)
       .then(function (rs) {
         if (seq !== tasksReqSeq) return;
@@ -3741,6 +3759,7 @@
         state.taskPages = pageData.pages || 1;
         state.components = rs[1] || [];
         state.artifacts = rs[2] || [];
+        state.taskCreators = rs[3] || [];
         if (quiet && sig === state.tasksSig) {
           scheduleAutoRefresh();
           return;

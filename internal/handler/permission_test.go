@@ -288,3 +288,80 @@ func TestTaskDetailVisibility(t *testing.T) {
 		t.Fatalf("同团队成员应 200，实际 %d", code)
 	}
 }
+
+// TestTaskCreatorFilterAndOptions 按创建者筛选；创建者列表对非管理员排除命令任务。
+func TestTaskCreatorFilterAndOptions(t *testing.T) {
+	db, _ := setupHostDB(t)
+	sfx := time.Now().UnixNano()
+	prefix := fmt.Sprintf("creator-%d", sfx)
+	sc := &svc.ServiceContext{DB: db, Task: task.NewService(db, nil, nil, nil)}
+
+	insert := func(name, kind, createdBy string) {
+		if _, err := db.Exec(`
+			INSERT INTO upgrade_tasks (name, version, kind, status, created_by, updated_by, tenant_id)
+			VALUES ($1,'v1',$2,'draft',$3,$3,1)`, name, kind, createdBy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(prefix+"-alice", "upgrade", "alice")
+	insert(prefix+"-bob", "upgrade", "bob")
+	insert(prefix+"-cmd", "command", "cmdonly")
+	t.Cleanup(func() { db.Exec(`DELETE FROM upgrade_tasks WHERE name LIKE $1`, prefix+"%") })
+
+	// 过滤：q + created_by 精确匹配
+	req := httptest.NewRequest("GET", "/api/tasks?q="+prefix+"&created_by=alice&size=50", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec := httptest.NewRecorder()
+	TaskList(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data struct {
+			List []struct {
+				CreatedBy string `json:"created_by"`
+			} `json:"list"`
+			Total int `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.Total != 1 || len(out.Data.List) != 1 || out.Data.List[0].CreatedBy != "alice" {
+		t.Fatalf("创建者过滤不符: %+v", out.Data)
+	}
+
+	creators := func(u *auth.User) map[string]bool {
+		req := httptest.NewRequest("GET", "/api/tasks/creators", nil)
+		req = req.WithContext(auth.WithUser(req.Context(), u))
+		rec := httptest.NewRecorder()
+		TaskCreators(sc)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("创建者列表失败 %d: %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Data []string `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		set := map[string]bool{}
+		for _, v := range body.Data {
+			set[v] = true
+		}
+		return set
+	}
+
+	adminSet := creators(hostTestUser(1))
+	if !adminSet["alice"] || !adminSet["bob"] || !adminSet["cmdonly"] {
+		t.Fatalf("管理员创建者列表不完整: %v", adminSet)
+	}
+
+	userSet := creators(&auth.User{Username: "carol", TenantID: 1})
+	if !userSet["alice"] || !userSet["bob"] {
+		t.Fatalf("普通用户创建者列表缺少 upgrade 创建者: %v", userSet)
+	}
+	if userSet["cmdonly"] {
+		t.Fatalf("普通用户不应看到仅创建命令任务的用户: %v", userSet)
+	}
+}
