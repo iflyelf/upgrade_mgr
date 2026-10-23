@@ -245,6 +245,10 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 
 ### 方式一：systemd（推荐，直接跑在宿主机）
 
+> **本方式的下载、目录布局与 systemd 单元没有变化**；已有部署升级只需替换二进制并
+> `systemctl restart upgrade-mgr`。下面补充了新增能力的**可选配置**（不配置即使用默认值）。
+> 首次启动会自动应用迁移 020–027（组织/多租户/审计），旧库无需手工执行 SQL。
+
 ```bash
 # 1. 下载控制台二进制到 /tmp 并解压
 wget -q -c --no-check-certificate -O /tmp/upgrade-mgr.tar.gz \
@@ -305,6 +309,8 @@ server:
   port: 8090
   external_url: http://your-server-ip:8090
   session_secret: "请替换为至少16字节的随机密钥；留空会自动生成并持久化到数据库"
+  # 审计日志保留天数（默认 180，最小 7；也可在设置页修改）
+  audit_retention_days: 180
 
 database:
   dsn: "postgresql://user:pass@localhost:5432/upgrade_mgr?sslmode=disable"
@@ -321,7 +327,28 @@ artifact:
 agent:
   poll_hold: 20
   require_enroll_token: true
+  # 任务仅创建者可操作（默认 true；管理员豁免；团队 owner_only 可覆盖）
+  task_owner_only: true
+  # 自动升级旧 Agent（默认 false）；灰度比例 0-100，按 agent_id 稳定哈希
+  auto_update: false
+  auto_update_percent: 100
+
+# 可选：FlyIAM 集成（人员对照、字段同步、组织树同步）
+# flyiam:
+#   endpoint: "http://flyiam.internal:8000"
+#   service_token: "<FlyIAM 管理员 API 令牌或 SERVICE_TOKEN>"
 EOF
+
+> **迁移与多租户**：首次启动自动应用 001–027。组织/团队/角色/审计新增
+> `tenant_id`，历史数据默认为租户 `1`，单租户部署无需额外操作。
+>
+> **FlyIAM 组织树同步前置条件**：FlyIAM 需包含
+> `GET /api/users/export`、`GET /api/departments/export`（服务令牌认证）；
+> 旧版 FlyIAM 会返回 404，升级 FlyIAM 或在「人员组织 → 组织架构」手动同步时按提示排查。
+>
+> 以上新增配置均可在页面「设置」修改并热加载；环境变量等价覆盖：
+> `SERVER_AUDIT_RETENTION_DAYS`、`AGENT_TASK_OWNER_ONLY`、
+> `AGENT_AUTO_UPDATE_PERCENT`、`FLYIAM_ENDPOINT`、`FLYIAM_SERVICE_TOKEN`。
 
 # 5. 下载 systemd 单元到 /tmp 再替换
 wget -q -c --no-check-certificate -O /tmp/upgrade-mgr.service \
