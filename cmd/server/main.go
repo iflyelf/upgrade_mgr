@@ -235,6 +235,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	// FlyIAM 集成：连通性测试 + 用户字段定义同步
 	mux.HandleFunc("POST /api/flyiam/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestFlyIAM(sc))))
 	mux.HandleFunc("POST /api/flyiam/sync-user-fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncUserFieldsFromFlyIAM(sc))))
+	mux.HandleFunc("POST /api/flyiam/sync-departments", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncDepartmentsFromFlyIAM(sc))))
 	mux.HandleFunc("GET /api/flyiam/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMUsers(sc))))
 	mux.HandleFunc("POST /api/flyiam/users/{username}/provision", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMProvisionLocalUser(sc))))
 
@@ -254,6 +255,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("PUT /api/teams/{id}/permissions", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissionSet(sc))))
 	mux.HandleFunc("DELETE /api/teams/{id}/permissions/{group}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissionDelete(sc))))
 	mux.HandleFunc("GET /api/host-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostGroupOptions(sc))))
+	mux.HandleFunc("GET /api/org/departments", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DepartmentList(sc))))
 	mux.HandleFunc("GET /api/service-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupList(sc))))
 	mux.HandleFunc("POST /api/service-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupCreate(sc))))
 	mux.HandleFunc("PUT /api/service-groups/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupUpdate(sc))))
