@@ -13,13 +13,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iflyelf/upgrade_mgr/internal/agent/agentpath"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/binswap"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/downloader"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
 )
 
 const (
-	ExitCodeSelfUpdate = 75 // systemd ExecStartPre 可捕获此退出码触发自升级
+	// ExitCodeSelfUpdate 自升级退出码：systemd 由 Restart 策略拉起，
+	// Windows 由 SCM 恢复动作（非崩溃失败）拉起。
+	ExitCodeSelfUpdate = 75
 )
 
 // Execute 执行自升级：下载→备份→替换→exit(75)。
@@ -27,7 +30,10 @@ func Execute(ctx context.Context, cmd protocol.Command, binPath, authHeader stri
 	art := cmd.Payload.Artifact
 	// 安全：PID 可预测，攻击者可预先在 /tmp 放置同名符号链接，使 RemoveAll 删除任意路径。
 	// 改用 MkdirTemp：名称含内核随机数且以 0700 创建，已存在则失败，杜绝抢占与符号链接攻击。
-	tmpDir, err := os.MkdirTemp("", "upgrade-agent-selfupdate-")
+	//
+	// 目录放在目标二进制同目录下，保证后续替换是同一卷内的 rename；
+	// Windows 上跨卷 rename 会失败（os.Rename 不支持跨盘移动）。
+	tmpDir, err := os.MkdirTemp(filepath.Dir(binPath), ".upgrade-agent-selfupdate-")
 	if err != nil {
 		return fmt.Errorf("创建临时目录失败: %w", err)
 	}
@@ -43,7 +49,7 @@ func Execute(ctx context.Context, cmd protocol.Command, binPath, authHeader stri
 		return fmt.Errorf("下载新版本失败: %w", err)
 	}
 
-	backupDir := "/var/lib/upgrade-agent/backup"
+	backupDir := agentpath.BackupDir()
 	// 安全：备份目录若可被非特权用户写入，攻击者可植入恶意 .bak 文件，
 	// 待 watchdog 触发回滚时以 root 身份执行，形成提权。此处强制收紧为 0700。
 	if err := hardenDir(backupDir); err != nil {
@@ -104,18 +110,34 @@ func Rollback(binPath, backupDir string) error {
 }
 
 // hardenDir 创建目录并收紧权限为 0700（仅属主可写）。
+//
+// Windows 上没有 POSIX 权限位，访问控制由 ProgramData 的默认 ACL 保证，
+// 这里只负责创建目录。
 func hardenDir(dir string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := os.Chmod(dir, 0700); err != nil && !isWindows() {
 		return err
 	}
 	return ensureSecureDir(dir)
 }
 
 // ensureSecureDir 校验目录不可被同组/其他用户写入。
+//
+// Windows 上 os.FileMode 不反映 ACL，跳过 POSIX 权限位检查
+// （目录位于 ProgramData，默认仅管理员与 SYSTEM 可写）。
 func ensureSecureDir(dir string) error {
+	if isWindows() {
+		fi, err := os.Stat(dir)
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s 不是目录", dir)
+		}
+		return nil
+	}
 	fi, err := os.Stat(dir)
 	if err != nil {
 		return err
@@ -130,6 +152,9 @@ func ensureSecureDir(dir string) error {
 }
 
 // ensureSecureFile 校验文件为常规文件（非符号链接）且不可被同组/其他用户写入。
+//
+// Windows 保留「必须是常规文件、不能是符号链接/目录联接」的检查，
+// 但跳过 POSIX 权限位判断。
 func ensureSecureFile(path string) error {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -140,6 +165,9 @@ func ensureSecureFile(path string) error {
 	}
 	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("%s 不是常规文件", path)
+	}
+	if isWindows() {
+		return nil
 	}
 	if mode := fi.Mode().Perm(); mode&0022 != 0 {
 		return fmt.Errorf("文件 %s 权限过宽 (%o)，可被非属主写入", path, mode)

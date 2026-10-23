@@ -1,5 +1,7 @@
-// Package installer 全 Go 实现的 Agent 安装器：探测 init → 写服务/看门狗 → 启动。
+// Package installer 全 Go 实现的 Agent 安装器：探测平台 → 写服务 → 启动。
 //
+// Linux：systemd / upstart + cron 看门狗；
+// Windows：SCM 服务（含失败自动重启）+ 可选计划任务看门狗。
 // 不依赖任何外部 shell 脚本；服务模板以 go:embed 内嵌。
 package installer
 
@@ -14,39 +16,47 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/iflyelf/upgrade_mgr/internal/agent/agentpath"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/osinfo"
 )
 
 //go:embed templates/*.tmpl
 var tmplFS embed.FS
 
+// ServiceName 是 Agent 在目标机注册的服务名。
+// Linux systemd/upstart 与 Windows SCM 使用同一名称，便于运维排查。
+const ServiceName = "upgrade-agent"
+
 // Options 安装参数。
 type Options struct {
 	ServerURL   string
 	EnrollToken string
-	BinPath     string // 目标安装路径，默认 /usr/local/bin/upgrade-agent
+	BinPath     string // 目标安装路径，留空使用平台默认值
 	StatePath   string
-	InstallCron bool // 是否安装 cron 看门狗兜底
+	InstallCron bool // 是否安装看门狗兜底（Linux cron / Windows 计划任务）
 	Force       bool // 强制重新注册：忽略已有 state 中的凭据并覆盖
 }
 
-// Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选 cron。
+// Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选看门狗。
 func Install(opts Options) error {
 	if opts.BinPath == "" {
-		opts.BinPath = "/usr/local/bin/upgrade-agent"
+		opts.BinPath = agentpath.BinPath()
 	}
 	if opts.StatePath == "" {
-		opts.StatePath = "/var/lib/upgrade-agent/state.json"
+		opts.StatePath = agentpath.StatePath()
 	}
 	opts.ServerURL = strings.TrimRight(opts.ServerURL, "/")
 	info := osinfo.Detect()
+
+	// 0. 平台预处理：Windows 上先停掉旧服务，避免安装时 exe 被占用。
+	prepareInstall(opts)
 
 	// 1. 复制当前二进制到目标路径（若不同）
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("获取自身路径失败: %w", err)
 	}
-	if abs, _ := filepath.Abs(self); abs != opts.BinPath {
+	if abs, _ := filepath.Abs(self); !samePath(abs, opts.BinPath) {
 		if err := copyExecutable(self, opts.BinPath); err != nil {
 			return fmt.Errorf("安装二进制失败: %w", err)
 		}
@@ -64,24 +74,15 @@ func Install(opts Options) error {
 		fmt.Println("⚠️ 未提供 --enroll-token；Agent 启动后会提示缺少注册令牌")
 	}
 
-	// 2. 按 init 类型写服务
-	switch info.Init {
-	case "systemd":
-		if err := installSystemd(opts); err != nil {
-			return err
-		}
-	case "upstart":
-		if err := installUpstart(opts); err != nil {
-			return err
-		}
-	default:
-		fmt.Printf("⚠️ 未检测到 systemd/upstart，跳过服务安装（可用 cron 看门狗或裸跑）\n")
+	// 2. 按平台写服务
+	if err := installPlatform(opts, info); err != nil {
+		return err
 	}
 
-	// 3. cron 看门狗兜底
+	// 3. 看门狗兜底
 	if opts.InstallCron {
-		if err := installCron(opts.BinPath); err != nil {
-			fmt.Printf("⚠️ 安装 cron 看门狗失败: %v\n", err)
+		if err := installWatchdog(opts.BinPath, opts.StatePath); err != nil {
+			fmt.Printf("⚠️ 安装看门狗失败: %v\n", err)
 		}
 	}
 
@@ -114,11 +115,7 @@ func writeInitialState(path, serverURL, enrollToken string, force bool) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	// state 内含 token/secret，目录必须仅 root 可访问。
-	// 相对路径（dir="."）或根目录不做 chmod，避免误改当前目录/系统根目录。
-	if dir != "." && dir != string(filepath.Separator) {
-		_ = os.Chmod(dir, 0700)
-	}
+	hardenStateDir(dir)
 
 	if !force {
 		if b, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(b)) > 0 {
@@ -155,63 +152,6 @@ func writeStateAtomic(path string, v any) error {
 	return nil
 }
 
-func installSystemd(opts Options) error {
-	content, err := render("upgrade-agent.service.tmpl", opts)
-	if err != nil {
-		return err
-	}
-	path := "/etc/systemd/system/upgrade-agent.service"
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		return err
-	}
-	if err := run("systemctl", "daemon-reload"); err != nil {
-		return err
-	}
-	if err := run("systemctl", "enable", "upgrade-agent"); err != nil {
-		return err
-	}
-	// 连续失败会触发 systemd start-limit，先清掉失败计数，保证重复安装能拉起。
-	_ = run("systemctl", "reset-failed", "upgrade-agent")
-	// 服务可能已在运行（例如重装/修复），必须显式 restart 才会加载新二进制和新 state。
-	return run("systemctl", "restart", "upgrade-agent")
-}
-
-func installUpstart(opts Options) error {
-	content, err := render("upgrade-agent.conf.tmpl", opts)
-	if err != nil {
-		return err
-	}
-	path := "/etc/init/upgrade-agent.conf"
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		return err
-	}
-	// upstart 的 start 对已运行实例是空操作，先 stop 确保加载新二进制和新 state。
-	_ = run("stop", "upgrade-agent")
-	return run("start", "upgrade-agent")
-}
-
-func installCron(binPath string) error {
-	line := fmt.Sprintf("* * * * * root %s watchdog\n", binPath)
-	return os.WriteFile("/etc/cron.d/upgrade-agent", []byte(line), 0644)
-}
-
-// Uninstall 卸载服务与 cron。
-func Uninstall() error {
-	info := osinfo.Detect()
-	switch info.Init {
-	case "systemd":
-		run("systemctl", "disable", "--now", "upgrade-agent")
-		os.Remove("/etc/systemd/system/upgrade-agent.service")
-		run("systemctl", "daemon-reload")
-	case "upstart":
-		run("stop", "upgrade-agent")
-		os.Remove("/etc/init/upgrade-agent.conf")
-	}
-	os.Remove("/etc/cron.d/upgrade-agent")
-	fmt.Println("✅ 已卸载")
-	return nil
-}
-
 func render(name string, data any) ([]byte, error) {
 	b, err := tmplFS.ReadFile("templates/" + name)
 	if err != nil {
@@ -229,17 +169,28 @@ func render(name string, data any) ([]byte, error) {
 }
 
 func copyExecutable(src, dst string) error {
-	_ = os.MkdirAll(filepath.Dir(dst), 0755)
-	in, err := os.ReadFile(src)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
-	// 原子写：先写临时文件再 rename
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, in, 0755); err != nil {
+	// 目标就是当前运行中的二进制（Windows 上无法覆盖），直接跳过。
+	if cur, err := os.Executable(); err == nil && samePath(cur, dst) {
+		return nil
+	}
+	// Windows 上目标可能正被旧服务占用；先停服务（平台实现在 Install 前已处理），
+	// 仍占用时改名让位，避免「拒绝访问」。
+	if err := copyExecutablePlatform(src, dst); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
+	return nil
+}
+
+func samePath(a, b string) bool {
+	aa, err1 := filepath.Abs(a)
+	bb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return a == b
+	}
+	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
 }
 
 func run(args ...string) error {
@@ -250,4 +201,15 @@ func run(args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// Uninstall 卸载服务与看门狗。
+func Uninstall() error {
+	info := osinfo.Detect()
+	if err := uninstallPlatform(info); err != nil {
+		return err
+	}
+	removeWatchdog()
+	fmt.Println("✅ 已卸载")
+	return nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,7 +29,7 @@ type CommandResult struct {
 // 交互脚本支持：
 //   - Stdin：把内容作为标准输入（如 "Y\n"），等价于 here-string；
 //   - TTY：通过 script(1) 分配伪终端，兼容直接读写 /dev/tty 的脚本
-//     （例如卸载脚本用 `dd if=/dev/tty` 读取确认）。
+//     （例如卸载脚本用 `dd if=/dev/tty` 读取确认）。Windows 无伪终端，忽略该项。
 func ExecuteCommand(ctx context.Context, spec protocol.CommandSpec, onOutput func(string), onStage func(stage, message string)) *CommandResult {
 	res := &CommandResult{ExitCode: -1}
 	logf := func(stage, msg string, args ...any) {
@@ -49,6 +48,16 @@ func ExecuteCommand(ctx context.Context, spec protocol.CommandSpec, onOutput fun
 		timeout = 10 * time.Minute
 	}
 
+	interp := strings.TrimSpace(spec.Interpreter)
+	if interp == "" {
+		interp = shellPath()
+	}
+	// 只允许解释器白名单，避免服务端被攻破后通过 interpreter 执行任意程序。
+	if err := validateInterpreter(interp); err != nil {
+		res.Log = fmt.Sprintf("[exec] %v\n", err)
+		return res
+	}
+
 	dir := os.TempDir()
 	if d := strings.TrimSpace(spec.WorkDir); d != "" {
 		dir = d
@@ -57,7 +66,8 @@ func ExecuteCommand(ctx context.Context, spec protocol.CommandSpec, onOutput fun
 		res.Log = fmt.Sprintf("[exec] 创建工作目录失败: %v\n", err)
 		return res
 	}
-	f, err := os.CreateTemp(dir, "run-command-*.sh")
+	// 临时脚本必须带扩展名：Windows 的 PowerShell -File / cmd /c 依赖扩展名判定。
+	f, err := os.CreateTemp(dir, "run-command-*"+commandScriptExt(interp))
 	if err != nil {
 		res.Log = fmt.Sprintf("[exec] 创建临时脚本失败: %v\n", err)
 		return res
@@ -73,28 +83,19 @@ func ExecuteCommand(ctx context.Context, spec protocol.CommandSpec, onOutput fun
 		res.Log = fmt.Sprintf("[exec] 写入临时脚本失败: %v\n", err)
 		return res
 	}
+	// Windows 上 Chmod 仅影响只读属性，失败不阻断执行。
 	if err := os.Chmod(path, 0700); err != nil {
-		res.Log = fmt.Sprintf("[exec] 设置脚本权限失败: %v\n", err)
-		return res
+		logf(protocol.StageRunCommand, "设置脚本权限失败（继续执行）: %v", err)
 	}
 
-	interp := strings.TrimSpace(spec.Interpreter)
-	if interp == "" {
-		interp = shellPath()
-	}
-	// 只允许解释器白名单，避免服务端被攻破后通过 interpreter 执行任意程序。
-	if err := validateInterpreter(interp); err != nil {
-		res.Log = fmt.Sprintf("[exec] %v\n", err)
-		return res
-	}
-
-	argv := append([]string{interp, path}, spec.Args...)
-	if spec.TTY {
+	argv := interpreterArgv(interp, path, spec.Args)
+	useTTY := spec.TTY && ttySupported()
+	if useTTY {
 		argv = ttyCommand(interp, path, spec.Args)
 	}
 
 	logf(protocol.StageRunCommand, "执行命令（%s，超时 %s%s）", filepath.Base(interp), timeout,
-		ttySuffix(spec.TTY, spec.Stdin))
+		ttySuffix(useTTY, spec.Stdin))
 
 	stream := &chunkWriter{onOutput: onOutput}
 	out, err := runner.Run(ctx, runner.Spec{
@@ -130,53 +131,6 @@ func ExecuteCommand(ctx context.Context, spec protocol.CommandSpec, onOutput fun
 	return res
 }
 
-// validateInterpreter 限定解释器白名单（bash/sh），防止把任意二进制当成脚本执行器。
-func validateInterpreter(p string) error {
-	base := filepath.Base(strings.TrimSpace(p))
-	switch base {
-	case "bash", "sh", "dash", "ksh", "zsh":
-		return nil
-	default:
-		return fmt.Errorf("不支持的解释器 %q（仅允许 bash/sh/dash/ksh/zsh）", p)
-	}
-}
-
-// ttyCommand 构造通过 script(1) 启动的命令，把脚本输出接入伪终端。
-//
-// script -q -c "<cmd>" /dev/null：quiet、不额外记录 typescript 文件。
-// 命令字符串中的每个参数单独做 shell 单引号转义，避免注入。
-//
-// 若 script(1) 支持 -e/--return（util-linux 2.24+），一并启用：
-// 否则 script 总是返回 0，子命令失败会被误判为成功。
-func ttyCommand(interp, path string, args []string) []string {
-	parts := make([]string, 0, len(args)+2)
-	parts = append(parts, shellQuote(interp), shellQuote(path))
-	for _, a := range args {
-		parts = append(parts, shellQuote(a))
-	}
-	cmd := strings.Join(parts, " ")
-	argv := []string{"script"}
-	if scriptSupportsReturn() {
-		argv = append(argv, "-e")
-	}
-	return append(argv, "-q", "-c", cmd, "/dev/null")
-}
-
-var (
-	scriptReturnOnce sync.Once
-	scriptReturnOK   bool
-)
-
-// scriptSupportsReturn 探测 script(1) 是否支持 -e/--return。
-// 老版本（如 CentOS 6 的 util-linux 2.17）不支持，探测失败时保持原行为。
-func scriptSupportsReturn() bool {
-	scriptReturnOnce.Do(func() {
-		c := exec.Command("script", "-e", "-q", "-c", "exit 0", "/dev/null")
-		scriptReturnOK = c.Run() == nil
-	})
-	return scriptReturnOK
-}
-
 func ttySuffix(tty bool, stdin string) string {
 	var out []string
 	if tty {
@@ -189,11 +143,6 @@ func ttySuffix(tty bool, stdin string) string {
 		return ""
 	}
 	return "，" + strings.Join(out, "，")
-}
-
-// shellQuote 用单引号包裹参数，内部单引号按 POSIX 方式转义。
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // chunkWriter 把脚本输出按块回调给上层（用于实时日志上报）。
