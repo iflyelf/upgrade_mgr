@@ -21,7 +21,8 @@ func TestPurgeByComponent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 
 	root := t.TempDir()
 	repo := NewRepo(db, root)

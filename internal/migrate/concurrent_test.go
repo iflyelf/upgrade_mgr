@@ -23,7 +23,8 @@ func TestConcurrentMigrate(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer db.Close()
+		// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 		_, _ = db.Exec(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`)
 	}
 	cleanup()
@@ -43,7 +44,8 @@ func TestConcurrentMigrate(t *testing.T) {
 				errs[idx] = err
 				return
 			}
-			defer db.Close()
+			// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 			errs[idx] = AutoMigrate(db)
 		}(i)
 	}
@@ -60,7 +62,8 @@ func TestConcurrentMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 
 	var count int
 	if err := db.QueryRowContext(context.Background(),

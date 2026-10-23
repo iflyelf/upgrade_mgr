@@ -21,7 +21,8 @@ func TestTryLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)
 	}
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(4)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

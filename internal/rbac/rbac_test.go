@@ -43,7 +43,8 @@ func seedTenant(t *testing.T, db *sql.DB, name string) (int64, func()) {
 // TestCreateUser_ScopedToOwnTenant 租户管理员只能在本租户建用户。
 func TestCreateUser_ScopedToOwnTenant(t *testing.T) {
 	db := openDB(t)
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	svc := NewService(db)
 	ctx := context.Background()
 
@@ -88,7 +89,8 @@ func TestCreateUser_ScopedToOwnTenant(t *testing.T) {
 // 租户管理员不得授予 superadmin，否则可自我提权到跨租户。
 func TestCreateUser_CannotGrantSuperadmin(t *testing.T) {
 	db := openDB(t)
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	svc := NewService(db)
 	ctx := context.Background()
 
@@ -113,7 +115,8 @@ func TestCreateUser_CannotGrantSuperadmin(t *testing.T) {
 // TestSetTenantRoles_CannotEscalate 已存在用户也不能被提权为 superadmin。
 func TestSetTenantRoles_CannotEscalate(t *testing.T) {
 	db := openDB(t)
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	svc := NewService(db)
 	ctx := context.Background()
 
@@ -151,7 +154,8 @@ func TestSetTenantRoles_CannotEscalate(t *testing.T) {
 // TestList_TenantScoped 列表按租户隔离，superadmin 可跨租户。
 func TestList_TenantScoped(t *testing.T) {
 	db := openDB(t)
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	svc := NewService(db)
 	ctx := context.Background()
 
@@ -212,7 +216,8 @@ func TestList_TenantScoped(t *testing.T) {
 // TestList_NilActorFailsClosed 身份缺失必须返回空集，不得泄露全部用户。
 func TestList_NilActorFailsClosed(t *testing.T) {
 	db := openDB(t)
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	svc := NewService(db)
 
 	list, err := svc.List(context.Background(), nil)
@@ -228,7 +233,8 @@ func TestList_NilActorFailsClosed(t *testing.T) {
 // TestSetDisabled 禁用后无法再登录（disabled 生效）。
 func TestSetDisabled(t *testing.T) {
 	db := openDB(t)
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	svc := NewService(db)
 	ctx := context.Background()
 

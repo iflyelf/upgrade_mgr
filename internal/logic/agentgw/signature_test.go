@@ -28,7 +28,8 @@ func TestDequeueSendsLegacyAndV2Signature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
 	}
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	if err := migrate.AutoMigrate(db); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
@@ -99,7 +100,8 @@ func TestDequeueUsesAdvertisedLegacySignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
 	}
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	if err := migrate.AutoMigrate(db); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
@@ -198,7 +200,8 @@ func TestDequeueSignsLegacyCommandField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
 	}
-	defer db.Close()
+	// 关闭必须在其他 t.Cleanup（删测试数据）之后：LIFO 顺序。
+	t.Cleanup(func() { db.Close() })
 	if err := migrate.AutoMigrate(db); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}

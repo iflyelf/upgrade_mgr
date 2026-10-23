@@ -279,6 +279,10 @@ func FlyIAMProvisionLocalUser(s *svc.ServiceContext) http.HandlerFunc {
 
 		password := req.Password
 		generated := false
+		if password != "" && len(password) < 8 {
+			httpx.Fail(w, http.StatusBadRequest, "密码长度不能少于 8 个字符")
+			return
+		}
 		if password == "" {
 			password, err = generatePassword(16)
 			if err != nil {
