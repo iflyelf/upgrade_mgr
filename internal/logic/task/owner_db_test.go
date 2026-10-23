@@ -11,6 +11,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
@@ -229,5 +230,68 @@ func TestTaskDeployRecheck(t *testing.T) {
 	// 无 actor（内部调用）放行
 	if err := s.checkTaskDeploy(ctx, sc, taskID); err != nil {
 		t.Fatalf("内部调用应放行: %v", err)
+	}
+}
+
+// TestPreviewHostGroupScope 预览也不能越过团队授权的主机分组。
+func TestPreviewHostGroupScope(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sfx := time.Now().UnixNano()
+
+	var compID int64
+	if err := db.QueryRow(`
+		INSERT INTO components (name, display_name, deploy_mode)
+		VALUES ($1,'预览权限组件','replace') RETURNING id`,
+		fmt.Sprintf("preview-comp-%d", sfx)).Scan(&compID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM components WHERE id=$1`, compID) })
+
+	hostIP := fmt.Sprintf("10.%d.%d.%d", (sfx/65536)%256, (sfx/256)%256, sfx%256)
+	if _, err := db.Exec(`
+		INSERT INTO hosts (ip, hostname, arch, os_family, app_code, tenant_id)
+		VALUES ($1,'preview-host','amd64','linux','APPX',1)`, hostIP); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip=$1`, hostIP) })
+
+	s := NewService(db, component.NewRepo(db), nil, nil)
+	sc := scope.New(1, true)
+	req := CreateRequest{
+		Kind: KindUpgrade, ComponentID: compID, Version: "v1",
+		Selector: Selector{IPExpr: hostIP},
+	}
+	req.SetActor(&auth.User{Username: "bob", TenantID: 1})
+
+	// 主机属于 APPX，而授权只有 APPY → 拒绝
+	s.SetHostGroupResolver(func(context.Context, *auth.User, string) (map[string]bool, error) {
+		return map[string]bool{"APPY": true}, nil
+	})
+	if _, err := s.Preview(ctx, sc, req); err == nil {
+		t.Fatal("预览应被主机分组拦截")
+	}
+
+	// 授权 APPX → 通过
+	s.SetHostGroupResolver(func(context.Context, *auth.User, string) (map[string]bool, error) {
+		return map[string]bool{"APPX": true}, nil
+	})
+	res, err := s.Preview(ctx, sc, req)
+	if err != nil {
+		t.Fatalf("授权范围内应通过: %v", err)
+	}
+	if res.TotalHosts != 1 {
+		t.Fatalf("预览命中数不符: %d", res.TotalHosts)
 	}
 }

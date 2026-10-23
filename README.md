@@ -2023,7 +2023,7 @@ MIT © iflyelf
 
 ### 2026-10-23 任务 owner 校验、主机分组下拉与 FlyIAM 独立页面
 
-- **任务操作 owner 校验**：新增设置 `agent.task_owner_only`（默认 false，页面可改）。
+- **任务操作 owner 校验**：新增设置 `agent.task_owner_only`（初始默认 false，后续版本已改为默认开启）。
   开启后，非管理员只能「启动/暂停/推进/取消/重试/删除」自己创建的任务；
   管理员与 superadmin 豁免；匿名内部调用（后台编排）不受影响。actor 从请求 context 读取。
 - 迁移 `022`：`upgrade_tasks.updated_by` + `created_by` 索引；创建任务时两者同时写入。
