@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
@@ -26,6 +27,12 @@ type hostUpdateRequest struct {
 	Department *string `json:"department"`
 	Vendor     *string `json:"vendor"`
 	HostType   *string `json:"host_type"`
+	// TunnelIP 是「主机侧隧道 IP」：主机在隧道网段里的地址，仅用于展示与筛选
+	// （平台不主动反连主机，指令仍由 Agent 外连取回）。只接受 IP 字面量。
+	TunnelIP *string `json:"tunnel_ip"`
+	// ServerTunnelURL 是「平台侧隧道地址」：Agent 实际要连接的地址。
+	// 支持纯 IP、IP:端口或完整 http(s) URL；留空表示不使用隧道（Agent 回退默认地址）。
+	ServerTunnelURL *string `json:"server_tunnel_url"`
 }
 
 type hostField struct {
@@ -84,7 +91,25 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		hasField := false
+		// 主机侧隧道 IP：只接受 IP 字面量（用于展示/筛选）。
+		if req.TunnelIP != nil {
+			v := hostnet.NormalizeExitIP(*req.TunnelIP)
+			if v == "" && strings.TrimSpace(*req.TunnelIP) != "" {
+				httpx.Fail(w, http.StatusBadRequest, "隧道 IP 不是合法的 IP 地址")
+				return
+			}
+			req.TunnelIP = &v
+		}
+		// 平台侧隧道地址：允许 IP / IP:端口 / 完整 URL。
+		if req.ServerTunnelURL != nil {
+			v, err := hostnet.NormalizeAddr(*req.ServerTunnelURL)
+			if err != nil {
+				httpx.Fail(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			req.ServerTunnelURL = &v
+		}
+		hasField := req.TunnelIP != nil || req.ServerTunnelURL != nil
 		for _, f := range fields {
 			if f.value != nil {
 				hasField = true
@@ -102,11 +127,11 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			auditOp(s, r, audit.ActionHostUpdate, "host", strconv.FormatInt(id, 10), ip, opErr)
 		}()
 
-		// 字段占位符 $2..$8，租户条件从 $9 开始。
-		cond, condArgs := reqScope(r).Where("", 9)
+		// 字段占位符 $2..$10，租户条件从 $11 开始。
+		cond, condArgs := reqScope(r).Where("", 11)
 		args := append([]any{
 			id, req.Hostname, req.Account, req.AppCode, req.BizGroup,
-			req.Department, req.Vendor, req.HostType,
+			req.Department, req.Vendor, req.HostType, req.TunnelIP, req.ServerTunnelURL,
 		}, condArgs...)
 		err = s.DB.QueryRowContext(r.Context(), `
 			UPDATE hosts SET
@@ -117,6 +142,8 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 				department = COALESCE($6, department),
 				vendor     = COALESCE($7, vendor),
 				host_type  = COALESCE($8, host_type),
+				tunnel_ip  = COALESCE($9, tunnel_ip),
+				server_tunnel_url = COALESCE($10, server_tunnel_url),
 				updated_at = NOW()
 			WHERE id=$1 AND `+cond+`
 			RETURNING ip`, args...).Scan(&ip)

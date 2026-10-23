@@ -24,6 +24,9 @@ func TestWriteInitialStateWritesServerAndToken(t *testing.T) {
 	if st.ServerURL != "https://mgr.example.com" || st.EnrollToken != "tok-123" {
 		t.Fatalf("state 内容错误: %+v", st)
 	}
+	if st.DefaultServerURL != "https://mgr.example.com" {
+		t.Fatalf("DefaultServerURL 应写入安装地址（隧道回退用），got %q", st.DefaultServerURL)
+	}
 	if st.StatePath != path {
 		t.Fatalf("StatePath = %q, want %q", st.StatePath, path)
 	}

@@ -124,6 +124,11 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 		if i >= 20 {
 			break
 		}
+		// 多网卡主机展示出口地址，便于运维确认命中的确实是业务网段。
+		if h.exitIP != "" {
+			sample = append(sample, h.exitIP)
+			continue
+		}
 		sample = append(sample, h.ip)
 	}
 	return &PreviewResult{TotalHosts: len(hosts), Batches: batches, SampleIPs: sample}, nil
@@ -226,9 +231,14 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 	return taskID, nil
 }
 
+// hostRow 任务目标主机。
+//
+// ip 是注册来源地址（主机身份）；exitIP 是 Agent 探测的出口地址。
+// 多网卡主机在页面上可能按出口地址组织网段，因此 IP 段选择器同时匹配两者。
 type hostRow struct {
-	id int64
-	ip string
+	id     int64
+	ip     string
+	exitIP string
 }
 
 // matchHosts 解析 selector：IP 段展开 ∩ 分组过滤 − 排除。
@@ -251,21 +261,32 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 		i++
 	}
 
-	q := "SELECT id, ip FROM hosts WHERE " + join(where, " AND ")
+	q := "SELECT id, ip, COALESCE(exit_ip,'') FROM hosts WHERE " + join(where, " AND ")
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	byIP := map[string]int64{}
+	// 一个主机可能同时有来源地址与出口地址；两个地址都登记，
+	// 命中去重后只保留一条主机记录。多个主机共用同一出口 IP（NAT）
+	// 时全部纳入，由命中后的去重逻辑合并。
+	byIP := map[string][]int64{}
+	all := map[int64]hostRow{}
 	for rows.Next() {
 		var id int64
-		var ip string
-		if err := rows.Scan(&id, &ip); err != nil {
+		var ip, exitIP string
+		if err := rows.Scan(&id, &ip, &exitIP); err != nil {
 			return nil, err
 		}
-		byIP[ip] = id
+		byIP[ip] = append(byIP[ip], id)
+		if exitIP != "" && exitIP != ip {
+			byIP[exitIP] = append(byIP[exitIP], id)
+		}
+		all[id] = hostRow{id: id, ip: ip, exitIP: exitIP}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// IP 段展开（若指定）
@@ -281,16 +302,22 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 		}
 	}
 
-	var out []hostRow
-	for ip, id := range byIP {
+	matched := map[int64]struct{}{}
+	for ip, ids := range byIP {
 		if wantIPs != nil {
 			if _, ok := wantIPs[ip]; !ok {
 				continue
 			}
 		}
-		out = append(out, hostRow{id: id, ip: ip})
+		for _, id := range ids {
+			matched[id] = struct{}{}
+		}
 	}
-	// 稳定排序（按 IP）
+	out := make([]hostRow, 0, len(matched))
+	for id := range matched {
+		out = append(out, all[id])
+	}
+	// 稳定排序（按 IP），多网卡主机按出口地址排序更符合运维直觉。
 	sortHosts(out)
 	return out, nil
 }

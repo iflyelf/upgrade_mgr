@@ -17,8 +17,16 @@ import (
 
 // Host 主机列表行。
 type Host struct {
-	ID                int64      `json:"id"`
-	IP                string     `json:"ip"`
+	ID int64  `json:"id"`
+	IP string `json:"ip"`
+	// ExitIP 是 Agent 探测的本机出口 IP（多网卡时区别于注册来源地址）。
+	ExitIP string `json:"exit_ip"`
+	// TunnelIP 是主机侧隧道 IP（展示/筛选）。
+	TunnelIP string `json:"tunnel_ip"`
+	// ServerTunnelURL 是平台侧隧道地址：Agent 连接使用，非空时下发切换。
+	ServerTunnelURL   string     `json:"server_tunnel_url"`
+	AgentServerURL    string     `json:"agent_server_url"`
+	DefaultServerURL  string     `json:"agent_default_server_url"`
 	Hostname          string     `json:"hostname"`
 	OSFamily          string     `json:"os_family"`
 	OSType            string     `json:"os_type"`
@@ -62,8 +70,12 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			i++
 		}
 		if kw := strings.TrimSpace(q.Get("q")); kw != "" {
+			// 出口 IP / 隧道地址也参与搜索：运维通常按实际业务网地址找主机。
 			where = append(where,
-				"(ip ILIKE $"+strconv.Itoa(i)+" OR hostname ILIKE $"+strconv.Itoa(i)+
+				"(ip ILIKE $"+strconv.Itoa(i)+" OR exit_ip ILIKE $"+strconv.Itoa(i)+
+					" OR tunnel_ip ILIKE $"+strconv.Itoa(i)+
+					" OR server_tunnel_url ILIKE $"+strconv.Itoa(i)+
+					" OR hostname ILIKE $"+strconv.Itoa(i)+
 					" OR biz_group ILIKE $"+strconv.Itoa(i)+")")
 			args = append(args, "%"+kw+"%")
 			i++
@@ -106,7 +118,10 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 
 		listArgs := append(append([]any{}, args...), size, offset)
 		rows, err := s.DB.QueryContext(r.Context(),
-			`SELECT id, ip, hostname, os_family, os_type, arch, account, app_code,
+			`SELECT id, ip, COALESCE(exit_ip,''), COALESCE(tunnel_ip,''),
+			        COALESCE(server_tunnel_url,''),
+			        COALESCE(agent_server_url,''), COALESCE(agent_default_server_url,''),
+			        hostname, os_family, os_type, arch, account, app_code,
 			        biz_group, department, vendor, host_type, COALESCE(agent_id,''),
 			        agent_version, COALESCE(agent_build_version,''), COALESCE(agent_build_hash,''),
 			        COALESCE(agent_build_variant,''), agent_status, source
@@ -121,7 +136,9 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 		list := []Host{}
 		for rows.Next() {
 			var h Host
-			if err := rows.Scan(&h.ID, &h.IP, &h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
+			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerTunnelURL,
+				&h.AgentServerURL, &h.DefaultServerURL,
+				&h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
 				&h.Account, &h.AppCode, &h.BizGroup, &h.Department, &h.Vendor, &h.HostType,
 				&h.AgentID, &h.AgentVersion, &h.AgentBuildVersion, &h.AgentBuildHash,
 				&h.AgentBuildVariant, &h.AgentStatus, &h.Source); err != nil {

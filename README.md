@@ -535,6 +535,39 @@ status upgrade-agent            # upstart
 > `/tmp/upgrade-agent install --server '<url>' --enroll-token '<新令牌>' --force`。
 > `--force` 必须同时提供 `--enroll-token`；普通重装请勿勾选，否则会生成新的 Agent 身份。
 
+#### 多网卡出口 IP 与隧道地址
+
+Agent 用「向服务端地址发起一次 UDP connect」让内核按路由表选出出口网卡（不发包），
+把出口 IP（`hosts.exit_ip`）随注册/心跳上报。用于：
+
+- 主机列表显示「出口 x.x.x.x」，多网卡时能看出实际走哪块网卡；
+- 列表搜索与任务 IP 段选择同时匹配 `hosts.ip`（注册来源地址）和 `hosts.exit_ip`，
+  按业务网段填报也能选中主机；
+- `hosts.ip` 仍是服务端观察到的来源地址，作为主机身份（唯一键）与安全边界，
+  Agent 不能通过上报出口 IP 覆盖身份。
+
+**隧道地址**用于「主机连不上平台默认地址、只能走专线/VPN 隧道」的场景。平台是
+Agent 主动外连服务端，隧道只需保证 **Agent → 平台** 可达，指令下发与日志回传
+复用同一条连接（长轮询 + 上报），无需平台反连主机。
+
+| 字段 | 含义 | 谁使用 |
+|---|---|---|
+| `hosts.tunnel_ip` | 主机在隧道网段里的 IP（如 `172.16.0.9`） | 仅展示与筛选 |
+| `hosts.server_tunnel_url` | Agent 实际连接的平台隧道地址 | 心跳响应下发，Agent 自动切换 |
+| `hosts.agent_server_url` | Agent 自报的当前连接地址 | 页面确认切换是否生效 |
+| `hosts.agent_default_server_url` | 安装时的默认地址 | 补齐隧道地址缺省的协议/端口 |
+
+页面操作：主机页「编辑」→ 填「平台侧隧道地址」→ 保存。
+
+- 支持 `10.8.0.5`、`10.8.0.5:8090`、`https://tunnel.example.com` 三种写法；
+  只填 IP 时沿用安装时的协议与端口（默认地址无端口则按协议补 80/443）。
+- 保存后 Agent 在下一次心跳（约 30 秒）自动切换并持久化到 state（`server_url`），
+  后续心跳、取指令、制品下载全部走隧道。
+- 清空该字段 → 心跳响应不再下发隧道 → Agent 自动回退到 `default_server_url`。
+- **失效保护**：隧道地址连续 3 次心跳失败（约 90 秒）自动回退默认地址，并在 5 分钟内
+  不再切回同一地址，避免填错隧道导致 Agent 永久失联；隧道恢复后 5 分钟自动重新尝试。
+- 隧道本身（WireGuard / IPSec / 专线 / SSH 端口转发等）由运维保障，平台不负责建链。
+
 #### Agent 自升级（无需逐台登录）
 
 Agent 注册/心跳会上报 `build_version`、自身二进制 SHA256（`build_hash`）和构建变体
@@ -1384,6 +1417,18 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
+
+### 2026-10-23 多网卡出口 IP 与隧道地址
+
+- Agent 新增 UDP 路由探测出口 IP（`internal/pkg/netinfo`）：多网卡主机按访问服务端的路由选网卡，
+  注册/心跳上报 `exit_ip`；探测失败沿用上一次值，不覆盖为空。
+- 主机列表新增「出口 IP」「主机隧道 IP」「平台隧道地址」「当前连接地址」，搜索与任务 IP 段选择同时匹配
+  `hosts.ip` 与 `hosts.exit_ip`；`hosts.ip` 仍是注册来源地址，作为主机身份不被 Agent 覆盖。
+- 隧道地址支持主机侧 IP（`tunnel_ip`，仅展示/筛选）与平台侧地址（`server_tunnel_url`，Agent 连接使用）：
+  心跳响应下发，Agent 自动切换并持久化到 state；清空后回退安装时的默认地址。
+- 失效保护：隧道连续 3 次心跳失败自动回退默认地址，并在 5 分钟内不再切回同一地址，避免填错隧道导致失联。
+- 隧道地址只填 IP 时按 Agent 上报的默认地址补齐协议与端口；只接受 http/https，拒绝带凭据的 URL。
+- 新增迁移 `017_host_network`、`internal/pkg/hostnet`（地址校验/解析）与前端隧道编辑表单。
 
 ### 2026-10-23 Windows Agent 支持
 

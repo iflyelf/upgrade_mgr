@@ -74,6 +74,11 @@ func runCmd() {
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = *serverURL
 	}
+	if cfg.DefaultServerURL == "" {
+		// 旧 state / 手工 run 没有该字段：把当前地址作为默认地址，
+		// 隧道切换失败或隧道被清空时可回退。
+		cfg.DefaultServerURL = cfg.ServerURL
+	}
 	if cfg.EnrollToken == "" && cfg.AgentID == "" {
 		cfg.EnrollToken = *enrollToken
 	}

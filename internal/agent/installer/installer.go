@@ -95,12 +95,15 @@ func Install(opts Options) error {
 // 字段名必须与 agentrun.Config 的 JSON 键一致（Go 默认使用导出字段名），
 // Agent 启动时由 agentrun.LoadState 读取。
 type persistedState struct {
-	ServerURL   string
-	EnrollToken string
-	AgentID     string
-	Token       string
-	Secret      string
-	StatePath   string
+	ServerURL string
+	// DefaultServerURL 记录安装时的默认地址：配置隧道后 Agent 切换连接地址，
+	// 服务端清空隧道时据此回退。
+	DefaultServerURL string
+	EnrollToken      string
+	AgentID          string
+	Token            string
+	Secret           string
+	StatePath        string
 }
 
 // writeInitialState 在服务启动前写入 ServerURL/EnrollToken。
@@ -127,7 +130,8 @@ func writeInitialState(path, serverURL, enrollToken string, force bool) error {
 		}
 	}
 	return writeStateAtomic(path, persistedState{
-		ServerURL: serverURL, EnrollToken: enrollToken, StatePath: path,
+		ServerURL: serverURL, DefaultServerURL: serverURL,
+		EnrollToken: enrollToken, StatePath: path,
 	})
 }
 

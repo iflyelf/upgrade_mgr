@@ -20,19 +20,26 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/agent/osinfo"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/selfupdate"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/svcmgr"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/netinfo"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/signer"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
 )
 
 // Config Agent 运行配置
 type Config struct {
-	ServerURL     string
-	EnrollToken   string
-	AgentID       string
-	Token         string
-	Secret        string
-	StatePath     string
-	LastHeartbeat time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
+	// ServerURL 是 Agent 当前实际连接的服务端地址：管理员为该主机配置
+	// 隧道地址后会被心跳响应覆盖。
+	ServerURL string
+	// DefaultServerURL 是安装时写入的默认地址。隧道切换后保留原值，
+	// 服务端清空隧道地址时 Agent 据此回退，避免隧道配置误删后失去连接。
+	DefaultServerURL string `json:"default_server_url,omitempty"`
+	EnrollToken      string
+	AgentID          string
+	Token            string
+	Secret           string
+	StatePath        string
+	LastHeartbeat    time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
 	// Version/Variant 是编译期注入的构建信息，不写入 state：
 	// 自升级替换二进制并重启后，新进程会自动使用新值。
 	Version string `json:"-"`
@@ -41,6 +48,8 @@ type Config struct {
 	// 网络抖动、服务端瞬时 5xx 或进程重启时，心跳会继续补报；
 	// 服务端按 cmdID + agentID 幂等落库，因此重复上报是安全的。
 	PendingReports map[string]protocol.ReportRequest `json:"pending_reports,omitempty"`
+	// ExitIP 最近一次成功探测到的本机出口 IP，用于心跳上报。
+	ExitIP string `json:"exit_ip,omitempty"`
 }
 
 // Agent 主体
@@ -53,7 +62,21 @@ type Agent struct {
 	// executed 记录本进程已执行过的指令 ID，防止至少一次投递导致重复升级。
 	// 只在验签通过、准备执行时写入；进程重启后服务端不会重新投递已派发指令。
 	executed map[string]time.Time
+	// tunnelFailures 连续多少次心跳在隧道地址上失败。不落盘：
+	// 进程重启后重新计数，避免旧值导致立即回退。达到阈值即退回默认地址，
+	// 防止隧道配置错误把 Agent 永久锁死在不可达地址上。
+	tunnelFailures int
+	// tunnelFailURL/tunnelFailAt 记录刚失败的隧道地址，短期内不再重复切换，
+	// 避免「切过去失败 → 回退 → 服务端再次下发 → 再失败」的来回抖动。
+	tunnelFailURL string
+	tunnelFailAt  time.Time
 }
+
+// tunnelRetryAfter 隧道地址失败后的重试间隔。
+//
+// 隧道恢复后最迟 5 分钟自动重新尝试；这期间服务端即使继续下发同一地址，
+// Agent 也保持默认地址，保证连接不中断。
+const tunnelRetryAfter = 5 * time.Minute
 
 const (
 	maxPendingReports      = 20
@@ -64,6 +87,11 @@ const (
 func New(cfg Config) *Agent {
 	// 容忍 --server 末尾多写斜杠，避免请求路径变成 //api/...
 	cfg.ServerURL = strings.TrimRight(cfg.ServerURL, "/")
+	if cfg.DefaultServerURL == "" {
+		// 旧 state 没有该字段：把当前地址当作默认地址，保证可回退。
+		cfg.DefaultServerURL = cfg.ServerURL
+	}
+	cfg.DefaultServerURL = strings.TrimRight(cfg.DefaultServerURL, "/")
 	if cfg.Version == "" {
 		cfg.Version = "0.1.0"
 	}
@@ -157,6 +185,7 @@ func (a *Agent) register() error {
 		IP:             a.getLocalIP(),
 		OS:             a.info.OSFamily,
 		OSVersion:      a.info.OSVersion,
+		ExitIP:         a.exitIP(),
 		Arch:           a.info.Arch,
 		Kernel:         a.info.Kernel,
 		Supervisor:     a.info.Init,
@@ -180,16 +209,31 @@ func (a *Agent) register() error {
 
 func (a *Agent) heartbeat() {
 	req := protocol.HeartbeatRequest{
-		AgentID:        a.cfg.AgentID,
-		Busy:           false,
-		Status:         "online",
-		BuildVersion:   a.cfg.Version,
-		BuildHash:      a.buildHash,
-		BuildVariant:   a.cfg.Variant,
-		SignatureModes: protocol.SupportedSignatureModes(),
-		Capabilities:   protocol.SupportedCapabilities(),
+		AgentID:               a.cfg.AgentID,
+		Busy:                  false,
+		Status:                "online",
+		ExitIP:                a.exitIP(),
+		AgentServerURL:        a.cfg.ServerURL,
+		AgentDefaultServerURL: a.cfg.DefaultServerURL,
+		BuildVersion:          a.cfg.Version,
+		BuildHash:             a.buildHash,
+		BuildVariant:          a.cfg.Variant,
+		SignatureModes:        protocol.SupportedSignatureModes(),
+		Capabilities:          protocol.SupportedCapabilities(),
 	}
-	_ = a.postJSON("/api/agent/heartbeat", req, nil)
+	var resp protocol.HeartbeatResponse
+	if err := a.postJSON("/api/agent/heartbeat", req, &resp); err != nil {
+		log.Printf("⚠️ 心跳失败: %v", err)
+		a.handleTunnelFailure()
+	} else if a.applyServerURL(resp.ServerURL) {
+		// 隧道地址变化（含被服务端清空后回退默认地址）：立即落盘，
+		// 后续心跳/轮询/下载都使用新地址。
+		a.cfg.LastHeartbeat = time.Now()
+		if err := a.saveState(); err != nil {
+			log.Printf("⚠️ 保存服务端地址失败: %v", err)
+		}
+		return
+	}
 	a.cfg.LastHeartbeat = time.Now()
 	if err := a.saveState(); err != nil {
 		log.Printf("⚠️ 保存心跳状态失败: %v", err)
@@ -666,4 +710,75 @@ func (a *Agent) authHeader() string {
 		return ""
 	}
 	return "Bearer " + a.cfg.AgentID + ":" + a.cfg.Token
+}
+
+// exitIP 返回本机出口 IP（按访问服务端的路由选择网卡）。
+//
+// 探测失败时沿用上一次成功的值，避免多网卡主机在路由抖动时页面上地址反复清空。
+func (a *Agent) exitIP() string {
+	if ip := netinfo.ExitIPFromServerURL(a.cfg.ServerURL); ip != "" {
+		a.cfg.ExitIP = ip
+	}
+	return a.cfg.ExitIP
+}
+
+// handleTunnelFailure 在隧道地址连续不可达时回退到默认地址。
+//
+// 场景：管理员填了错误的隧道地址 → Agent 切过去后连不上服务端，
+// 也就收不到「清空隧道」的指令。连续 3 次（约 90 秒）失败即自动回退，
+// 回退后若服务端仍要求隧道地址，会再次切换，从而形成自愈循环。
+func (a *Agent) handleTunnelFailure() {
+	if a.cfg.ServerURL == a.cfg.DefaultServerURL || a.cfg.DefaultServerURL == "" {
+		a.tunnelFailures = 0
+		return
+	}
+	a.tunnelFailures++
+	if a.tunnelFailures < 3 {
+		return
+	}
+	log.Printf("⚠️ 隧道地址连续 %d 次心跳失败，回退默认地址 %s", a.tunnelFailures, a.cfg.DefaultServerURL)
+	a.tunnelFailURL = a.cfg.ServerURL
+	a.tunnelFailAt = time.Now()
+	a.cfg.ServerURL = a.cfg.DefaultServerURL
+	a.tunnelFailures = 0
+	if err := a.saveState(); err != nil {
+		log.Printf("⚠️ 保存回退地址失败: %v", err)
+	}
+}
+
+// applyServerURL 应用服务端下发的隧道地址，返回是否有变化。
+//
+// 目标地址：
+//   - 响应为空：回退到安装时的默认地址（清空隧道配置后自动恢复）；
+//   - 响应为「IP」或「IP:端口」：沿用默认地址的协议，按需补默认端口；
+//   - 响应为完整 URL：直接使用。
+func (a *Agent) applyServerURL(raw string) bool {
+	next := a.resolveServerURL(raw)
+	if next == "" || next == a.cfg.ServerURL {
+		return false
+	}
+	// 刚失败过的隧道地址在冷却期内不再重试，避免连接来回抖动。
+	if next == a.tunnelFailURL && time.Since(a.tunnelFailAt) < tunnelRetryAfter {
+		return false
+	}
+	log.Printf("🔗 切换服务端地址: %s -> %s", a.cfg.ServerURL, next)
+	a.cfg.ServerURL = next
+	a.tunnelFailures = 0
+	return true
+}
+
+// resolveServerURL 把服务端下发的隧道地址规范成完整的 http(s) URL。
+func (a *Agent) resolveServerURL(raw string) string {
+	fallback := a.cfg.DefaultServerURL
+	if fallback == "" {
+		fallback = a.cfg.ServerURL
+	}
+	if strings.TrimSpace(raw) == "" {
+		return strings.TrimRight(fallback, "/")
+	}
+	next := hostnet.ResolveServerURL(raw, fallback)
+	if next == "" {
+		log.Printf("⚠️ 忽略非法的隧道地址: %q", raw)
+	}
+	return next
 }
