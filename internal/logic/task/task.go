@@ -317,11 +317,15 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 	if kind == "" {
 		kind = KindUpgrade
 	}
+	var compName string
 	if kind == KindCommand {
 		if !isPrivilegedActor(req.actor) {
 			return nil, fmt.Errorf("命令任务仅管理员可预览")
 		}
-	} else if kind == KindUpgrade && req.ComponentID != 0 {
+	} else if kind == KindUpgrade {
+		if req.ComponentID == 0 {
+			return nil, fmt.Errorf("component_id 必填")
+		}
 		comp, err := s.compRepo.Get(ctx, sc, req.ComponentID)
 		if err != nil {
 			return nil, err
@@ -329,11 +333,18 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 		if err := s.checkDeploy(ctx, req.actor, comp.ID, comp.Name); err != nil {
 			return nil, err
 		}
+		compName = comp.Name
 	}
 
 	hosts, err := s.matchHosts(ctx, sc, req.Selector)
 	if err != nil {
 		return nil, err
+	}
+	// 与创建一致：预览也不能越过团队授权的主机分组范围。
+	if kind == KindUpgrade && compName != "" {
+		if err := s.checkHostGroups(ctx, req.actor, compName, hosts); err != nil {
+			return nil, err
+		}
 	}
 	batches := splitBatches(len(hosts), req.Strategy)
 	sample := []string{}
