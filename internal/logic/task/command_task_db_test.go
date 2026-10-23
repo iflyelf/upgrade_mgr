@@ -112,7 +112,7 @@ func TestCreateCommandTask(t *testing.T) {
 	}
 	o := NewOrchestrator(svc)
 	if err := o.advance(ctx, taskID, 0, "command",
-		Strategy{Mode: "count", BatchSize: 10, AutoPromote: true}, 1, KindCommand, raw); err != nil {
+		Strategy{Mode: "count", BatchSize: 10, AutoPromote: true}, 1, KindCommand, raw, "running"); err != nil {
 		t.Fatalf("推进任务失败: %v", err)
 	}
 

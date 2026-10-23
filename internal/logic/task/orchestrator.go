@@ -74,9 +74,11 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		}
 	}
 
+	// 同时扫描 paused：auto_promote=false 时最后一批完成后任务是 paused，
+	// 若不扫描就永远不会进入 finishTask，页面会一直显示「已暂停」。
 	rows, err := o.svc.db.QueryContext(ctx,
-		`SELECT id, COALESCE(component_id,0), version, strategy, COALESCE(tenant_id,1), kind, command
-		 FROM upgrade_tasks WHERE status='running'`)
+		`SELECT id, COALESCE(component_id,0), version, strategy, COALESCE(tenant_id,1), kind, command, status
+		 FROM upgrade_tasks WHERE status IN ('running','paused')`)
 	if err != nil {
 		return
 	}
@@ -89,11 +91,12 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		tenantID int64
 		kind     string
 		command  []byte
+		status   string
 	}
 	var tasks []running
 	for rows.Next() {
 		var r running
-		if err := rows.Scan(&r.id, &r.compID, &r.version, &r.strategy, &r.tenantID, &r.kind, &r.command); err == nil {
+		if err := rows.Scan(&r.id, &r.compID, &r.version, &r.strategy, &r.tenantID, &r.kind, &r.command, &r.status); err == nil {
 			tasks = append(tasks, r)
 		}
 	}
@@ -108,26 +111,34 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	for _, t := range tasks {
 		var st Strategy
 		_ = json.Unmarshal(t.strategy, &st)
-		if err := o.advance(ctx, t.id, t.compID, t.version, st, t.tenantID, t.kind, t.command); err != nil {
+		if err := o.advance(ctx, t.id, t.compID, t.version, st, t.tenantID, t.kind, t.command, t.status); err != nil {
 			log.Printf("[orchestrator] 任务 %d 推进出错: %v", t.id, err)
 		}
 	}
 }
 
 // advance 推进单个任务：评估当前批次，必要时下发下一批或终结任务。
-func (o *Orchestrator) advance(ctx context.Context, taskID, compID int64, version string, st Strategy, tenantID int64, kind string, command []byte) error {
+//
+// taskStatus 为 running / paused。paused 任务不会被自动下发或自动推进，
+// 但「所有批次都已结束」时会正常终结，避免任务永远停在「已暂停」。
+func (o *Orchestrator) advance(ctx context.Context, taskID, compID int64, version string, st Strategy, tenantID int64, kind string, command []byte, taskStatus string) error {
 	// 找到当前处理中的批次（第一个非 success 且非 skipped 的批次）
 	batchIdx, batchStatus, err := o.currentBatch(ctx, taskID)
 	if err != nil {
 		return err
 	}
 	if batchIdx < 0 {
-		// 无剩余批次 → 任务完成
+		// 无剩余批次 → 任务完成（paused 也只差最后落终态）
 		return o.finishTask(ctx, taskID, kind)
 	}
+	paused := taskStatus == "paused"
 
 	switch batchStatus {
 	case "pending":
+		if paused {
+			// 人工暂停或等待人工推进：不下发，等 Promote/Start 恢复 running。
+			return nil
+		}
 		// 下发该批次指令
 		return o.dispatchBatch(ctx, taskID, compID, version, batchIdx, tenantID, kind, command)
 	case "running":
@@ -145,37 +156,57 @@ func (o *Orchestrator) advance(ctx context.Context, taskID, compID int64, versio
 		if total > 0 {
 			failRate = float64(failed) / float64(total) * 100
 		}
+		lastBatch := !o.hasPendingBatchAfter(ctx, taskID, batchIdx)
 		if failRate > threshold {
-			log.Printf("[orchestrator] 任务 %d 批次 %d 失败率 %.0f%% 超阈值 %.0f%%，暂停",
+			log.Printf("[orchestrator] 任务 %d 批次 %d 失败率 %.0f%% 超阈值 %.0f%%",
 				taskID, batchIdx, failRate, threshold)
-			if err := o.completeBatch(ctx, taskID, batchIdx, "failed", st.AutoRollback, true); err != nil {
+			// 已暂停的任务不再改状态；运行中的按策略暂停等待人工推进。
+			// 最后一批没有可推进的后续批次，直接终结，不必再置 paused。
+			if err := o.completeBatch(ctx, taskID, batchIdx, "failed", st.AutoRollback, !paused && !lastBatch); err != nil {
 				return err
 			}
 			if st.AutoRollback {
 				log.Printf("[orchestrator] 任务 %d 批次 %d 已触发回滚标记", taskID, batchIdx)
 			}
-			return nil
-		}
-		// 批次通过
-		if !st.AutoPromote {
-			// 需人工推进：批次通过和任务暂停必须原子完成，避免滚动重启后
-			// 误把下一批当成本批自动推进。
-			if err := o.completeBatch(ctx, taskID, batchIdx, "success", false, true); err != nil {
-				return err
+			if lastBatch {
+				// 没有后续批次可推进，继续停在 paused 会让人误以为「还在等操作」，
+				// 直接按逐机结果终结（有失败即 failed）。
+				return o.finishTask(ctx, taskID, kind)
 			}
-			log.Printf("[orchestrator] 任务 %d 批次 %d 通过，等待人工推进", taskID, batchIdx)
 			return nil
 		}
-		if err := o.completeBatch(ctx, taskID, batchIdx, "success", false, false); err != nil {
+		// 批次通过：只有运行中且开启 auto_promote 才继续自动推进。
+		// 最后一批直接终结，不再置 paused（否则页面会瞬时显示「已暂停」）。
+		autoAdvance := st.AutoPromote && !paused
+		if err := o.completeBatch(ctx, taskID, batchIdx, "success", false, !autoAdvance && !lastBatch); err != nil {
 			return err
 		}
-		// 自动推进：健康观察窗口
-		if wait, _ := time.ParseDuration(st.HealthWait); wait > 0 {
-			time.Sleep(0) // 观察窗口由批次执行耗时自然覆盖，避免阻塞 tick
+		if lastBatch {
+			// 最后一批：无论 auto_promote / paused 都应终结，否则任务会一直显示「已暂停」。
+			return o.finishTask(ctx, taskID, kind)
 		}
-		return nil // 下个 tick 处理下一批
+		if autoAdvance {
+			log.Printf("[orchestrator] 任务 %d 批次 %d 通过，自动推进下一批", taskID, batchIdx)
+		} else {
+			log.Printf("[orchestrator] 任务 %d 批次 %d 通过，等待人工推进", taskID, batchIdx)
+		}
+		return nil
 	}
 	return nil
+}
+
+// hasPendingBatchAfter 判断指定批次之后是否还有待下发的批次。
+//
+// failed 批次不算「待下发」：失败后要么由人工 Promote 跳过，
+// 要么（最后一批）直接终结任务。
+func (o *Orchestrator) hasPendingBatchAfter(ctx context.Context, taskID int64, batchIdx int) bool {
+	var n int
+	if err := o.svc.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_batches WHERE task_id=$1 AND batch_index>$2 AND status='pending'`,
+		taskID, batchIdx).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
 }
 
 // currentBatch 返回当前待处理批次索引与状态；全部完成返回 -1。
@@ -486,8 +517,11 @@ func (o *Orchestrator) finishTask(ctx context.Context, taskID int64, kind string
 	if failed > 0 || (kind == KindCommand && total > 0 && success == 0) {
 		status = "failed"
 	}
+	// 允许 paused：auto_promote=false 的末批完成后任务是 paused，
+	// 若不放开这里，任务会永远停在「已暂停」而实际已经全部完成。
 	_, err := o.svc.db.ExecContext(ctx,
-		`UPDATE upgrade_tasks SET status=$2, updated_at=NOW() WHERE id=$1 AND status='running'`, taskID, status)
+		`UPDATE upgrade_tasks SET status=$2, updated_at=NOW()
+		 WHERE id=$1 AND status IN ('running','paused')`, taskID, status)
 	return err
 }
 

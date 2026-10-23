@@ -1959,6 +1959,19 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 修复任务完成后仍显示「已暂停」
+
+- 根因：`auto_promote=false` 时最后一批完成后任务被置为 `paused`，而编排器只扫描
+  `status='running'`，永远不会进入 `finishTask`，页面因此长期显示「已暂停」，
+  实际上所有批次都已成功。
+- 编排器改为同时扫描 `running` 与 `paused`；`paused` 任务不下发、不自动推进，
+  但「所有批次已结束」时正常终结。
+- 最后一批不再置 `paused`，直接按逐机结果终结（有失败即 `failed`），
+  避免页面出现「已暂停」闪现或残留。
+- `finishTask` 的状态条件放开到 `running|paused`；`advance` 增加 `taskStatus` 参数，
+  暂停任务不会被自动派发下一批。
+- 新增集成测试：暂停任务在全批次完成后终结、暂停任务不自动下发。
+
 ### 2026-10-23 Windows 接入命令补充网络失败提示
 
 - `buildWindowsInstallCommand` 下载步骤改为单行 `try/catch`：失败时打印真实错误
