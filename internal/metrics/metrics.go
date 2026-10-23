@@ -78,6 +78,8 @@ var (
 
 	// 外部文件代缓存指标：观察公网/内网依赖稳定性。
 	//
+	//   result=local      命中管理员上传的离线文件（未访问上游）
+	//   result=local_miss local=1 探测未命中（老系统快速失败）
 	//   result=cache_hit 命中本地缓存（未访问上游）
 	//   result=fresh     未命中缓存，本次成功下载
 	//   result=error     下载失败（上游不可达 / 校验失败 / 被 SSRF 策略拒绝）

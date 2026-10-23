@@ -187,6 +187,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 - 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。
 - 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl。
 - 平台也无法出网（控制台请求 GitHub 502）时：在「外部文件」为 windows-exporter-`<arch>` 点「上传离线文件」，脚本会自动优先从平台获取；exe 与脚本都可离线上传。
+- 2008 R2 上脚本只探测平台「本地/缓存」接口（?local=1），未上传时几秒内报错并提示上传，不会等待平台现场下载；平台能出网时可先在外部文件页「刷新缓存」预下载。
 - 低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\LocalService"（或域账户 + -ServicePassword）。
 - 更新示例先备份 windows_exporter.exe.bak，启动失败自动回滚；卸载示例不带 health/version 检查。
 
@@ -316,6 +317,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<console
 - PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites .ps1 to UTF-8 BOM + CRLF to avoid encoding issues.
 - On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl.
 - If the console also cannot reach GitHub (502), upload the exe under External files → windows-exporter-`<arch>` → Upload offline file; the script then prefers the platform copy. Both exe and scripts can be uploaded offline.
+- On 2008 R2 the script only probes the platform local/cache endpoint (?local=1); if nothing is uploaded it fails within seconds with an upload hint instead of waiting for the console to fetch from GitHub. If the console has outbound access, use Refresh cache beforehand to pre-download.
 - Low privilege: install.ps1 -ServiceAccount "NT AUTHORITY\LocalService" (or a domain account with -ServicePassword).
 - Update backs up windows_exporter.exe.bak and rolls back on startup failure; uninstall omits health/version checks.
 
@@ -1244,9 +1246,11 @@ Server 2008 R2 的 PowerShell 2.0/CLR 2.0 不支持 TLS 1.2，无法直连 GitHu
 1. 在一台可上网的机器下载 `windows_exporter-amd64.exe`（或 `arm64`）；
 2. 控制台 →「外部文件」→ 找到 `windows-exporter-amd64`（或 `windows-exporter-arm64`）
    → 点「上传离线文件」，选择下载好的 exe；
-3. 直接重跑组件安装/任务。`install.ps1` 在不支持 TLS 1.2 时会优先请求
-   `http://<控制台>/api/external/binary/windows-exporter-amd64`，平台直接返回本地文件，
-   **不需要平台出网**；
+3. 直接重跑组件安装/任务。`install.ps1` 在不支持 TLS 1.2 时先请求
+   `http://<控制台>/api/external/binary/windows-exporter-amd64?local=1`：
+   - 已上传：立即返回本地文件，**不需要平台出网**；
+   - 未上传：几秒内返回 404，脚本报错并提示上传，不会再等平台现场下载 GitHub；
+   - 也可先在外部文件页点「刷新缓存」让平台预下载（平台能出网时），之后 `?local=1` 直接命中缓存。
 4. 如需离线 `install.ps1` 本身，可把脚本上传到 `windows-exporter-install.ps1` 同名条目，
    或继续作为组件制品上传。
 
@@ -2347,8 +2351,9 @@ MIT © iflyelf
   文件保存到 `<agent_binary_dir>/.external-local/`；`/api/external/binary/{name}`
   **优先返回本地文件**，平台完全不需要出网。外部文件页新增「上传离线文件 / 清除离线文件」，
   列表展示「本地离线」大小。
-- `install.ps1`：不支持 TLS 1.2 时优先从平台地址下载；失败提示明确引导上传离线 exe，
-  并避免重复尝试直连 GitHub。
+- `install.ps1`：不支持 TLS 1.2 时只请求平台 `?local=1`（本地/缓存，不触发上游下载）；
+  未上传时快速失败并提示上传，避免 WebClient 约 100 秒超时；直连仅在有 TLS 1.2 时尝试。
+- `/api/external/binary/{name}?local=1`：只读本地/缓存，绝不触发上游下载。
 - 新增单测：离线上传/优先下载/删除、HTML 伪脚本拒绝、默认重定向域名、代理回退。
 
 ### 2026-10-24 安全与运维补强（审计 / 多租户 / 索引 / 探针）

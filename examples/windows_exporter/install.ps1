@@ -234,6 +234,34 @@ function Test-DownloadedFile([string]$Path) {
     return $true
 }
 
+function Save-UrlToFile([string]$Url, [string]$OutFile, [int]$TimeoutMs) {
+    # 使用 HttpWebRequest 显式设置超时（WebClient 默认约 100 秒，平台代下载可能更久）。
+    $req = [System.Net.WebRequest]::Create($Url)
+    $req.Method = 'GET'
+    $req.UserAgent = 'upgrade-agent/windows_exporter-installer'
+    if ($req -is [System.Net.HttpWebRequest]) {
+        $req.Timeout = $TimeoutMs
+        $req.ReadWriteTimeout = $TimeoutMs
+    }
+    $resp = $null
+    $stream = $null
+    $fs = $null
+    try {
+        $resp = $req.GetResponse()
+        $stream = $resp.GetResponseStream()
+        $fs = [System.IO.File]::Create($OutFile)
+        # PS 2.0 / CLR 2.0 没有 Stream.CopyTo，手动分块复制。
+        $buffer = New-Object byte[] 81920
+        while (($n = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fs.Write($buffer, 0, $n)
+        }
+    } finally {
+        if ($fs) { $fs.Close() }
+        if ($stream) { $stream.Close() }
+        if ($resp) { $resp.Close() }
+    }
+}
+
 function Download-Exporter([string]$OutFile) {
     if ($BinaryPath) {
         if (-not (Test-Path $BinaryPath)) {
@@ -259,20 +287,28 @@ function Download-Exporter([string]$OutFile) {
     if ($PlatformURL -and -not $BinaryUrl) {
         $platform = $PlatformURL.TrimEnd('/') + "/api/external/binary/windows-exporter-" + $script:ResolvedArch
     }
+    $platformLocal = ''
+    if ($platform) { $platformLocal = $platform + '?local=1' }
 
-    # 组装候选地址：不支持 TLS 1.2 时优先平台（平台可预上传离线文件，且可用 HTTP）。
     $attempts = @()
     if ($BinaryUrl) {
-        $attempts += @{ Label = '指定地址'; Url = $primary }
-    } else {
-        if ($platform -and -not $tls12Supported) {
-            $attempts += @{ Label = '平台离线缓存'; Url = $platform }
+        $attempts += @{ Label = '指定地址'; Url = $primary; Timeout = 600000 }
+    } elseif ($script:BaseUrl) {
+        # 自定义内网镜像：优先使用，通常为 HTTP。
+        $attempts += @{ Label = '内网镜像'; Url = $primary; Timeout = 600000 }
+        if ($platformLocal) {
+            $attempts += @{ Label = '平台离线缓存'; Url = $platformLocal; Timeout = 30000 }
         }
-        $attempts += @{ Label = '直连/代理'; Url = $primary }
-        if ($platform) {
-            $hasPlatform = $false
-            foreach ($a in $attempts) { if ($a.Url -eq $platform) { $hasPlatform = $true } }
-            if (-not $hasPlatform) { $attempts += @{ Label = '平台离线缓存'; Url = $platform } }
+    } else {
+        if ($platformLocal) {
+            # local=1 只读平台本地/缓存，不会触发平台现场下载，可快速失败。
+            $attempts += @{ Label = '平台离线缓存'; Url = $platformLocal; Timeout = 30000 }
+        }
+        if ($tls12Supported) {
+            $attempts += @{ Label = '直连/代理'; Url = $primary; Timeout = 600000 }
+            if ($platform) {
+                $attempts += @{ Label = '平台代下载'; Url = $platform; Timeout = 600000 }
+            }
         }
     }
 
@@ -281,9 +317,7 @@ function Download-Exporter([string]$OutFile) {
         Write-Step "下载（$($a.Label)）$($a.Url)"
         if (Test-Path $OutFile) { Remove-Item -Force $OutFile -ErrorAction SilentlyContinue }
         try {
-            $wc = New-Object System.Net.WebClient
-            $wc.Headers.Add('User-Agent', 'upgrade-agent/windows_exporter-installer')
-            $wc.DownloadFile($a.Url, $OutFile)
+            Save-UrlToFile $a.Url $OutFile $a.Timeout
             if (-not (Test-DownloadedFile $OutFile)) {
                 throw '下载文件不存在或过小（可能是错误页面）'
             }
@@ -296,9 +330,15 @@ function Download-Exporter([string]$OutFile) {
 
     Remove-Item -Force $OutFile -ErrorAction SilentlyContinue
     $msg = "下载失败：`n" + ($errors -join "`n")
-    $msg += "`n请在控制台「外部文件」为 windows-exporter-$($script:ResolvedArch) 上传离线 exe" +
-            "（上传后平台直接返回本地文件，无需平台出网），" +
-            "或改用 -BinaryPath 指定本地文件 / -BinaryUrl 指定内网 HTTP 地址。"
+    if (-not $tls12Supported -and $PlatformURL) {
+        $msg += "`n平台未找到离线文件（?local=1 未命中）。请在控制台「外部文件」为 " +
+                "windows-exporter-$($script:ResolvedArch) 上传离线 exe；上传后平台直接返回本地文件，" +
+                "无需平台出网。若平台本身可出网，也可先点该行「刷新缓存」让平台预下载后再重试。" +
+                "还可用 -BinaryPath 指定本地文件 / -BinaryUrl 指定内网 HTTP 地址。"
+    } else {
+        $msg += "`n请在控制台「外部文件」为 windows-exporter-$($script:ResolvedArch) 上传离线 exe，" +
+                "或改用 -BinaryPath / -BinaryUrl。"
+    }
     Fail $msg 1
 }
 

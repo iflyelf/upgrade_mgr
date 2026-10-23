@@ -45,6 +45,15 @@ func TestExternalBinaryOfflineUpload(t *testing.T) {
 	}
 	sc := &svc.ServiceContext{DB: db, Config: cfg}
 
+	// local=1 且未上传：立即 404，绝不触发上游下载。
+	req0 := httptest.NewRequest("GET", "/api/external/binary/offline-tool?local=1", nil)
+	req0.SetPathValue("name", "offline-tool")
+	rec0 := httptest.NewRecorder()
+	ExternalBinaryDownload(sc)(rec0, req0)
+	if rec0.Code != http.StatusNotFound {
+		t.Fatalf("local=1 未上传应 404，实际 %d: %s", rec0.Code, rec0.Body.String())
+	}
+
 	payload := []byte("MZoffline-binary-content")
 	rec := uploadMultipart(t, UploadExternalBinary(sc), "offline-tool", "tool.exe", payload)
 	if rec.Code != http.StatusOK {
@@ -64,7 +73,7 @@ func TestExternalBinaryOfflineUpload(t *testing.T) {
 	}
 
 	// 下载：应直接返回本地文件，不访问上游。
-	req := httptest.NewRequest("GET", "/api/external/binary/offline-tool", nil)
+	req := httptest.NewRequest("GET", "/api/external/binary/offline-tool?local=1", nil)
 	req.SetPathValue("name", "offline-tool")
 	rec = httptest.NewRecorder()
 	ExternalBinaryDownload(sc)(rec, req)
