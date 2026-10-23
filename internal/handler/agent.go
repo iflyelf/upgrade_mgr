@@ -466,9 +466,16 @@ func buildWindowsInstallCommand(safeURL, arch, token string, force bool) string 
 	if force {
 		args = append(args, "'--force'")
 	}
-	return "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP 'upgrade-agent.exe');\n" +
-		"(New-Object System.Net.WebClient).DownloadFile('" + psQuote(binURL) + "', (Join-Path $env:TEMP 'upgrade-agent.exe'));\n" +
-		"Start-Process -FilePath (Join-Path $env:TEMP 'upgrade-agent.exe') -ArgumentList " +
+	// 注意：psQuote 本身已包含两侧单引号，外层不能再加引号，
+	// 否则会生成 ''http://...''，PowerShell 会报「方法调用中缺少“)”」。
+	//
+	// 用变量 $exe 保存临时路径，避免长表达式在控制台换行时被截断；
+	// 每条语句独立成行，逐行粘贴也能执行。
+	return "$ErrorActionPreference = 'Stop'\n" +
+		"$exe = Join-Path $env:TEMP 'upgrade-agent.exe'\n" +
+		"Remove-Item -Force -ErrorAction SilentlyContinue $exe\n" +
+		"(New-Object System.Net.WebClient).DownloadFile(" + psQuote(binURL) + ", $exe)\n" +
+		"Start-Process -FilePath $exe -ArgumentList " +
 		strings.Join(args, ",") + " -Wait -NoNewWindow"
 }
 

@@ -199,9 +199,11 @@ systemctl status upgrade-mgr
 ```powershell
 # 控制台生成的就是下面这种形式（令牌一次性、15 分钟有效，每台机器生成一次；
 # 换行在 PowerShell 里可直接分行粘贴，也可用分号连成一行）
-Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP 'upgrade-agent.exe')
-(New-Object System.Net.WebClient).DownloadFile('http://your-server-ip:8090/api/agent/binary/windows-amd64', (Join-Path $env:TEMP 'upgrade-agent.exe'))
-Start-Process -FilePath (Join-Path $env:TEMP 'upgrade-agent.exe') -ArgumentList 'install','--server','http://your-server-ip:8090','--enroll-token','<token>' -Wait -NoNewWindow
+$ErrorActionPreference = 'Stop'
+$exe = Join-Path $env:TEMP 'upgrade-agent.exe'
+Remove-Item -Force -ErrorAction SilentlyContinue $exe
+(New-Object System.Net.WebClient).DownloadFile('http://your-server-ip:8090/api/agent/binary/windows-amd64', $exe)
+Start-Process -FilePath $exe -ArgumentList 'install','--server','http://your-server-ip:8090','--enroll-token','<token>' -Wait -NoNewWindow
 ```
 
 3. 验证：
@@ -317,9 +319,11 @@ Server 2008 R2 / 2012 / 2012 R2 / 2016 / 2019 / 2022 与 Windows 7 / 8.1 / 10 / 
 
 ```powershell
 # 控制台「接入主机」选择 Windows 后生成的命令形如：
-Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP 'upgrade-agent.exe')
-(New-Object System.Net.WebClient).DownloadFile('https://<server>/api/agent/binary/windows-amd64', (Join-Path $env:TEMP 'upgrade-agent.exe'))
-Start-Process -FilePath (Join-Path $env:TEMP 'upgrade-agent.exe') -ArgumentList 'install','--server','https://<server>','--enroll-token','<token>' -Wait -NoNewWindow
+$ErrorActionPreference = 'Stop'
+$exe = Join-Path $env:TEMP 'upgrade-agent.exe'
+Remove-Item -Force -ErrorAction SilentlyContinue $exe
+(New-Object System.Net.WebClient).DownloadFile('https://<server>/api/agent/binary/windows-amd64', $exe)
+Start-Process -FilePath $exe -ArgumentList 'install','--server','https://<server>','--enroll-token','<token>' -Wait -NoNewWindow
 ```
 
 > `install` 会写入 state、创建服务 `upgrade-agent` 并启动。重复执行会先停服务、删除并重建，
@@ -1921,6 +1925,14 @@ MIT © iflyelf
 - 备用地址轮换不依赖服务端配置，避免「服务端推送错误覆盖地址」导致主机失联。
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
+
+### 2026-10-23 修复 Windows 接入命令引号错误
+
+- 修复 `buildWindowsInstallCommand` 生成 `''http://...''`（psQuote 已带引号又外层再加）导致
+  PowerShell 报「方法调用中缺少“)”」的问题；粘贴后下载直接失败、后续 Start-Process 报文件不存在。
+- 生成命令改为 5 行独立语句，并用 `$exe` 保存临时路径：逐行粘贴、控制台自动换行都不会截断表达式。
+- 新增回归测试：断言不出现 `''`、单引号成对、关键片段完整。
+- README 中 Windows 接入命令同步更新。
 
 ### 2026-10-23 windows_exporter 示例与 diagnose
 
