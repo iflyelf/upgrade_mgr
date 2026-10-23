@@ -11,10 +11,13 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 )
 
 // Config 应用配置（各段指针语义：svc 持有 *Config，页面设置直接写回即时生效）。
@@ -55,6 +58,24 @@ type ServerConfig struct {
 	MetricsToken string `yaml:"metrics_token"`
 	// AgentBinaryDir Agent 二进制目录，供 GET /api/agent/binary/{name} 下载（默认 ./dist）。
 	AgentBinaryDir string `yaml:"agent_binary_dir"`
+	// ExternalBinaries 允许控制台代为下载并缓存的外部文件白名单。
+	//
+	// 键是 /api/external/binary/{name} 中的 name，值是上游完整 URL；
+	// 前缀 "script:" 表示按文本脚本处理（不做 MZ 校验），否则按可执行文件处理。
+	// 典型用途：老系统（Windows Server 2008 R2 + PowerShell 2.0）不支持 TLS 1.2，
+	// 无法直连 GitHub，由支持 TLS 1.2 的控制台代下载后通过 HTTP 提供给主机。
+	//
+	// 例：
+	//   external_binaries:
+	//     windows-exporter-amd64: https://.../windows_exporter-amd64.exe
+	//     windows-exporter-install.ps1: script:https://.../install.ps1
+	ExternalBinaries map[string]string `yaml:"external_binaries"`
+	// ExternalBinaryHosts 允许代下载的上游域名白名单（逗号分隔，可含端口）。
+	// 留空时使用内置默认（github.com / raw.githubusercontent.com / proxy.xiaonuo.live），
+	// 防止配置被改成内网地址形成 SSRF。
+	ExternalBinaryHosts []string `yaml:"external_binary_hosts"`
+	// ExternalBinaryTTL 缓存有效期（如 24h）；<=0 使用默认 24h。
+	ExternalBinaryTTL string `yaml:"external_binary_ttl"`
 	// ---- 可选 HTTPS / 双向 TLS ----
 	//
 	// 留空 TLSCert/TLSKey 时以 HTTP 提供服务（与历史行为一致）。
@@ -208,6 +229,13 @@ func Load(path string) (*Config, error) {
 	c.applyEnv()
 	// 统一去掉结尾斜杠，避免拼接出 //api/... 导致 404。
 	c.Server.ExternalURL = strings.TrimRight(c.Server.ExternalURL, "/")
+	// 启动时校验白名单：配置写错（非法名称/地址、非白名单域名）直接报错，
+	// 避免运行期才发现下载全部失败。
+	if len(c.Server.ExternalBinaries) > 0 {
+		if err := extbin.ValidateConfig(c.Server.ExternalBinaries, c.Server.ExternalBinaryHosts); err != nil {
+			return nil, fmt.Errorf("external_binaries 配置错误: %w", err)
+		}
+	}
 	return c, nil
 }
 
@@ -230,6 +258,21 @@ func (c *Config) applyEnv() {
 	if c.Server.AgentBinaryDir == "" {
 		c.Server.AgentBinaryDir = "./dist"
 	}
+	// 白名单也可用环境变量提供，格式 name=url,name2=script:url2。
+	if v := os.Getenv("EXTERNAL_BINARIES"); v != "" {
+		if m, err := ParseExternalBinaries(v); err == nil {
+			if c.Server.ExternalBinaries == nil {
+				c.Server.ExternalBinaries = map[string]string{}
+			}
+			for k, u := range m {
+				c.Server.ExternalBinaries[k] = u
+			}
+		}
+	}
+	if v := os.Getenv("EXTERNAL_BINARY_HOSTS"); v != "" {
+		c.Server.ExternalBinaryHosts = splitTrim(v)
+	}
+	setStr(&c.Server.ExternalBinaryTTL, "EXTERNAL_BINARY_TTL")
 
 	setStr(&c.Database.DSN, "DATABASE_URL")
 	setStr(&c.Database.Host, "DB_HOST")
@@ -348,6 +391,43 @@ func setBool(dst *bool, env string) {
 		*dst = v == "true" || v == "1"
 	}
 }
+
+// ParseExternalBinaries 解析 "name=url,name2=script:url2" 形式的白名单。
+//
+// 用于环境变量 EXTERNAL_BINARIES；name 只允许字母数字、点、下划线、短横线。
+func ParseExternalBinaries(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("白名单项 %q 缺少 =", pair)
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if !validExternalName(k) {
+			return nil, fmt.Errorf("白名单名称 %q 非法（仅允许字母数字、点、下划线、短横线）", k)
+		}
+		if v == "" {
+			return nil, fmt.Errorf("白名单 %s 缺少地址", k)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// validExternalName 校验白名单名称，避免路径分隔符与控制字符。
+func validExternalName(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	return regexpExternalName.MatchString(s)
+}
+
+var regexpExternalName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func splitTrim(s string) []string {
 	parts := strings.Split(s, ",")
