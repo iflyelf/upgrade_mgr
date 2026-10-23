@@ -1959,6 +1959,24 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 任务权限校验、主机分组范围与 FlyIAM 用户只读
+
+- **任务权限校验（deploy）**：`task.Service` 增加 `SetAuthorizer`，由 `org.DeployAuthorizer`
+  注入。规则：admin/superadmin 放行；其他用户必须在包含该组件的服务组上拥有 `deploy`
+  权限，否则创建任务直接返回 403 语义错误（提示去「人员组织 → 团队」授权）。
+  `CreateRequest.actor` 只能由 handler 注入，**不从 JSON 读取**，无法伪造身份。
+- **主机分组范围**：迁移 `021` 为 `team_group_permissions` 增加 `host_groups TEXT[]`。
+  授权可按 `hosts.app_code` / `biz_group` 限定主机；创建任务时逐台校验，
+  超出范围的主机在错误信息中列出（最多 10 台）。空数组或 `*` 表示不限（保持旧行为）。
+- `org.EffectivePermissionsWithHosts` 同时返回「组件权限」与「主机分组范围」，
+  多团队授权自动取并集。
+- **FlyIAM 用户只读展示**：`internal/pkg/flyiam` 增加 `FetchUsers`
+  （`/api/users/export`），接口 `GET /api/flyiam/users`（管理员，只读）；
+  前端「用户字段」页增加「查看 FlyIAM 用户」。用户数据仍以 Casdoor/FlyIAM 为准，本系统不写回。
+- 前端授权表单新增「主机分组范围」输入，授权列表显示该列。
+- 新增单测：任务授权注入与透传、主机分组范围（空/`*`/具体值/错误透传）、
+  `actor` 不可由 JSON 注入、权限并集、FlyIAM 用户拉取。
+
 ### 2026-10-23 人员组织、字段自定义与 FlyIAM 集成
 
 **人员组织（与 consul_mgr 对齐，照搬服务组模型）**

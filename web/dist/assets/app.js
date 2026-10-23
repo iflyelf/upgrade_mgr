@@ -1772,7 +1772,21 @@
                 })
                 .catch(function (e) { alert('同步失败: ' + e.message); });
             }
-          }, ['从 FlyIAM 同步字段'])
+          }, ['从 FlyIAM 同步字段']),
+          h('button', {
+            class: 'btn ghost', onclick: function () {
+              api('/api/flyiam/users')
+                .then(function (r) {
+                  var lines = (r.users || []).slice(0, 30).map(function (u) {
+                    return (u.username || '-') + ' / ' + (u.displayName || '-') +
+                      (u.email ? ' / ' + u.email : '');
+                  });
+                  alert('FlyIAM 用户共 ' + r.total + ' 人（只读）：\n\n' +
+                    lines.join('\n') + (r.total > 30 ? '\n…' : ''));
+                })
+                .catch(function (e) { alert('读取 FlyIAM 用户失败: ' + e.message); });
+            }
+          }, ['查看 FlyIAM 用户'])
         ]),
         simpleTable(['键', '名称', '类型', '列表显示', '表单显示', '来源', '操作'], defs, function (d, i) {
           return rows[i];
@@ -1956,6 +1970,7 @@
         (p.permissions || []).join(', ') || '-',
         (p.role_ids || []).join(', ') || '-',
         (p.services || []).join(', ') || '-',
+        (p.host_groups || []).join(', ') || '不限',
         h('button', {
           class: 'btn danger small', onclick: function () {
             api('/api/teams/' + teamID + '/permissions/' + p.group_id, { method: 'DELETE' })
@@ -1987,7 +2002,8 @@
       h('h3', {}, ['成员']),
       simpleTable(['用户名', '操作'], members, function (m, i) { return memberRows[i]; }),
       h('h3', {}, ['服务组授权']),
-      simpleTable(['服务组', '直接权限', '引用角色', '授权服务', '操作'], perms, function (p, i) { return permRows[i]; }),
+      simpleTable(['服务组', '直接权限', '引用角色', '授权服务', '主机分组', '操作'], perms,
+        function (p, i) { return permRows[i]; }),
       teamPermForm(o, teamID)
     ]);
   }
@@ -2000,6 +2016,7 @@
     var permEl = h('input', { value: 'read', placeholder: 'read,write,delete,deploy' }, []);
     var roleEl = h('input', { placeholder: '角色 ID，逗号分隔（可空）' }, []);
     var svcEl = h('input', { value: '*', placeholder: '* 表示组内全部组件' }, []);
+    var hgEl = h('input', { value: '', placeholder: 'app_code / biz_group，逗号分隔；留空不限主机' }, []);
     return h('div', { class: 'card' }, [
       h('h3', {}, ['设置授权']),
       h('div', { class: 'grid2' }, [
@@ -2010,6 +2027,7 @@
         field('引用角色', roleEl, '角色 ID，可空'),
         field('授权服务', svcEl, '* 或组件名，逗号分隔')
       ]),
+      field('主机分组范围', hgEl, '限定可操作的主机（按 app_code / biz_group 匹配，逗号分隔；留空表示不限）。超出范围的主机会拒绝创建任务。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
           class: 'btn', onclick: function () {
@@ -2023,7 +2041,8 @@
                 permissions: split(permEl.value),
                 role_ids: split(roleEl.value).map(function (x) { return parseInt(x, 10); })
                   .filter(function (x) { return !isNaN(x); }),
-                services: split(svcEl.value)
+                services: split(svcEl.value),
+                host_groups: split(hgEl.value)
               })
             }).then(function () { loadTeamMembers(teamID); })
               .catch(function (e) { alert('保存失败: ' + e.message); });

@@ -93,7 +93,7 @@ func TestRoleCRUD(t *testing.T) {
 		db.Exec(`DELETE FROM teams WHERE id=$1`, teamID)
 		db.Exec(`DELETE FROM service_groups WHERE id=$1`, groupID)
 	})
-	if err := s.SetGroupPermission(ctx, teamID, groupID, nil, []int64{id}, []string{"*"}); err != nil {
+	if err := s.SetGroupPermission(ctx, teamID, groupID, nil, []int64{id}, []string{"*"}, nil); err != nil {
 		t.Fatalf("SetGroupPermission: %v", err)
 	}
 	if err := s.DeleteRole(ctx, id); err == nil {
@@ -205,7 +205,7 @@ func TestGroupsAndPermissions(t *testing.T) {
 
 	// 授权：只给 comp1 的 read
 	if err := s.SetGroupPermission(ctx, teamID, groupID,
-		[]string{PermRead}, nil, []string{comp1}); err != nil {
+		[]string{PermRead}, nil, []string{comp1}, nil); err != nil {
 		t.Fatalf("SetGroupPermission: %v", err)
 	}
 	perms, err := s.EffectivePermissions(ctx, "alice")
@@ -225,7 +225,7 @@ func TestGroupsAndPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Exec(`DELETE FROM roles WHERE id=$1`, roleID) })
-	if err := s.SetGroupPermission(ctx, teamID, groupID, nil, []int64{roleID}, []string{"*"}); err != nil {
+	if err := s.SetGroupPermission(ctx, teamID, groupID, nil, []int64{roleID}, []string{"*"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	perms, _ = s.EffectivePermissions(ctx, "alice")
@@ -234,15 +234,103 @@ func TestGroupsAndPermissions(t *testing.T) {
 	}
 
 	// 非法角色 ID 应报错
-	if err := s.SetGroupPermission(ctx, teamID, groupID, nil, []int64{999999}, []string{"*"}); err == nil {
+	if err := s.SetGroupPermission(ctx, teamID, groupID, nil, []int64{999999}, []string{"*"}, nil); err == nil {
 		t.Fatal("无效角色 ID 应报错")
 	}
 	// 组外服务名应被过滤（不报错但不生效）
-	if err := s.SetGroupPermission(ctx, teamID, groupID, []string{PermRead}, nil, []string{"not-in-group"}); err != nil {
+	if err := s.SetGroupPermission(ctx, teamID, groupID, []string{PermRead}, nil, []string{"not-in-group"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	perms, _ = s.EffectivePermissions(ctx, "alice")
 	if perms[comp1][PermRead] {
 		t.Fatal("组外服务名的授权不应生效")
+	}
+}
+
+// TestEffectivePermissionsHostGroups 主机分组范围：空=不限，具体值取并集。
+func TestEffectivePermissionsHostGroups(t *testing.T) {
+	db := setupDB(t)
+	s := NewService(db)
+	ctx := context.Background()
+	sfx := t.Name()
+
+	var compID int64
+	var compName string
+	if err := db.QueryRow(`INSERT INTO components (name, deploy_mode) VALUES ($1,'replace') RETURNING id, name`,
+		"hg-comp-"+sfx).Scan(&compID, &compName); err != nil {
+		t.Fatalf("建组件: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM components WHERE id=$1`, compID) })
+
+	groupID, err := s.CreateGroup(ctx, "hg-grp-"+sfx, "", "", []int64{compID}, "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	teamID, err := s.CreateTeam(ctx, "hg-team-"+sfx, "", "", []string{"bob"}, "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM teams WHERE id=$1`, teamID)
+		db.Exec(`DELETE FROM service_groups WHERE id=$1`, groupID)
+	})
+
+	// 限定主机分组为 app1
+	if err := s.SetGroupPermission(ctx, teamID, groupID,
+		[]string{PermDeploy}, nil, []string{"*"}, []string{"app1"}); err != nil {
+		t.Fatal(err)
+	}
+	perms, hosts, err := s.EffectivePermissionsWithHosts(ctx, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !perms[compName][PermDeploy] {
+		t.Fatalf("应有 deploy 权限: %v", perms)
+	}
+	if !hosts[compName]["app1"] || hosts[compName]["*"] {
+		t.Fatalf("主机分组应为 app1: %v", hosts[compName])
+	}
+
+	// 改成不限（空数组）→ 归一化为 "*"
+	if err := s.SetGroupPermission(ctx, teamID, groupID,
+		[]string{PermRead}, nil, []string{"*"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, hosts, _ = s.EffectivePermissionsWithHosts(ctx, "bob")
+	if !hosts[compName]["*"] {
+		t.Fatalf("未指定主机分组应为不限（*）: %v", hosts[compName])
+	}
+}
+
+// TestEffectivePermissionsMerge 同一用户属于多个团队时权限取并集。
+func TestEffectivePermissionsMerge(t *testing.T) {
+	db := setupDB(t)
+	s := NewService(db)
+	ctx := context.Background()
+	sfx := t.Name()
+
+	var compID int64
+	var compName string
+	db.QueryRow(`INSERT INTO components (name, deploy_mode) VALUES ($1,'replace') RETURNING id, name`,
+		"mg-comp-"+sfx).Scan(&compID, &compName)
+	t.Cleanup(func() { db.Exec(`DELETE FROM components WHERE id=$1`, compID) })
+
+	groupID, _ := s.CreateGroup(ctx, "mg-grp-"+sfx, "", "", []int64{compID}, "tester")
+	t1, _ := s.CreateTeam(ctx, "mg-t1-"+sfx, "", "", []string{"carol"}, "tester")
+	t2, _ := s.CreateTeam(ctx, "mg-t2-"+sfx, "", "", []string{"carol"}, "tester")
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM teams WHERE id IN ($1,$2)`, t1, t2)
+		db.Exec(`DELETE FROM service_groups WHERE id=$1`, groupID)
+	})
+
+	s.SetGroupPermission(ctx, t1, groupID, []string{PermRead}, nil, []string{"*"}, nil)
+	s.SetGroupPermission(ctx, t2, groupID, []string{PermDeploy}, nil, []string{"*"}, nil)
+
+	perms, _, err := s.EffectivePermissionsWithHosts(ctx, "carol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !perms[compName][PermRead] || !perms[compName][PermDeploy] {
+		t.Fatalf("多团队权限应并集: %v", perms[compName])
 	}
 }

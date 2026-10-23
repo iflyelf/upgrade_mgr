@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/ipx"
@@ -62,6 +63,9 @@ type CreateRequest struct {
 	Selector    Selector             `json:"selector"`
 	Strategy    Strategy             `json:"strategy"`
 	CreatedBy   string               `json:"created_by"`
+	// actor 为内部字段：由 handler 注入当前用户，用于组件级权限校验。
+	// 不是 JSON 字段，避免被请求体伪造。
+	actor *auth.User `json:"-"`
 }
 
 // Task 任务视图。
@@ -90,6 +94,24 @@ type Service struct {
 	// reconcile 在每轮编排前回收超时指令、同步 task_hosts 终态。
 	// 由 svc 注入 agentgw.Gateway.ReconcileTasks；单元测试可不设置。
 	reconcile func(context.Context) (int, error)
+	// authorize 校验操作者是否有权对组件执行 deploy 权限。
+	//
+	// 由 handler 注入（org.Service + 操作者），为 nil 时不做限制
+	// （保持单元测试与单租户小规模部署的既有行为）。
+	authorize func(ctx context.Context, actor *auth.User, componentID int64, componentName string) error
+	// hostGroups 返回用户对组件可操作的主机分组（空/含 "*" 表示不限）。
+	// 为 nil 时不校验主机范围。
+	hostGroups func(ctx context.Context, actor *auth.User, componentName string) (map[string]bool, error)
+}
+
+// SetAuthorizer 注入组件级权限校验（由服务端启动时设置）。
+func (s *Service) SetAuthorizer(fn func(context.Context, *auth.User, int64, string) error) {
+	s.authorize = fn
+}
+
+// SetHostGroupResolver 注入主机分组范围解析（由服务端启动时设置）。
+func (s *Service) SetHostGroupResolver(fn func(context.Context, *auth.User, string) (map[string]bool, error)) {
+	s.hostGroups = fn
 }
 
 // NewService 创建任务服务。allowExecMode 为 nil 时视为禁止。
@@ -110,6 +132,54 @@ type PreviewResult struct {
 	TotalHosts int      `json:"total_hosts"`
 	Batches    []int    `json:"batches"`    // 各批次主机数
 	SampleIPs  []string `json:"sample_ips"` // 前若干个 IP 预览
+}
+
+// SetActor 注入当前操作者（供权限校验，不支持从 JSON 伪造）。
+func (r *CreateRequest) SetActor(u *auth.User) { r.actor = u }
+
+// checkDeploy 校验操作者对该组件是否有 deploy 权限。
+//
+// 规则：
+//   - 未注入 authorizer（单机小规模/测试）时放行；
+//   - superadmin / admin 直接放行（管理员本就具备全量运维权限）；
+//   - 其他用户需通过团队授权获得该组件的 deploy 权限。
+func (s *Service) checkDeploy(ctx context.Context, actor *auth.User, componentID int64, name string) error {
+	if s.authorize == nil || actor == nil {
+		return nil
+	}
+	return s.authorize(ctx, actor, componentID, name)
+}
+
+// checkHostGroups 校验目标主机是否落在授权的主机分组内。
+func (s *Service) checkHostGroups(ctx context.Context, actor *auth.User, componentName string, hosts []hostRow) error {
+	if s.hostGroups == nil || actor == nil || componentName == "" {
+		return nil
+	}
+	allowed, err := s.hostGroups(ctx, actor, componentName)
+	if err != nil {
+		return fmt.Errorf("校验主机范围失败: %w", err)
+	}
+	if len(allowed) == 0 || allowed["*"] {
+		return nil
+	}
+	var denied []string
+	for _, h := range hosts {
+		if allowed[h.appCode] || allowed[h.bizGroup] {
+			continue
+		}
+		denied = append(denied, h.ip)
+	}
+	if len(denied) == 0 {
+		return nil
+	}
+	const maxShow = 10
+	shown := denied
+	suffix := ""
+	if len(shown) > maxShow {
+		shown = shown[:maxShow]
+		suffix = " 等"
+	}
+	return fmt.Errorf("以下主机不在授权的主机分组内：%s%s", join(shown, ", "), suffix)
 }
 
 // Preview 解析目标并计算分批，不落库。
@@ -143,14 +213,21 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 	if kind != KindUpgrade && kind != KindCommand {
 		return 0, fmt.Errorf("不支持的任务类型 %q", kind)
 	}
+	var compName string
 	if kind == KindUpgrade {
 		if req.ComponentID == 0 || req.Version == "" {
 			return 0, fmt.Errorf("component_id 与 version 必填")
 		}
 		// 校验组件存在
-		if _, err := s.compRepo.Get(ctx, sc, req.ComponentID); err != nil {
+		comp, err := s.compRepo.Get(ctx, sc, req.ComponentID)
+		if err != nil {
 			return 0, err
 		}
+		// 组件级权限：无 deploy 权限的用户不能发任务。
+		if err := s.checkDeploy(ctx, req.actor, req.ComponentID, comp.Name); err != nil {
+			return 0, err
+		}
+		compName = comp.Name
 	} else {
 		// 命令任务：脚本不能为空；版本仅作展示，统一记录为 command。
 		if !s.allowExecMode() {
@@ -175,6 +252,12 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 	}
 	if len(hosts) == 0 {
 		return 0, fmt.Errorf("目标选择器未命中任何主机")
+	}
+	// 主机分组范围：团队授权可限定 app_code / biz_group，超出范围的主机拒绝下发。
+	if kind == KindUpgrade {
+		if err := s.checkHostGroups(ctx, req.actor, compName, hosts); err != nil {
+			return 0, err
+		}
 	}
 
 	selJSON, _ := json.Marshal(req.Selector)
@@ -239,6 +322,9 @@ type hostRow struct {
 	id     int64
 	ip     string
 	exitIP string
+	// appCode / bizGroup 用于团队授权的主机分组校验。
+	appCode  string
+	bizGroup string
 }
 
 // matchHosts 解析 selector：IP 段展开 ∩ 分组过滤 − 排除。
@@ -261,7 +347,8 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 		i++
 	}
 
-	q := "SELECT id, ip, COALESCE(exit_ip,'') FROM hosts WHERE " + join(where, " AND ")
+	q := "SELECT id, ip, COALESCE(exit_ip,''), COALESCE(app_code,''), COALESCE(biz_group,'') " +
+		"FROM hosts WHERE " + join(where, " AND ")
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -275,15 +362,15 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 	all := map[int64]hostRow{}
 	for rows.Next() {
 		var id int64
-		var ip, exitIP string
-		if err := rows.Scan(&id, &ip, &exitIP); err != nil {
+		var ip, exitIP, appCode, bizGroup string
+		if err := rows.Scan(&id, &ip, &exitIP, &appCode, &bizGroup); err != nil {
 			return nil, err
 		}
 		byIP[ip] = append(byIP[ip], id)
 		if exitIP != "" && exitIP != ip {
 			byIP[exitIP] = append(byIP[exitIP], id)
 		}
-		all[id] = hostRow{id: id, ip: ip, exitIP: exitIP}
+		all[id] = hostRow{id: id, ip: ip, exitIP: exitIP, appCode: appCode, bizGroup: bizGroup}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

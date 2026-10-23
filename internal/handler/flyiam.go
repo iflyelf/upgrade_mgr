@@ -165,3 +165,26 @@ func sameFieldDef(a, b fielddef.Def) bool {
 		a.Editable == b.Editable &&
 		a.SortOrder == b.SortOrder
 }
+
+// FlyIAMUsers 从 FlyIAM 读取用户列表（只读展示）。
+//
+// 用途：「人员组织 → 人员信息」可与 FlyIAM 的人员对照；本系统不写回用户数据，
+// 用户增删改仍以 Casdoor / FlyIAM 为准。
+func FlyIAMUsers(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		client := flyiamClient(s)
+		if client == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable,
+				"未配置 FlyIAM 地址与服务令牌，请先到「设置 → FlyIAM」填写")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		users, err := client.FetchUsers(ctx)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "从 FlyIAM 拉取用户失败: "+err.Error())
+			return
+		}
+		httpx.OK(w, map[string]any{"users": users, "total": len(users), "readonly": true})
+	}
+}

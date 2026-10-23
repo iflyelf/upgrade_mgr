@@ -90,6 +90,9 @@ type Group struct {
 }
 
 // GroupPermission 团队对服务组的授权。
+//
+// Services 限定可操作的组件（"*" 表示组内全部）；
+// HostGroups 限定可操作的主机业务分组（如 app_code/biz_group 值，空表示不限）。
 type GroupPermission struct {
 	ID          int64    `json:"id"`
 	TeamID      int64    `json:"team_id"`
@@ -98,6 +101,7 @@ type GroupPermission struct {
 	Permissions []string `json:"permissions"`
 	RoleIDs     []int64  `json:"role_ids"`
 	Services    []string `json:"services"`
+	HostGroups  []string `json:"host_groups"`
 	CreatedAt   string   `json:"created_at"`
 }
 
@@ -543,6 +547,7 @@ func (s *Service) ListGroupPermissions(ctx context.Context, teamID int64) ([]Gro
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.id, p.team_id, p.group_id, COALESCE(g.name,''),
 		       COALESCE(p.permissions,'{}'), COALESCE(p.role_ids,'{}'), COALESCE(p.services,'{}'),
+		       COALESCE(p.host_groups,'{}'),
 		       TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS')
 		FROM team_group_permissions p
 		LEFT JOIN service_groups g ON g.id = p.group_id
@@ -554,22 +559,23 @@ func (s *Service) ListGroupPermissions(ctx context.Context, teamID int64) ([]Gro
 	out := []GroupPermission{}
 	for rows.Next() {
 		var gp GroupPermission
-		var perms, services pq.StringArray
+		var perms, services, hostGroups pq.StringArray
 		var roleIDs pq.Int64Array
 		if err := rows.Scan(&gp.ID, &gp.TeamID, &gp.GroupID, &gp.GroupName,
-			&perms, &roleIDs, &services, &gp.CreatedAt); err != nil {
+			&perms, &roleIDs, &services, &hostGroups, &gp.CreatedAt); err != nil {
 			return nil, err
 		}
 		gp.Permissions = []string(perms)
 		gp.RoleIDs = []int64(roleIDs)
 		gp.Services = []string(services)
+		gp.HostGroups = []string(hostGroups)
 		out = append(out, gp)
 	}
 	return out, rows.Err()
 }
 
 // SetGroupPermission 设置团队对某服务组的授权（存在则覆盖）。
-func (s *Service) SetGroupPermission(ctx context.Context, teamID, groupID int64, perms []string, roleIDs []int64, services []string) error {
+func (s *Service) SetGroupPermission(ctx context.Context, teamID, groupID int64, perms []string, roleIDs []int64, services, hostGroups []string) error {
 	p, err := normalizePerms(perms)
 	if err != nil {
 		return err
@@ -599,15 +605,22 @@ func (s *Service) SetGroupPermission(ctx context.Context, teamID, groupID int64,
 			cleaned = append(cleaned, svc)
 		}
 	}
+	cleanedHosts := make([]string, 0, len(hostGroups))
+	for _, hg := range hostGroups {
+		if hg = trimName(hg); hg != "" {
+			cleanedHosts = append(cleanedHosts, hg)
+		}
+	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO team_group_permissions (team_id, group_id, permissions, role_ids, services)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO team_group_permissions (team_id, group_id, permissions, role_ids, services, host_groups)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		ON CONFLICT (team_id, group_id) DO UPDATE SET
 			permissions = EXCLUDED.permissions,
 			role_ids    = EXCLUDED.role_ids,
 			services    = EXCLUDED.services,
+			host_groups = EXCLUDED.host_groups,
 			updated_at  = NOW()`,
-		teamID, groupID, pq.Array(p), pq.Array(roleIDs), pq.Array(cleaned))
+		teamID, groupID, pq.Array(p), pq.Array(roleIDs), pq.Array(cleaned), pq.Array(cleanedHosts))
 	return err
 }
 
@@ -633,11 +646,22 @@ func (s *Service) groupServiceNames(ctx context.Context, groupID int64) (map[str
 
 // EffectivePermissions 计算某用户通过团队获得的全部权限（团队并集）。
 //
-// 用途：任务创建/下发时校验「该用户是否对目标组件有 deploy 权限」。
-// 返回 map[componentName]map[perm]bool。
+// 返回：
+//   - perms: map[componentName]map[perm]bool
+//   - hostGroups: map[componentName]map[hostGroup]bool（空集合 = 不限主机分组）
 func (s *Service) EffectivePermissions(ctx context.Context, username string) (map[string]map[string]bool, error) {
+	perms, _, err := s.EffectivePermissionsWithHosts(ctx, username)
+	return perms, err
+}
+
+// EffectivePermissionsWithHosts 同 EffectivePermissions，同时返回主机分组范围。
+//
+// 主机分组取 hosts 表的 app_code / biz_group（团队授权里按值填写）。
+// 空集合表示该组件不限制主机范围。
+func (s *Service) EffectivePermissionsWithHosts(ctx context.Context, username string) (map[string]map[string]bool, map[string]map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.permissions, COALESCE(p.role_ids,'{}'), COALESCE(p.services,'{}'),
+		       COALESCE(p.host_groups,'{}'),
 		       sg.component_id, c.name
 		FROM team_members m
 		JOIN team_group_permissions p ON p.team_id = m.team_id
@@ -645,24 +669,25 @@ func (s *Service) EffectivePermissions(ctx context.Context, username string) (ma
 		JOIN components c ON c.id = sg.component_id
 		WHERE m.user_id = $1`, username)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
 	// 先取角色权限，避免在结果集循环中再查询（同一连接上的嵌套查询易出错）。
 	rolePerms, err := s.rolePermissions(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	out := map[string]map[string]bool{}
+	permsOut := map[string]map[string]bool{}
+	hostsOut := map[string]map[string]bool{}
 	for rows.Next() {
-		var perms, services pq.StringArray
+		var perms, services, hostGroups pq.StringArray
 		var roleIDs pq.Int64Array
 		var compID int64
 		var compName string
-		if err := rows.Scan(&perms, &roleIDs, &services, &compID, &compName); err != nil {
-			return nil, err
+		if err := rows.Scan(&perms, &roleIDs, &services, &hostGroups, &compID, &compName); err != nil {
+			return nil, nil, err
 		}
 		// 服务维度：空 services 表示未授权任何服务；"*" 表示组内全部组件。
 		allowed := false
@@ -675,19 +700,41 @@ func (s *Service) EffectivePermissions(ctx context.Context, username string) (ma
 		if !allowed {
 			continue
 		}
-		if out[compName] == nil {
-			out[compName] = map[string]bool{}
+		if permsOut[compName] == nil {
+			permsOut[compName] = map[string]bool{}
 		}
 		for _, p := range perms {
-			out[compName][p] = true
+			permsOut[compName][p] = true
 		}
 		for _, rid := range roleIDs {
 			for _, p := range rolePerms[rid] {
-				out[compName][p] = true
+				permsOut[compName][p] = true
+			}
+		}
+		// 主机分组：多个团队授权取并集；任一条目为空表示不限。
+		if hostsOut[compName] == nil {
+			hostsOut[compName] = map[string]bool{}
+		}
+		if len(hostGroups) == 0 {
+			// 空表示不限主机；用特殊标记表示「全部」，避免被并集逻辑覆盖成具体值。
+			hostsOut[compName]["*"] = true
+		} else {
+			for _, hg := range hostGroups {
+				hostsOut[compName][hg] = true
 			}
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	// 规范化：含 "*" 时只保留 "*"，避免调用方还要判断两种形态。
+	for compName, set := range hostsOut {
+		if set["*"] {
+			hostsOut[compName] = map[string]bool{"*": true}
+		}
+	}
+	return permsOut, hostsOut, nil
 }
 
 // rolePermissions 返回 roleID → 权限集合。

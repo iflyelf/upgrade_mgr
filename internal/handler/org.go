@@ -373,6 +373,7 @@ func TeamPermissionSet(s *svc.ServiceContext) http.HandlerFunc {
 			Permissions []string `json:"permissions"`
 			RoleIDs     []int64  `json:"role_ids"`
 			Services    []string `json:"services"`
+			HostGroups  []string `json:"host_groups"`
 		}
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
@@ -383,7 +384,7 @@ func TeamPermissionSet(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		err := orgService(s).SetGroupPermission(r.Context(), teamID, req.GroupID,
-			req.Permissions, req.RoleIDs, req.Services)
+			req.Permissions, req.RoleIDs, req.Services, req.HostGroups)
 		auditOp(s, r, audit.ActionPermissionSet, "team_permission",
 			strconv.FormatInt(teamID, 10)+"/"+strconv.FormatInt(req.GroupID, 10),
 			strings.Join(req.Permissions, ","), err)
