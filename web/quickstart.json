@@ -45,13 +45,13 @@
       "控制台的主机/组件/制品/任务页顶部都有「📘 快速上手」，可在 Linux / Windows 之间切换；下列命令与页面一致。",
       "\u003c控制台\u003e：实际访问地址，如 http://10.0.88.88:8090 或 https://upgrade.example.com。",
       "\u003c令牌\u003e：在「主机 → 接入主机 → 生成接入命令」生成的一次性注册令牌（默认 15 分钟有效）。",
-      "Windows 主机需先把 upgrade-agent-windows-{amd64,arm64}.zip 解压到控制台 dist（Docker 需挂载），否则下载会 404。"
+      "Windows 主机需先把 upgrade-agent-windows-{amd64,arm64}.exe 放到控制台 dist（Release 同时提供 .zip；Docker 需挂载），否则下载会 404。"
     ],
     "en": [
       "The Hosts/Components/Artifacts/Tasks pages include a “Quick Start” card with Linux/Windows examples; the commands below match the UI.",
       "\u003cConsole\u003e: reachable URL, e.g. http://10.0.88.88:8090 or https://upgrade.example.com.",
       "\u003cToken\u003e: one-time enrollment token from Hosts → Enroll host → Generate command (15-minute TTL).",
-      "For Windows hosts, extract upgrade-agent-windows-{amd64,arm64}.zip into the console dist directory (mount it in Docker), otherwise downloads return 404."
+      "For Windows hosts, place upgrade-agent-windows-{amd64,arm64}.exe into the console dist directory (a .zip is also published; mount it in Docker), otherwise downloads return 404."
     ]
   },
   "systems": {
