@@ -1,4 +1,7 @@
-# examples/windows_exporter 默认配置
+# examples/windows_exporter 默认配置（latest 通道）
+# 注意：本文件面向 Windows 10 / Server 2016+ 的 latest 版本，包含 physical_disk、
+# 新版 textfile/service 配置。Server 2008 R2 / Windows 7~8.1 请使用
+# config-legacy.yaml（或让 install.ps1 自动生成 legacy 配置）。
 #
 # 该文件用于演示「安装后由脚本写入 C:\Program Files\windows_exporter\config.yaml」。
 # 实际部署时可：

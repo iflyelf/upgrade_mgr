@@ -185,11 +185,11 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 - install.ps1 支持 install / update / uninstall / status；安装到 C:\Program Files\windows_exporter，服务名 windows_exporter，端口 16666，自动创建防火墙规则。
 - textfile 采集目录：C:\monitor\windows_exporter\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。
 - 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。
-- Windows 10 / Server 2016 及以上自动使用 latest；Windows 7 / Server 2008 R2 ~ 2012 R2 自动切换 legacy（基于官方 v0.23.1 + Go 1.20，含 hardware_info 移植），也可用 -Flavor latest|legacy 强制。
+- Windows 10 / Server 2016 及以上自动使用 latest；Windows 7 / Server 2008 R2 ~ 2012 R2 自动切换 legacy（基于官方 v0.23.1 + Go 1.20，默认启用 hardware_info 移植），也可用 -Flavor latest|legacy 强制。
 - 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl。
 - 平台也无法出网（控制台请求 GitHub 502）时：在「外部文件」为 windows-exporter-`<arch>`（旧系统为 windows-exporter-`<arch>`-legacy）点「上传离线文件」，脚本会自动优先从平台获取；exe 与脚本都可离线上传。
 - 2008 R2 上脚本只探测对应通道的平台「本地/缓存」接口（?local=1），未上传时几秒内报错并提示上传，不会等待平台现场下载；平台能出网时可先在外部文件页「刷新缓存」预下载。
-- legacy 默认不启用 hardware_info；需要时在 config.yaml 的 collectors.enabled 追加 hardware_info（仅本仓库 legacy 资产包含该采集器）。
+- legacy 默认启用 hardware_info（仅本仓库 legacy 资产包含该采集器）；如替换为官方 v0.23.1，请从 collectors.enabled 删除 hardware_info 或使用 -NoConfig 自备配置。
 - 低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\LocalService"（或域账户 + -ServicePassword）。
 - 更新示例先备份 windows_exporter.exe.bak，启动失败自动回滚；卸载示例不带 health/version 检查。
 
@@ -317,11 +317,11 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<console
 - install.ps1 supports install / update / uninstall / status. It installs to C:\Program Files\windows_exporter, service windows_exporter, port 16666 and creates a firewall rule.
 - Textfile collector directory: C:\monitor\windows_exporter\textfile_inputs; use -ConfigPath for a custom config.
 - PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites .ps1 to UTF-8 BOM + CRLF to avoid encoding issues.
-- Windows 10 / Server 2016 and newer use latest automatically; Windows 7 / Server 2008 R2 – 2012 R2 switch to legacy (based on official v0.23.1 + Go 1.20, with a ported hardware_info collector). Force it with -Flavor latest|legacy.
+- Windows 10 / Server 2016 and newer use latest automatically; Windows 7 / Server 2008 R2 – 2012 R2 switch to legacy (based on official v0.23.1 + Go 1.20, with the ported hardware_info collector enabled by default). Force it with -Flavor latest|legacy.
 - On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl.
 - If the console also cannot reach GitHub (502), upload the exe under External files → windows-exporter-`<arch>` (legacy systems: windows-exporter-`<arch>`-legacy) → Upload offline file; the script then prefers the platform copy. Both exe and scripts can be uploaded offline.
 - On 2008 R2 the script only probes the selected channel's platform local/cache endpoint (?local=1); if nothing is uploaded it fails within seconds with an upload hint instead of waiting for the console to fetch from GitHub. If the console has outbound access, use Refresh cache beforehand to pre-download.
-- hardware_info is disabled by default in legacy; add it to collectors.enabled in config.yaml when needed (only the legacy asset from this repository includes it).
+- hardware_info is enabled by default in legacy (only the legacy asset from this repository includes it). If you substitute the official v0.23.1 binary, remove hardware_info from collectors.enabled or use -NoConfig with your own config.
 - Low privilege: install.ps1 -ServiceAccount "NT AUTHORITY\LocalService" (or a domain account with -ServicePassword).
 - Update backs up windows_exporter.exe.bak and rolls back on startup failure; uninstall omits health/version checks.
 
@@ -1270,9 +1270,11 @@ Server 2008 R2 的 PowerShell 2.0/CLR 2.0 不支持 TLS 1.2，无法直连 GitHu
    - 也可先在外部文件页点「刷新缓存」让平台预下载（平台能出网时），之后 `?local=1` 直接命中缓存。
 4. 如需离线 `install.ps1` 本身，可把脚本上传到 `windows-exporter-install.ps1` 同名条目，
    或继续作为组件制品上传。
-5. `legacy` 默认不启用 `hardware_info`；需要时编辑
-   `C:\Program Files\windows_exporter\config.yaml` 的 `collectors.enabled`，
-   追加 `hardware_info` 后重启服务。
+5. `legacy` 默认配置已启用 `hardware_info`，安装完成后即可在 `/metrics` 看到
+   `node_hardware_*` 指标。若自行替换为**官方 v0.23.1**（不含该采集器），
+   请从 `config.yaml` 的 `collectors.enabled` 删除 `hardware_info`，或使用
+   `-NoConfig` 配合自备配置；否则服务会因未知采集器启动失败。
+   推荐直接使用本仓库 legacy 资产，或 `-ConfigPath examples\windows_exporter\config-legacy.yaml`。
 
 列表「本地离线」列会显示已上传大小；「清除离线文件」后回退到平台缓存/上游下载。
 
@@ -2391,6 +2393,10 @@ MIT © iflyelf
   「服务无法启动」而无从排查。
 - 外部文件默认白名单新增 `windows-exporter-{amd64,arm64}-legacy`（指向 iflyelf 仓库）；
   迁移 028 为已有白名单自动补条目，页面可上传离线 legacy exe。
+- legacy 默认配置启用 `hardware_info`（`node_hardware_*`）；配置模板升级到
+  `config-version: 2`，旧的脚本生成配置会自动备份并重新生成。
+- legacy 直连/内网镜像文件名统一为 `windows_exporter-<arch>-legacy.exe`，确保
+  默认配置与含 `hardware_info` 的二进制匹配；官方 v0.23.1 需自备配置。
 - Windows 组件示例的 `version_cmd` 改为 `windows_exporter.exe --version`，
   legacy 构建没有 Windows FileVersion 资源也能正确显示版本。
 

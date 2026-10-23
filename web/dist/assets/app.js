@@ -626,7 +626,7 @@
     {
       key: 'windows_exporter_script',
       label: 'windows_exporter_script（Windows 脚本安装）',
-      desc: 'Windows 专用示例：script_url 指向本仓库 examples/windows_exporter/install.ps1（经 proxy 代理）。Agent 在 Windows 主机上默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行，脚本按系统版本自动选择 exe：Windows 10/Server 2016+ 用 latest，Windows 7/Server 2008 R2~2012 R2 用 legacy（v0.23.1 + Go 1.20，含 hardware_info），注册 Windows 服务 windows_exporter、创建防火墙规则并写入默认配置。适合 Windows Server 2008 R2 ~ Windows 11；需要 PowerShell 2.0+（系统自带）。',
+      desc: 'Windows 专用示例：script_url 指向本仓库 examples/windows_exporter/install.ps1（经 proxy 代理）。Agent 在 Windows 主机上默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行，脚本按系统版本自动选择 exe：Windows 10/Server 2016+ 用 latest，Windows 7/Server 2008 R2~2012 R2 用 legacy（v0.23.1 + Go 1.20，默认启用 hardware_info），注册 Windows 服务 windows_exporter、创建防火墙规则并写入默认配置。适合 Windows Server 2008 R2 ~ Windows 11；需要 PowerShell 2.0+（系统自带）。',
       comp: {
         name: 'windows_exporter_script', display_name: 'Windows Exporter（Win 脚本安装）', deploy_mode: 'script',
         binary_name: 'windows_exporter',
