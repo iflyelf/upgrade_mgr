@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -177,22 +178,15 @@ func SaveExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			}
 		}
 
-		// 先更新域名/内网策略，再保存白名单：setting.Apply 的 Validate 使用
-		// 当前 Config 中的 hosts 做校验，若先存白名单会被旧 hosts 误拒。
-		if _, err := s.Settings.Apply(r.Context(), map[string]string{
+		// 一次性提交：Apply 内部会用「本次提交的 hosts」校验白名单，
+		// 因此不会出现「先存白名单被旧 hosts 误拒」，也避免两次写入导致
+		// 前一次成功、后一次失败的部分生效（无事务的半更新）。
+		kv := map[string]string{
+			"server.external_binaries":             extbin.FormatText(raw),
 			"server.external_binary_hosts":         strings.Join(hosts, ","),
+			"server.external_binary_ttl":           ttl,
 			"server.external_binary_allow_private": boolString(req.AllowPrivate),
 			"server.external_binary_allow_cidrs":   strings.Join(cidrs, ","),
-			"server.external_binary_ttl":           ttl,
-		}); err != nil {
-			httpx.FailErr(w, http.StatusBadRequest, err)
-			return
-		}
-
-		kv := map[string]string{
-			"server.external_binaries":     extbin.FormatText(raw),
-			"server.external_binary_hosts": strings.Join(hosts, ","),
-			"server.external_binary_ttl":   ttl,
 		}
 		applied, err := s.Settings.Apply(r.Context(), kv)
 		if err != nil {
@@ -275,6 +269,13 @@ func TestExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 
 		probeCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 		defer cancel()
+
+		// 强制刷新时让缓存失效（先删再拉），否则主机可能继续拿到旧文件。
+		if req.Force {
+			if rmErr := os.Remove(target); rmErr != nil && !os.IsNotExist(rmErr) {
+				log.Printf("⚠️ 清除外部文件缓存失败 %s: %v", target, rmErr)
+			}
+		}
 		probe := probeExternalBinary(probeCtx, *entry, effectiveExternalHosts(cfg), externalAllowRule(cfg))
 		probe.Name = res.Name
 		probe.URL = entry.URL
@@ -286,10 +287,69 @@ func TestExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
+// RefreshExternalBinary 强制重新下载并落盘（管理员）。
+//
+// 与「测试」不同：这里会真正写缓存，用于上游更新后让主机立即拿到新文件。
+func RefreshExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req externalBinaryTestRequest
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		cfg := externalBinaryConfig(s)
+		entries, err := extbin.Parse(effectiveExternalBinaries(cfg))
+		if err != nil {
+			httpx.Fail(w, http.StatusInternalServerError, "白名单配置错误")
+			return
+		}
+		name := strings.TrimSpace(req.Name)
+		var entry *extbin.Entry
+		for i := range entries {
+			if strings.EqualFold(entries[i].Name, name) {
+				entry = &entries[i]
+				break
+			}
+		}
+		if entry == nil {
+			httpx.Fail(w, http.StatusNotFound, "白名单中不存在该名称，请先保存")
+			return
+		}
+
+		baseDir := externalBinaryBaseDir(cfg)
+		target := externalBinaryCachePath(baseDir, *entry)
+		// 串行化下载：与普通下载共用同一把文件锁，避免并发写同一文件。
+		unlock := lockExternalTarget(target)
+		defer unlock()
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		start := time.Now()
+		if err := fetchExternalBinary(r.Context(), entry.URL, target, entry.Script,
+			effectiveExternalHosts(cfg), externalAllowRule(cfg)); err != nil {
+			auditOp(s, r, auditActionExternalBinaryRefresh, "external_binary", name, entry.URL, err)
+			httpx.Fail(w, http.StatusBadGateway, "重新下载失败: "+err.Error())
+			return
+		}
+		info, _ := os.Stat(target)
+		var size int64
+		if info != nil {
+			size = info.Size()
+		}
+		auditOp(s, r, auditActionExternalBinaryRefresh, "external_binary", name, entry.URL, nil)
+		httpx.OK(w, map[string]any{
+			"name": name, "size": size, "elapsed_ms": time.Since(start).Milliseconds(),
+		})
+	}
+}
+
 // probeExternalBinary 拉取文件头部做可用性探测。
+// 注意：必须用命名返回值，否则 defer 里修改 res 不会写回返回值
+// （`return res` 在 defer 执行前已完成值拷贝，耗时永远为 0）。
 func probeExternalBinary(ctx context.Context, entry extbin.Entry, hosts []string,
-	rule extbin.AllowRule) externalBinaryTestResult {
-	res := externalBinaryTestResult{Name: entry.Name, URL: entry.URL}
+	rule extbin.AllowRule) (res externalBinaryTestResult) {
+	res = externalBinaryTestResult{Name: entry.Name, URL: entry.URL}
 	start := time.Now()
 	defer func() { res.ElapsedMS = time.Since(start).Milliseconds() }()
 
@@ -428,8 +488,9 @@ func boolErr(ok bool, msg string) error {
 
 // 审计动作（与 handler 层的命名保持一致）。
 const (
-	auditActionExternalBinarySave = "external_binary.save"
-	auditActionExternalBinaryTest = "external_binary.test"
+	auditActionExternalBinarySave    = "external_binary.save"
+	auditActionExternalBinaryTest    = "external_binary.test"
+	auditActionExternalBinaryRefresh = "external_binary.refresh"
 )
 
 var _ = sql.ErrNoRows
