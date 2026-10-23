@@ -134,17 +134,23 @@ func TestTaskListVisibility(t *testing.T) {
 			t.Fatalf("列表失败 %d: %s", rec.Code, rec.Body.String())
 		}
 		var out struct {
-			Data []struct {
-				ID         int64  `json:"id"`
-				Kind       string `json:"kind"`
-				CreatedBy  string `json:"created_by"`
-				CanOperate bool   `json:"can_operate"`
+			Data struct {
+				List []struct {
+					ID         int64  `json:"id"`
+					Kind       string `json:"kind"`
+					CreatedBy  string `json:"created_by"`
+					CanOperate bool   `json:"can_operate"`
+				} `json:"list"`
+				Total int `json:"total"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 			t.Fatal(err)
 		}
-		return out.Data
+		if out.Data.Total < len(out.Data.List) {
+			t.Fatalf("total=%d 小于当前页条数 %d", out.Data.Total, len(out.Data.List))
+		}
+		return out.Data.List
 	}
 
 	for _, row := range list(&auth.User{Username: "alice", TenantID: 1}) {
@@ -165,5 +171,61 @@ func TestTaskListVisibility(t *testing.T) {
 	}
 	if !seen[aliceTask] || !seen[bobTask] || !seen[cmdTask] {
 		t.Fatalf("管理员应看到全部任务: %v", seen)
+	}
+}
+
+// TestTaskListPagination 服务端分页：q 搜索 + page/size 与 total/pages。
+func TestTaskListPagination(t *testing.T) {
+	db, _ := setupHostDB(t)
+	sfx := time.Now().UnixNano()
+	sc := &svc.ServiceContext{DB: db, Task: task.NewService(db, nil, nil, nil)}
+	prefix := fmt.Sprintf("page-%d", sfx)
+
+	for i := 0; i < 5; i++ {
+		if _, err := db.Exec(`
+			INSERT INTO upgrade_tasks (name, version, kind, status, created_by, updated_by, tenant_id)
+			VALUES ($1,'v1','upgrade','draft','admin','admin',1)`,
+			fmt.Sprintf("%s-%d", prefix, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM upgrade_tasks WHERE name LIKE $1`, prefix+"%") })
+
+	req := httptest.NewRequest("GET", "/api/tasks?q="+prefix+"&page=2&size=2", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec := httptest.NewRecorder()
+	TaskList(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data struct {
+			List  []map[string]any `json:"list"`
+			Total int              `json:"total"`
+			Page  int              `json:"page"`
+			Size  int              `json:"size"`
+			Pages int              `json:"pages"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.Total != 5 || out.Data.Pages != 3 || out.Data.Page != 2 || out.Data.Size != 2 {
+		t.Fatalf("分页数据不符: %+v", out.Data)
+	}
+	if len(out.Data.List) != 2 {
+		t.Fatalf("第 2 页应有 2 条, got %d", len(out.Data.List))
+	}
+
+	// 页码越界夹紧到最后一页（5 条 / 每页 2 → 第 3 页只剩 1 条）
+	req = httptest.NewRequest("GET", "/api/tasks?q="+prefix+"&page=99&size=2", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec = httptest.NewRecorder()
+	TaskList(sc)(rec, req)
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.Page != 3 || len(out.Data.List) != 1 {
+		t.Fatalf("越界页码应夹紧到第 3 页: %+v", out.Data)
 	}
 }

@@ -97,6 +97,38 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		if !actorIsPrivileged(actor) {
 			where = append(where, "COALESCE(t.kind,'upgrade') <> 'command'")
 		}
+		if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
+			add("t.name ILIKE $%d", "%"+q+"%")
+		}
+
+		// 服务端分页：默认 50，最大 200；页码越界夹紧到最后一页。
+		page := atoiDefault(r.URL.Query().Get("page"), 1)
+		if page < 1 {
+			page = 1
+		}
+		size := atoiDefault(r.URL.Query().Get("size"), 50)
+		if size < 1 {
+			size = 50
+		}
+		if size > 200 {
+			size = 200
+		}
+		whereSQL := strings.Join(where, " AND ")
+		var total int
+		if err := s.DB.QueryRowContext(r.Context(),
+			`SELECT COUNT(*) FROM upgrade_tasks t WHERE `+whereSQL, args...).Scan(&total); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		pages := (total + size - 1) / size
+		if pages < 1 {
+			pages = 1
+		}
+		if page > pages {
+			page = pages
+		}
+		args = append(args, size, (page-1)*size)
+		limitAt, offsetAt := len(args)-1, len(args)
 		rows, err := s.DB.QueryContext(r.Context(), `
 			SELECT t.id, COALESCE(t.kind,'upgrade'), t.name, COALESCE(t.component_id,0), t.version, t.status, t.created_at,
 			       COALESCE(t.created_by,''),
@@ -104,8 +136,9 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 			       COUNT(th.id) FILTER (WHERE th.status='success') AS success,
 			       COUNT(th.id) FILTER (WHERE th.status='failed') AS failed
 			FROM upgrade_tasks t LEFT JOIN task_hosts th ON th.task_id=t.id
-			WHERE `+strings.Join(where, " AND ")+`
-			GROUP BY t.id ORDER BY t.created_at DESC LIMIT 200`, args...)
+			WHERE `+whereSQL+`
+			GROUP BY t.id ORDER BY t.created_at DESC
+			LIMIT $`+strconv.Itoa(limitAt)+` OFFSET $`+strconv.Itoa(offsetAt)+``, args...)
 		if err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
@@ -133,7 +166,9 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 				"total":       total, "success": success, "failed": failed,
 			})
 		}
-		httpx.OK(w, list)
+		httpx.OK(w, map[string]any{
+			"list": list, "total": total, "page": page, "size": size, "pages": pages,
+		})
 	}
 }
 

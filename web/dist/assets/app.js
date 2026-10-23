@@ -38,8 +38,9 @@
     taskDetailOpenLogs: {},
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
-    // 任务页按组件筛选：'' 表示全部；用于删除组件前核对引用。
-    taskFilterComp: '', taskFilterKind: '',
+    // 任务页按组件/类型/名称筛选与服务端分页。
+    taskFilterComp: '', taskFilterKind: '', taskQ: '',
+    taskPage: 1, taskSize: 50, taskPages: 1, taskTotal: 0,
     // 外部文件白名单表格（页面增删行）
     extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
     orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
@@ -3141,6 +3142,7 @@
       api('/api/tasks', { method: 'POST', body: JSON.stringify(taskBody()) })
         .then(function (d) {
           state.preview = null;
+          state.taskPage = 1;
           alert('任务已创建 #' + d.id + '，请在列表中点“启动”');
           loadTasks();
         })
@@ -3360,6 +3362,7 @@
       onchange: function () {
         state.taskFilterComp = filterCompEl.value;
         state.taskFilterKind = '';
+        state.taskPage = 1;
         loadTasks();
       }
     }, [h('option', { value: '' }, ['全部组件'])].concat(
@@ -3371,6 +3374,7 @@
       value: state.taskFilterKind,
       onchange: function () {
         state.taskFilterKind = filterKindEl.value;
+        state.taskPage = 1;
         loadTasks();
       }
     }, [
@@ -3379,20 +3383,45 @@
       h('option', { value: 'command' }, ['执行命令'])
     ]);
 
+    var taskQEl = h('input', {
+      value: state.taskQ || '', placeholder: '按任务名搜索',
+      onchange: function () {
+        state.taskQ = taskQEl.value.trim();
+        state.taskPage = 1;
+        loadTasks();
+      }
+    }, []);
+
+    var taskPager = state.taskPages > 1 ? h('div', { class: 'pager' }, [
+      h('span', { class: 'muted' }, ['第 ' + state.taskPage + ' / ' + state.taskPages +
+        ' 页 · 共 ' + state.taskTotal + ' 个任务']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.taskPage <= 1 ? '' : null,
+        onclick: function () { state.taskPage -= 1; loadTasks(); }
+      }, ['上一页']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.taskPage >= state.taskPages ? '' : null,
+        onclick: function () { state.taskPage += 1; loadTasks(); }
+      }, ['下一页'])
+    ]) : null;
+
     var list = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, [
-          (state.taskFilterComp || state.taskFilterKind)
-            ? ('筛选结果 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
-            : ('共 ' + state.tasks.length + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
+          (state.taskFilterComp || state.taskFilterKind || state.taskQ)
+            ? ('筛选结果 ' + state.taskTotal + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
+            : ('共 ' + state.taskTotal + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
         ]),
         h('label', { class: 'muted' }, ['按组件筛选：', filterCompEl]),
         h('label', { class: 'muted' }, ['类型：', filterKindEl]),
-        state.taskFilterComp || state.taskFilterKind
+        h('label', { class: 'muted' }, ['搜索：', taskQEl]),
+        state.taskFilterComp || state.taskFilterKind || state.taskQ
           ? h('button', {
             class: 'btn ghost small', onclick: function () {
               state.taskFilterComp = '';
               state.taskFilterKind = '';
+              state.taskQ = '';
+              state.taskPage = 1;
               loadTasks();
             }
           }, ['清除筛选'])
@@ -3421,6 +3450,7 @@
               (state.user && x.created_by === state.user.Username ? '（我）' : ''),
             h('div', { class: 'row-actions' }, acts)];
         }),
+      taskPager,
       state.tasks.length === 0
         ? h('div', { class: 'muted empty' }, [
           (state.taskFilterComp || state.taskFilterKind)
@@ -3610,7 +3640,10 @@
     var qs = [];
     if (state.taskFilterComp) qs.push('component_id=' + encodeURIComponent(state.taskFilterComp));
     if (state.taskFilterKind) qs.push('kind=' + encodeURIComponent(state.taskFilterKind));
-    return '/api/tasks' + (qs.length ? '?' + qs.join('&') : '');
+    if (state.taskQ) qs.push('q=' + encodeURIComponent(state.taskQ));
+    qs.push('page=' + (state.taskPage || 1));
+    qs.push('size=' + (state.taskSize || 50));
+    return '/api/tasks' + '?' + qs.join('&');
   }
   function loadTasks(quiet) {
     if (!quiet) state.view = 'tasks';
@@ -3626,8 +3659,13 @@
         if (seq !== tasksReqSeq) return;
         // 请求期间用户可能已切换页签，避免后台任务数据覆盖当前页面。
         if (state.view !== 'tasks') return;
-        var sig = JSON.stringify([rs[0] || [], rs[1] || [], rs[2] || []]);
-        state.tasks = rs[0] || [];
+        var pageData = rs[0] || {};
+        var sig = JSON.stringify([pageData, rs[1] || [], rs[2] || []]);
+        state.tasks = pageData.list || [];
+        state.taskTotal = pageData.total || 0;
+        state.taskPage = pageData.page || 1;
+        state.taskSize = pageData.size || state.taskSize || 50;
+        state.taskPages = pageData.pages || 1;
         state.components = rs[1] || [];
         state.artifacts = rs[2] || [];
         if (quiet && sig === state.tasksSig) {
@@ -3750,6 +3788,7 @@
         api('/api/tasks/' + x.id, { method: 'DELETE' })
           .then(function () {
             if (state.taskDetailId === x.id) closeTaskDetail(true);
+            state.taskPage = 1;
             loadTasks();
           })
           .catch(function (e) { alert('删除失败: ' + e.message); });
