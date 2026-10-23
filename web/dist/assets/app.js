@@ -2220,6 +2220,19 @@
     ]);
     if (team && team.owner_only) policyEl.value = team.owner_only;
 
+    // 成员添加：从本地用户中多选（排除已在团队的），避免手填用户名出错。
+    var memberSet = {};
+    members.forEach(function (m) { memberSet[m.user_id] = true; });
+    var candidates = (o.users || []).filter(function (u) { return !memberSet[u.username]; });
+    var addSel = h('select', {
+      multiple: 'multiple',
+      size: String(Math.min(6, Math.max(3, candidates.length || 3)))
+    }, candidates.map(function (u) {
+      return h('option', { value: u.username }, [
+        u.username + (u.display_name && u.display_name !== u.username ? '（' + u.display_name + '）' : '')
+      ]);
+    }));
+
     return h('div', { class: 'card' }, [
       h('h3', {}, ['团队详情：' + (team ? team.name : teamID)]),
       h('div', { class: 'grid2' }, [
@@ -2243,18 +2256,23 @@
           }, ['保存策略'])
         ])
       ]),
+      candidates.length
+        ? h('div', { class: 'toolbar' }, [
+            h('label', { class: 'muted' }, ['添加成员（可多选）：', addSel]),
+            h('button', {
+              class: 'btn', onclick: function () {
+                var sel = addSel.selectedOptions || [];
+                var names = Array.prototype.slice.call(sel).map(function (o) { return o.value; });
+                if (!names.length) { alert('请先选择要添加的用户'); return; }
+                api('/api/teams/' + teamID + '/members', {
+                  method: 'POST', body: JSON.stringify({ members: names })
+                }).then(function () { loadTeamMembers(teamID); })
+                  .catch(function (e) { alert('添加失败: ' + e.message); });
+              }
+            }, ['添加所选成员'])
+          ])
+        : h('div', { class: 'muted' }, ['所有本地用户都已加入该团队。']),
       h('div', { class: 'toolbar' }, [
-        h('button', {
-          class: 'btn ghost', onclick: function () {
-            var names = prompt('添加成员（用户名，逗号分隔）');
-            if (!names) return;
-            api('/api/teams/' + teamID + '/members', {
-              method: 'POST',
-              body: JSON.stringify({ members: names.split(',').map(function (x) { return x.trim(); }).filter(Boolean) })
-            }).then(function () { loadTeamMembers(teamID); })
-              .catch(function (e) { alert('添加失败: ' + e.message); });
-          }
-        }, ['添加成员']),
         h('button', {
           class: 'btn ghost', onclick: function () { state.orgSelTeam = null; render(); }
         }, ['关闭'])
