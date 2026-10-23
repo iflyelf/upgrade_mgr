@@ -19,6 +19,14 @@ build-agent:
 test:
 	go test ./...
 
+## docs-quickstart: 由 web/quickstart.yaml 生成页面 JSON 与 README 中英快速上手
+docs-quickstart:
+	go run ./cmd/quickstart-gen
+
+## docs-check: 校验快速上手生成物是否与源文件一致（CI）
+docs-check:
+	go run ./cmd/quickstart-gen -check
+
 ## vet: 静态检查
 vet:
 	go vet ./...
