@@ -95,6 +95,10 @@ func externalBinaryConfig(s *svc.ServiceContext) *config.Config {
 // 白名单来自 server.external_binaries（配置文件 / 设置页），支持热加载：
 // 每次请求都读取最新快照，保存设置后立即生效，无需重启。
 // 缓存落盘到 <agent_binary_dir>/.external-cache。
+//
+// 查询参数 local=1：只返回管理员上传的离线文件或已有缓存，**不触发上游下载**。
+// 供老系统（PowerShell 2.0/CLR 2.0）快速探测平台是否已备好文件，避免平台现场
+// 下载 GitHub 导致脚本超时。
 func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
@@ -154,7 +158,21 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		}
 
 		ttl := effectiveExternalTTL(cfg)
+		// local=1：只返回本地上传/已有缓存，绝不触发上游下载。
+		// 老系统（PowerShell 2.0）用它快速判断平台是否已备好离线文件，
+		// 避免平台现场下载 GitHub 导致 WebClient 超时。
+		localOnly := r.URL.Query().Get("local") == "1" ||
+			strings.EqualFold(r.Header.Get("X-External-Local-Only"), "1")
 		cached := local || freshFile(target, ttl)
+		if localOnly {
+			if !local && !fileExists(target) {
+				metrics.ExternalBinaryRequests.WithLabelValues(name, "local_miss").Inc()
+				http.Error(w, "offline file not uploaded", http.StatusNotFound)
+				return
+			}
+			// 本地优先；否则直接使用已有缓存（即使超过 TTL，也优于失败）。
+			cached = true
+		}
 		if local {
 			metrics.ExternalBinaryRequests.WithLabelValues(name, "local").Inc()
 		} else if !cached {
@@ -195,6 +213,12 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		w.Header().Set("Content-Disposition", "attachment; filename="+fileName)
 		http.ServeContent(w, r, fileName, info.ModTime(), f)
 	}
+}
+
+// fileExists 判断文件存在且非目录/非空。
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
 // freshFile 判断缓存文件存在且未过期。

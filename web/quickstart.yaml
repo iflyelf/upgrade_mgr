@@ -249,6 +249,7 @@ systems:
             - 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。
             - 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl。
             - 平台也无法出网（控制台请求 GitHub 502）时：在「外部文件」为 windows-exporter-<arch> 点「上传离线文件」，脚本会自动优先从平台获取；exe 与脚本都可离线上传。
+            - 2008 R2 上脚本只探测平台「本地/缓存」接口（?local=1），未上传时几秒内报错并提示上传，不会等待平台现场下载；平台能出网时可先在外部文件页「刷新缓存」预下载。
             - 低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\LocalService"（或域账户 + -ServicePassword）。
             - 更新示例先备份 windows_exporter.exe.bak，启动失败自动回滚；卸载示例不带 health/version 检查。
           en:
@@ -259,6 +260,7 @@ systems:
             - "PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites .ps1 to UTF-8 BOM + CRLF to avoid encoding issues."
             - "On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl."
             - "If the console also cannot reach GitHub (502), upload the exe under External files → windows-exporter-<arch> → Upload offline file; the script then prefers the platform copy. Both exe and scripts can be uploaded offline."
+            - "On 2008 R2 the script only probes the platform local/cache endpoint (?local=1); if nothing is uploaded it fails within seconds with an upload hint instead of waiting for the console to fetch from GitHub. If the console has outbound access, use Refresh cache beforehand to pre-download."
             - "Low privilege: install.ps1 -ServiceAccount \"NT AUTHORITY\\LocalService\" (or a domain account with -ServicePassword)."
             - "Update backs up windows_exporter.exe.bak and rolls back on startup failure; uninstall omits health/version checks."
         code_lang: powershell
