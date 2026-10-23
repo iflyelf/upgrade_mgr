@@ -180,9 +180,12 @@ const (
 
 // RegisterRequest Agent 首次注册（携带一次性 enroll token）。
 type RegisterRequest struct {
-	EnrollToken  string            `json:"enroll_token"`
-	Hostname     string            `json:"hostname"`
-	IP           string            `json:"ip"`
+	EnrollToken string `json:"enroll_token"`
+	Hostname    string `json:"hostname"`
+	IP          string `json:"ip"`
+	// ExitIP 是 Agent 按路由探测到的本机出口 IP（多网卡时用于展示与筛选）。
+	// 服务端不信任该字段作为主机身份，仅校验格式后入库。
+	ExitIP       string            `json:"exit_ip,omitempty"`
 	OS           string            `json:"os"` // os_family，如 centos/ubuntu
 	OSVersion    string            `json:"os_version"`
 	Arch         string            `json:"arch"` // amd64/arm64
@@ -211,12 +214,18 @@ type RegisterResponse struct {
 
 // HeartbeatRequest 心跳（含忙碌状态与本机组件版本）。
 type HeartbeatRequest struct {
-	AgentID    string            `json:"agent_id"`
-	Busy       bool              `json:"busy"`
-	RunningCmd string            `json:"running_cmd,omitempty"`
-	Stage      string            `json:"stage,omitempty"`
-	Status     string            `json:"status,omitempty"` // online/upgrading/...
-	Components map[string]string `json:"components,omitempty"`
+	AgentID string `json:"agent_id"`
+	Busy    bool   `json:"busy"`
+	// ExitIP 本机出口 IP；AgentServerURL 是 Agent 当前实际连接的服务端地址，
+	// AgentDefaultServerURL 是安装时的默认地址。两者用于确认隧道切换是否
+	// 已生效，并让服务端补齐隧道地址缺失的协议/端口。旧 Agent 不上报。
+	ExitIP                string            `json:"exit_ip,omitempty"`
+	AgentServerURL        string            `json:"agent_server_url,omitempty"`
+	AgentDefaultServerURL string            `json:"agent_default_server_url,omitempty"`
+	RunningCmd            string            `json:"running_cmd,omitempty"`
+	Stage                 string            `json:"stage,omitempty"`
+	Status                string            `json:"status,omitempty"` // online/upgrading/...
+	Components            map[string]string `json:"components,omitempty"`
 	// 原地自升级后，新 Agent 通过心跳刷新构建信息；旧 Agent 不发送，保持数据库原值。
 	BuildVersion string `json:"build_version,omitempty"`
 	BuildHash    string `json:"build_hash,omitempty"`
@@ -225,6 +234,15 @@ type HeartbeatRequest struct {
 	SignatureModes []string `json:"signature_modes,omitempty"`
 	// Capabilities 与注册时一致；服务端据此刷新功能能力。
 	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// HeartbeatResponse 心跳响应。
+//
+// ServerURL 非空时表示管理员为该主机配置了隧道地址（hosts.tunnel_ip），
+// Agent 应立即切换并持久化，后续心跳/轮询/下载都走该地址；
+// 为空表示未配置隧道，Agent 若此前切换过，应回退到安装时的默认地址。
+type HeartbeatResponse struct {
+	ServerURL string `json:"server_url,omitempty"`
 }
 
 // PollRequest 长轮询取指令。

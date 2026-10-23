@@ -712,7 +712,7 @@
       loadHosts();
     };
     var toolbar = h('div', { class: 'toolbar' }, [
-      (qEl = h('input', { value: state.q, placeholder: 'IP/主机名/业务组' }, [])),
+      (qEl = h('input', { value: state.q, placeholder: 'IP/出口 IP/隧道地址/主机名/业务组' }, [])),
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
       state.q ? h('button', { class: 'btn ghost', onclick: function () { state.q = ''; state.hostPage = 1; loadHosts(); } }, ['清除']) : null,
       h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']),
@@ -726,7 +726,7 @@
     var head = h('tr', {}, cols.map(function (t) { return h('th', {}, [t]); }));
     var rows = state.hosts.map(function (x) {
       var cells = [
-        h('td', {}, [x.ip]), h('td', {}, [x.hostname || '-']),
+        h('td', {}, [ipCell(x)]), h('td', {}, [x.hostname || '-']),
         h('td', {}, [x.os_type || x.os_family || '-']), h('td', {}, [x.arch || '-']),
         h('td', {}, [x.biz_group || '-']), h('td', {}, [x.app_code || '-']),
         h('td', {}, [
@@ -876,6 +876,39 @@
     ]);
   }
 
+  // ipCell 展示主机地址：
+  //   - 主地址为注册来源 IP（服务端观察到的地址，作为主机身份）；
+  //   - 多网卡时补充 Agent 探测到的出口 IP；
+  //   - 配置了隧道时，分别显示主机侧隧道 IP 与平台侧隧道地址，
+  //     并用 Agent 自报的连接地址确认是否已切换成功。
+  function ipCell(x) {
+    var out = [h('div', {}, [x.ip])];
+    if (x.exit_ip && x.exit_ip !== x.ip) {
+      out.push(h('div', { class: 'muted' }, ['出口 ' + x.exit_ip]));
+    }
+    if (x.tunnel_ip) {
+      out.push(h('div', { class: 'muted' }, ['主机隧道 ' + x.tunnel_ip]));
+    }
+    if (x.server_tunnel_url) {
+      out.push(h('div', { class: 'muted' }, ['平台隧道 ' + x.server_tunnel_url]));
+      var connected = x.agent_server_url || '';
+      out.push(h('div', { class: 'muted' }, [
+        connected && connected.indexOf('://') >= 0 && sameEndpoint(connected, x.server_tunnel_url)
+          ? '✓ 已通过隧道连接'
+          : (connected ? ('当前连接 ' + connected) : '隧道已配置，等待 Agent 心跳')
+      ]));
+    }
+    return h('div', {}, out);
+  }
+
+  // sameEndpoint 判断 Agent 自报地址是否命中配置的平台隧道地址（忽略协议/结尾斜杠）。
+  function sameEndpoint(a, b) {
+    var strip = function (v) {
+      return String(v || '').replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+    };
+    return strip(a) === strip(b);
+  }
+
   // hostForm 编辑主机可人工维护字段；IP/OS/ARCH/Agent 状态保持 Agent 上报值。
   function hostForm() {
     var host = state.editingHost;
@@ -887,6 +920,14 @@
     var deptEl = h('input', { value: host.department || '' }, []);
     var vendorEl = h('input', { value: host.vendor || '' }, []);
     var typeEl = h('input', { value: host.host_type || '' }, []);
+    var hostTunnelEl = h('input', {
+      value: host.tunnel_ip || '',
+      placeholder: '如 172.16.0.9'
+    }, []);
+    var serverTunnelEl = h('input', {
+      value: host.server_tunnel_url || '',
+      placeholder: '如 10.8.0.5、10.8.0.5:8090 或 https://tunnel.example.com'
+    }, []);
 
     var save = function () {
       var payload = {
@@ -896,7 +937,9 @@
         biz_group: bizEl.value,
         department: deptEl.value,
         vendor: vendorEl.value,
-        host_type: typeEl.value
+        host_type: typeEl.value,
+        tunnel_ip: hostTunnelEl.value,
+        server_tunnel_url: serverTunnelEl.value
       };
       api('/api/hosts/' + host.id, { method: 'PUT', body: JSON.stringify(payload) })
         .then(function () {
@@ -909,7 +952,7 @@
 
     return h('div', { class: 'card' }, [
       h('h3', {}, ['编辑主机 ' + host.ip]),
-      hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。'),
+      hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。出口 IP 与隧道地址见下方说明。'),
       h('div', { class: 'grid2' }, [
         field('主机名 (hostname)', nameEl),
         field('账号 (account)', accountEl)
@@ -926,6 +969,17 @@
         field('主机类型 (host_type)', typeEl),
         h('div', {}, [])
       ]),
+      h('div', { class: 'grid2' }, [
+        field('主机侧隧道 IP (tunnel_ip)', hostTunnelEl,
+          '主机在隧道网段里的地址（如 WireGuard/IPSec 分配的 172.16.x.x），仅用于展示与筛选。平台不主动反连主机，指令仍由 Agent 取回。'),
+        field('平台侧隧道地址 (server_tunnel_url)', serverTunnelEl,
+          'Agent 实际连接的平台地址：主机直连不到默认地址、只能走专线/VPN 隧道时填写。' +
+          '支持纯 IP、IP:端口或完整 http(s) URL，缺省协议/端口沿用安装时的地址。' +
+          '保存后 Agent 在下一次心跳（约 30 秒内）自动切换并持久化，之后指令与日志都走这条隧道；' +
+          '清空后自动回退默认地址。连续 3 次心跳失败会自动回退并在 5 分钟内不再重试，避免失联。')
+      ]),
+      (host.exit_ip ? hint('Agent 上报的出口 IP：' + host.exit_ip + '（多网卡时用于确认实际出口网卡）') : null),
+      (host.agent_server_url ? hint('Agent 当前连接地址：' + host.agent_server_url) : null),
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn', onclick: save }, ['保存']),
         h('button', {
@@ -1912,7 +1966,7 @@
       h('div', { class: 'grid2' }, [
         field('任务名', nameEl, '留空会自动生成。'),
         f.kind === 'command'
-          ? field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
+          ? field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。同时匹配主机注册地址与 Agent 上报的出口 IP（多网卡主机按实际出口网段选）。')
           : field('组件', compEl, state.components.length ? '' : '还没有组件，请先到“组件”页创建。')
       ]),
       f.kind === 'command' ? null : h('div', { class: 'grid2' }, [

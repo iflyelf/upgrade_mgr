@@ -16,6 +16,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/middleware"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/netutil"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/safepath"
@@ -71,19 +72,23 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
 			return
 		}
+		// 出口 IP 由 Agent 按路由探测上报；多网卡主机据此展示真实出口地址。
+		// 只做格式校验，不参与主机身份（身份仍是服务端观察到的来源 IP）。
+		exitIP := hostnet.NormalizeExitIP(req.ExitIP)
 		_, err = s.DB.ExecContext(r.Context(), `INSERT INTO hosts (ip, hostname, os_family, os_version, arch, kernel, agent_id, agent_version,
-				agent_build_version, agent_build_hash, agent_build_variant, agent_status, supervisor, source, last_seen)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'online',$12,'agent',NOW())
+				agent_build_version, agent_build_hash, agent_build_variant, exit_ip, agent_status, supervisor, source, last_seen)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'online',$13,'agent',NOW())
 			ON CONFLICT (ip) DO UPDATE SET hostname=EXCLUDED.hostname, os_family=COALESCE(NULLIF(EXCLUDED.os_family,''),hosts.os_family),
 				arch=COALESCE(NULLIF(EXCLUDED.arch,''),hosts.arch), agent_id=EXCLUDED.agent_id,
 				agent_version=EXCLUDED.agent_version,
 				agent_build_version=EXCLUDED.agent_build_version,
 				agent_build_hash=EXCLUDED.agent_build_hash,
 				agent_build_variant=EXCLUDED.agent_build_variant,
+				exit_ip=CASE WHEN EXCLUDED.exit_ip<>'' THEN EXCLUDED.exit_ip ELSE hosts.exit_ip END,
 				agent_status='online', supervisor=EXCLUDED.supervisor,
 				source='agent', last_seen=NOW()`,
 			ip, req.Hostname, req.OS, req.OSVersion, req.Arch, req.Kernel, agentID, req.AgentVersion,
-			buildVersion, buildHash, buildVariant, req.Supervisor)
+			buildVersion, buildHash, buildVariant, exitIP, req.Supervisor)
 		if err != nil {
 			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
@@ -138,20 +143,64 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			build_hash=CASE WHEN $4<>'' THEN $4 ELSE build_hash END,
 			build_variant=CASE WHEN $4<>'' THEN $5 ELSE build_variant END
 			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant)
-		// 维护窗口内不覆盖 upgrading 状态
-		_, _ = s.DB.ExecContext(r.Context(), `UPDATE hosts SET last_seen=NOW(),
+		// 维护窗口内不覆盖 upgrading 状态；RETURNING server_tunnel_url 顺便取出
+		// 该主机配置的平台侧隧道地址，避免每次心跳多一次查询。
+		var serverTunnelURL string
+		_ = s.DB.QueryRowContext(r.Context(), `UPDATE hosts SET last_seen=NOW(),
 			agent_status=CASE WHEN maintenance_until IS NOT NULL AND maintenance_until>NOW() THEN agent_status ELSE $2 END,
 			agent_build_version=CASE WHEN $4<>'' THEN $3 ELSE agent_build_version END,
 			agent_build_hash=CASE WHEN $4<>'' THEN $4 ELSE agent_build_hash END,
-			agent_build_variant=CASE WHEN $4<>'' THEN $5 ELSE agent_build_variant END
-			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant)
+			agent_build_variant=CASE WHEN $4<>'' THEN $5 ELSE agent_build_variant END,
+			exit_ip=CASE WHEN $6<>'' THEN $6 ELSE exit_ip END,
+			agent_server_url=CASE WHEN $7<>'' THEN $7 ELSE agent_server_url END,
+			agent_default_server_url=CASE WHEN $8<>'' THEN $8 ELSE agent_default_server_url END
+			WHERE agent_id=$1
+			RETURNING COALESCE(server_tunnel_url,'')`, agentID, status, buildVersion, buildHash, buildVariant,
+			hostnet.NormalizeExitIP(req.ExitIP),
+			normalizeServerURL(req.AgentServerURL), normalizeServerURL(req.AgentDefaultServerURL)).
+			Scan(&serverTunnelURL)
 		// 自升级命令在 Agent 退出前无法上报 success，由新版本心跳按目标 SHA256 确认。
 		if buildHash != "" {
 			markSelfUpdateSuccess(r.Context(), s.DB, agentID, buildHash)
 		}
 		maybeAutoUpdateAgent(s, r, agentID)
-		httpx.OK(w, nil)
+		// 隧道地址：管理员为该主机配置过则在响应中下发，Agent 自动切换。
+		httpx.OK(w, protocol.HeartbeatResponse{ServerURL: tunnelServerURL(s, r, serverTunnelURL,
+			normalizeServerURL(req.AgentDefaultServerURL))})
 	}
+}
+
+// tunnelServerURL 返回该主机应切换到的平台侧隧道地址（未配置返回空串）。
+//
+// 隧道地址允许只填 IP 或 IP:端口，此时按 Agent 上报的默认地址补齐协议与端口；
+// Agent 未上报默认地址时退化为设置页的 external_url。
+func tunnelServerURL(s *svc.ServiceContext, r *http.Request, serverTunnel, agentDefault string) string {
+	tunnel := strings.TrimSpace(serverTunnel)
+	if tunnel == "" {
+		return ""
+	}
+	if strings.Contains(tunnel, "://") {
+		return hostnet.ResolveServerURL(tunnel, "")
+	}
+	fallback := agentDefault
+	if fallback == "" && s.Settings != nil {
+		snap := s.Settings.Snapshot()
+		fallback = strings.TrimRight(strings.TrimSpace(snap.Server.ExternalURL), "/")
+	}
+	return hostnet.ResolveServerURL(tunnel, fallback)
+}
+
+// normalizeServerURL 校验 Agent 上报的服务端地址（只允许 http/https 绝对地址）。
+func normalizeServerURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 512 {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return strings.TrimRight(raw, "/")
 }
 
 // AgentPoll 长轮询取指令（需认证，原子取件；无指令则挂起至 poll_hold 秒或 ctx 取消）。
