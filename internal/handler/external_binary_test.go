@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,77 +13,63 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
 
-// TestFetchExternalBinaryValidatesContent 错误页/非 PE 内容必须拒绝，避免缓存脏文件。
-func TestFetchExternalBinaryValidatesContent(t *testing.T) {
+func TestValidateExternalContent(t *testing.T) {
 	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
 
-	t.Run("可执行文件", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("MZ\x90\x00payload"))
-		}))
-		defer srv.Close()
-		target := filepath.Join(dir, "ok.exe")
-		if err := fetchExternalBinary(context.Background(), srv.URL, target, true); err != nil {
-			t.Fatalf("PE 内容应通过: %v", err)
-		}
-		if _, err := os.Stat(target); err != nil {
-			t.Fatal("应写入缓存文件")
-		}
-	})
+	// 可执行文件：必须 MZ 开头
+	if err := validateExternalContent(write("ok.exe", "MZ\x90\x00payload"), false); err != nil {
+		t.Fatalf("PE 内容应通过: %v", err)
+	}
+	if err := validateExternalContent(write("bad.exe", "<!DOCTYPE html><html></html>"), false); err == nil {
+		t.Fatal("HTML 冒充 exe 应被拒绝")
+	}
+	if err := validateExternalContent(write("empty.exe", ""), false); err == nil {
+		t.Fatal("空内容应被拒绝")
+	}
 
-	t.Run("HTML 错误页", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("<!DOCTYPE html><html>502</html>"))
-		}))
-		defer srv.Close()
-		if err := fetchExternalBinary(context.Background(), srv.URL,
-			filepath.Join(dir, "bad.exe"), true); err == nil {
-			t.Fatal("HTML 页面应被拒绝")
+	// 脚本：允许文本，拒绝 HTML/XML
+	if err := validateExternalContent(write("ok.ps1", "# script\nWrite-Output hi\n"), true); err != nil {
+		t.Fatalf("脚本内容应通过: %v", err)
+	}
+	for _, html := range []string{
+		"<!DOCTYPE html><html></html>",
+		"<html><body>x</body></html>",
+		"<?xml version=\"1.0\"?>",
+	} {
+		if err := validateExternalContent(write("bad.ps1", html), true); err == nil {
+			t.Fatalf("HTML/XML 脚本应被拒绝: %q", html)
 		}
-	})
-
-	t.Run("脚本允许文本", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("# script\nWrite-Output hi\n"))
-		}))
-		defer srv.Close()
-		target := filepath.Join(dir, "ok.ps1")
-		if err := fetchExternalBinary(context.Background(), srv.URL, target, false); err != nil {
-			t.Fatalf("脚本内容应通过: %v", err)
-		}
-	})
-
-	t.Run("脚本拒绝 HTML", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("<html>nope</html>"))
-		}))
-		defer srv.Close()
-		if err := fetchExternalBinary(context.Background(), srv.URL,
-			filepath.Join(dir, "bad.ps1"), false); err == nil {
-			t.Fatal("HTML 脚本应被拒绝")
-		}
-	})
+	}
 }
 
-// TestExternalBinaryDownloadServesCached 命中缓存直接返回，且文件名规范化。
+// TestExternalBinaryDownloadServesCached 命中缓存直接返回，白名单外 404。
 func TestExternalBinaryDownloadServesCached(t *testing.T) {
 	dir := t.TempDir()
-	// 预置缓存，避免测试访问外网。
 	cache := filepath.Join(dir, ".external-cache")
 	if err := os.MkdirAll(cache, 0755); err != nil {
 		t.Fatal(err)
 	}
 	payload := []byte("MZfake-exe-content")
-	if err := os.WriteFile(filepath.Join(cache, "windows-exporter-amd64.exe"), payload, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(cache, "custom-tool.exe"), payload, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	cfg := config.Default()
 	cfg.Server.AgentBinaryDir = dir
+	cfg.Server.ExternalBinaries = map[string]string{
+		"custom-tool": "https://github.com/example/custom-tool.exe",
+	}
 	sc := &svc.ServiceContext{Config: cfg}
 
-	req := httptest.NewRequest("GET", "/api/external/binary/windows-exporter-amd64.exe", nil)
-	req.SetPathValue("name", "windows-exporter-amd64.exe")
+	req := httptest.NewRequest("GET", "/api/external/binary/custom-tool.exe", nil)
+	req.SetPathValue("name", "custom-tool.exe")
 	rec := httptest.NewRecorder()
 	ExternalBinaryDownload(sc)(rec, req)
 	if rec.Code != http.StatusOK {
@@ -102,7 +87,51 @@ func TestExternalBinaryDownloadServesCached(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("白名单外应 404，实际 %d", rec.Code)
 	}
+
+	// 非法名称（含路径分隔符）必须 404
+	req = httptest.NewRequest("GET", "/api/external/binary/a%2Fb", nil)
+	req.SetPathValue("name", "a/b")
+	rec = httptest.NewRecorder()
+	ExternalBinaryDownload(sc)(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("非法名称应 404，实际 %d", rec.Code)
+	}
 }
 
-var _ = json.Marshal
-var _ = strings.TrimSpace
+// TestEffectiveExternalBinariesFallsBackToDefault 未配置时使用内置默认（升级兼容）。
+func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
+	cfg := config.Default()
+	got := effectiveExternalBinaries(cfg)
+	if len(got) != 3 {
+		t.Fatalf("默认应有 3 条，实际 %d", len(got))
+	}
+	if _, ok := got["windows-exporter-amd64"]; !ok {
+		t.Fatal("默认应包含 windows-exporter-amd64")
+	}
+
+	// 配置了就用配置（完全覆盖，不与默认合并）
+	cfg.Server.ExternalBinaries = map[string]string{"only": "https://github.com/x"}
+	got = effectiveExternalBinaries(cfg)
+	if len(got) != 1 || got["only"] == "" {
+		t.Fatalf("应使用配置项: %v", got)
+	}
+}
+
+// TestFetchExternalBinaryRejectsNonWhitelistedHost 上游域名不在白名单时拒绝。
+func TestFetchExternalBinaryRejectsNonWhitelistedHost(t *testing.T) {
+	err := fetchExternalBinary(context.Background(),
+		"https://evil.example.com/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, nil)
+	if err == nil || !strings.Contains(err.Error(), "白名单") {
+		t.Fatalf("应拒绝非白名单域名，got %v", err)
+	}
+}
+
+// TestFetchExternalBinaryRejectsInternalHost 内网地址即使加进域名白名单也拒绝。
+func TestFetchExternalBinaryRejectsInternalHost(t *testing.T) {
+	hosts := []string{"127.0.0.1"}
+	err := fetchExternalBinary(context.Background(),
+		"http://127.0.0.1:1/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, hosts)
+	if err == nil || !strings.Contains(err.Error(), "内网") {
+		t.Fatalf("应拒绝内网地址，got %v", err)
+	}
+}

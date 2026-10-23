@@ -1246,6 +1246,10 @@
         if (s.type === 'bool') {
           inp = h('select', {}, [h('option', { value: 'true' }, ['true']), h('option', { value: 'false' }, ['false'])]);
           inp.value = s.value || 'false';
+        } else if (s.type === 'text') {
+          // 多行配置（如外部文件白名单）：每行一条 name=address
+          inp = h('textarea', { rows: '8', spellcheck: 'false' }, []);
+          inp.value = s.value || '';
         } else {
           inp = h('input', { value: s.value || '' }, []);
           if (s.secret) inp.type = 'password';

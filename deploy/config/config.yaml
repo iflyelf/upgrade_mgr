@@ -18,6 +18,22 @@ server:
                               # 例：upgrade-agent-linux-amd64、upgrade-agent-windows-amd64.exe
                               # 接入 Windows 主机时必须放入 windows-*.exe，否则下载 404
 
+  # 外部文件代缓存（可选）：由控制台代下载公网文件，主机用 http 拉取。
+  # 用于老系统（Windows Server 2008 R2 + PowerShell 2.0）不支持 TLS 1.2 的场景。
+  # 键 = /api/external/binary/{name} 中的 name；值 = 上游 URL，前缀 script: 表示文本脚本。
+  # 留空使用内置默认（windows_exporter amd64/arm64 与 install.ps1）。
+  # 也可在「设置 → 外部文件代缓存」页面维护，保存后立即生效（热加载）。
+  external_binaries: {}
+  #   windows-exporter-amd64: https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64.exe
+  #   windows-exporter-install.ps1: script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1
+
+  # 允许代下载的上游域名（逗号分隔）；留空用默认
+  # github.com / raw.githubusercontent.com / proxy.xiaonuo.live。
+  # 接口还会拒绝解析到内网/环回地址的主机，防止被当作 SSRF 跳板。
+  external_binary_hosts: []
+  # 缓存有效期（env EXTERNAL_BINARY_TTL）；留空默认 24h。
+  external_binary_ttl: 24h
+
 database:                     # 必填
   dsn: ""                     # 优先使用；如 postgresql://user:pass@host:5432/upgrade_mgr?sslmode=disable
   host: localhost

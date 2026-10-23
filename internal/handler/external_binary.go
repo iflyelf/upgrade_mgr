@@ -9,80 +9,140 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/safepath"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
 
-// 外部二进制白名单：由控制台代为下载并缓存，供老系统（无法 TLS 1.2）通过 HTTP 获取。
-//
-// 背景：Windows Server 2008 R2 自带的 PowerShell 2.0 / .NET 2.0/3.5 不支持 TLS 1.2，
-// 主机侧无法直连 GitHub。控制台（Go）支持 TLS 1.2，可代为下载后由主机用 http 拉取。
-type externalAsset struct {
-	URL  string
-	Exec bool // true=PE 可执行文件（校验 MZ），false=文本脚本
-}
-
-var externalBinaries = map[string]externalAsset{
-	"windows-exporter-amd64": {
-		URL:  "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64.exe",
-		Exec: true,
-	},
-	"windows-exporter-arm64": {
-		URL:  "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64.exe",
-		Exec: true,
-	},
-	// 安装脚本也由平台代缓存：Windows 2008 R2 的 PowerShell 2.0 无法用 TLS 1.2
-	// 直连 GitHub，但可以 http 访问平台。
-	"windows-exporter-install.ps1": {
-		URL:  "https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
-		Exec: false,
-	},
-}
-
 // externalBinaryMaxSize 单个文件上限，防止异常响应把磁盘写满。
 const externalBinaryMaxSize = 200 << 20
 
-// externalBinaryTTL 缓存有效期：过期后下次请求重新下载。
-const externalBinaryTTL = 24 * time.Hour
-
-// externalBinaryClient 下载外部二进制使用的客户端（不跟随无限重定向）。
+// externalBinaryClient 下载外部文件使用的客户端。
 var externalBinaryClient = &http.Client{Timeout: 10 * time.Minute}
 
-// ExternalBinaryDownload 下载白名单外部二进制（无鉴权，内容为公开文件）。
+// defaultExternalBinaries 首次部署的默认白名单。
 //
-// 缓存目录：<agent_binary_dir>/.external-cache。首次请求下载并落盘，
-// 后续直接命中缓存；文件大小与内容异常（HTML 错误页）会返回 502。
+// 运行期以 server.external_binaries 配置（配置文件或设置页）为准，修改后立即生效，
+// 无需重启：Handler 每次请求都从 s.Settings 快照读取。
+func defaultExternalBinaries() map[string]string {
+	return map[string]string{
+		"windows-exporter-amd64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64.exe",
+		"windows-exporter-arm64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64.exe",
+		"windows-exporter-install.ps1": "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
+	}
+}
+
+// effectiveExternalBinaries 返回当前生效的白名单。
+//
+// 优先使用配置（配置文件或设置页）；为空时用内置默认值，
+// 保证升级后原有 Windows 接入不因缺少配置而中断。
+func effectiveExternalBinaries(cfg *config.Config) map[string]string {
+	if cfg != nil && len(cfg.Server.ExternalBinaries) > 0 {
+		return cfg.Server.ExternalBinaries
+	}
+	return defaultExternalBinaries()
+}
+
+// effectiveExternalHosts 返回允许的上游域名。
+func effectiveExternalHosts(cfg *config.Config) []string {
+	if cfg != nil && len(cfg.Server.ExternalBinaryHosts) > 0 {
+		return cfg.Server.ExternalBinaryHosts
+	}
+	return extbin.DefaultHosts
+}
+
+// effectiveExternalTTL 返回缓存有效期。
+func effectiveExternalTTL(cfg *config.Config) time.Duration {
+	ttl := time.Duration(extbin.DefaultTTLSeconds) * time.Second
+	if cfg != nil && strings.TrimSpace(cfg.Server.ExternalBinaryTTL) != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(cfg.Server.ExternalBinaryTTL)); err == nil && d > 0 {
+			ttl = d
+		}
+	}
+	return ttl
+}
+
+// externalBinaryConfig 从 ServiceContext 取当前配置。
+func externalBinaryConfig(s *svc.ServiceContext) *config.Config {
+	if s == nil {
+		return nil
+	}
+	if s.Settings != nil {
+		snap := s.Settings.Snapshot()
+		return &snap
+	}
+	return s.Config
+}
+
+// ExternalBinaryDownload 下载白名单外部文件（无鉴权，内容为公开文件）。
+//
+// 白名单来自 server.external_binaries（配置文件 / 设置页），支持热加载：
+// 每次请求都读取最新快照，保存设置后立即生效，无需重启。
+// 缓存落盘到 <agent_binary_dir>/.external-cache。
 func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
-		key := strings.TrimSuffix(name, ".exe")
-		asset, ok := externalBinaries[key]
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		source := asset.URL
-
-		dir := s.Config.Server.AgentBinaryDir
-		if dir == "" {
-			dir = "./dist"
-		}
-		cacheDir := filepath.Join(dir, ".external-cache")
-		target := filepath.Join(cacheDir, key+".exe")
-		if err := safepath.EnsureWithin(dir, target); err != nil {
+		// 允许带扩展名访问：/api/external/binary/foo.exe 等同 foo
+		name = strings.TrimSuffix(name, ".exe")
+		if !extbin.ValidName(name) {
 			http.NotFound(w, r)
 			return
 		}
 
-		if !freshFile(target, externalBinaryTTL) {
-			if err := fetchExternalBinary(r.Context(), source, target, asset.Exec); err != nil {
-				log.Printf("⚠️ 下载外部二进制失败 %s: %v", name, err)
-				httpx.Fail(w, http.StatusBadGateway,
-					"控制台下载外部二进制失败（请确认控制台能访问 GitHub）: "+err.Error())
-				return
+		cfg := externalBinaryConfig(s)
+		entries, err := extbin.Parse(effectiveExternalBinaries(cfg))
+		if err != nil {
+			log.Printf("⚠️ external_binaries 配置非法: %v", err)
+			httpx.Fail(w, http.StatusInternalServerError, "外部文件白名单配置错误，请检查设置")
+			return
+		}
+		// 名称按大小写不敏感匹配（URL 已转小写，配置里可能保留大写）。
+		var asset *extbin.Entry
+		for i := range entries {
+			if strings.EqualFold(entries[i].Name, name) {
+				asset = &entries[i]
+				break
+			}
+		}
+		if asset == nil {
+			http.NotFound(w, r)
+			return
+		}
+
+		baseDir := "./dist"
+		if cfg != nil && strings.TrimSpace(cfg.Server.AgentBinaryDir) != "" {
+			baseDir = cfg.Server.AgentBinaryDir
+		}
+		cacheDir := filepath.Join(baseDir, ".external-cache")
+		// 缓存文件名统一使用配置中的名称，避免大小写差异产生两份缓存。
+		fileName := strings.ToLower(asset.Name)
+		if !asset.Script {
+			fileName += ".exe"
+		}
+		target := filepath.Join(cacheDir, fileName)
+		if err := safepath.EnsureWithin(baseDir, target); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+
+		ttl := effectiveExternalTTL(cfg)
+		if !freshFile(target, ttl) {
+			// 同一文件并发请求只下载一次，其余等待后直接命中缓存。
+			unlock := lockExternalTarget(target)
+			defer unlock()
+			if !freshFile(target, ttl) {
+				if fetchErr := fetchExternalBinary(r.Context(), asset.URL, target, asset.Script,
+					effectiveExternalHosts(cfg)); fetchErr != nil {
+					log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
+					httpx.Fail(w, http.StatusBadGateway,
+						"控制台下载外部文件失败（请确认控制台能访问该地址）: "+fetchErr.Error())
+					return
+				}
 			}
 		}
 
@@ -98,12 +158,12 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		contentType := "application/octet-stream"
-		if !asset.Exec {
+		if asset.Script {
 			contentType = "text/plain; charset=utf-8"
 		}
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Content-Disposition", "attachment; filename="+key+".exe")
-		http.ServeContent(w, r, key+".exe", info.ModTime(), f)
+		w.Header().Set("Content-Disposition", "attachment; filename="+fileName)
+		http.ServeContent(w, r, fileName, info.ModTime(), f)
 	}
 }
 
@@ -117,7 +177,16 @@ func freshFile(path string, ttl time.Duration) bool {
 }
 
 // fetchExternalBinary 下载到临时文件再原子替换，避免并发/中断留下半个文件。
-func fetchExternalBinary(ctx context.Context, source, target string, executable bool) error {
+//
+// hosts 是允许的上游域名白名单；下载前同时校验域名与目标 IP（拒绝内网），
+// 防止这项能力被当作 SSRF 跳板。
+func fetchExternalBinary(ctx context.Context, source, target string, script bool, hosts []string) error {
+	if err := extbin.HostAllowed(source, hosts); err != nil {
+		return err
+	}
+	if err := extbin.EnsureNotInternal(source); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return err
 	}
@@ -145,8 +214,7 @@ func fetchExternalBinary(ctx context.Context, source, target string, executable 
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
-	limited := io.LimitReader(resp.Body, externalBinaryMaxSize+1)
-	n, copyErr := io.Copy(tmp, limited)
+	n, copyErr := io.Copy(tmp, io.LimitReader(resp.Body, externalBinaryMaxSize+1))
 	closeErr := tmp.Close()
 	if copyErr != nil {
 		return copyErr
@@ -157,24 +225,46 @@ func fetchExternalBinary(ctx context.Context, source, target string, executable 
 	if n > externalBinaryMaxSize {
 		return fmt.Errorf("文件超过上限 %d 字节", externalBinaryMaxSize)
 	}
-	// 内容校验：可执行文件要求 MZ 头；脚本要求非 HTML。
-	head := make([]byte, 64)
-	var hn int
-	if f, err := os.Open(tmpPath); err == nil {
-		hn, _ = f.Read(head)
-		f.Close()
+	if err := validateExternalContent(tmpPath, script); err != nil {
+		return err
 	}
-	sample := strings.TrimSpace(strings.ToLower(string(head[:hn])))
-	if executable {
-		if !strings.HasPrefix(sample, "mz") {
-			return fmt.Errorf("下载内容不是 Windows 可执行文件（可能是错误页）")
-		}
-	} else {
+	return os.Rename(tmpPath, target)
+}
+
+// validateExternalContent 校验下载内容：exe 必须 PE（MZ），脚本不能是 HTML 错误页。
+func validateExternalContent(path string, script bool) error {
+	head := make([]byte, 64)
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	n, _ := f.Read(head)
+	f.Close()
+	if n == 0 {
+		return fmt.Errorf("下载内容为空")
+	}
+	sample := strings.TrimSpace(strings.ToLower(string(head[:n])))
+	if script {
 		for _, prefix := range []string{"<!doctype", "<html", "<head", "<body", "<?xml"} {
 			if strings.HasPrefix(sample, prefix) {
 				return fmt.Errorf("下载内容不是脚本，而是 HTML/XML 页面（可能是错误页）")
 			}
 		}
+		return nil
 	}
-	return os.Rename(tmpPath, target)
+	if !strings.HasPrefix(sample, "mz") {
+		return fmt.Errorf("下载内容不是 Windows 可执行文件（可能是错误页）")
+	}
+	return nil
+}
+
+// externalCacheMu 串行化同一文件的并发下载，避免重复拉取与半成品覆盖。
+var externalCacheMu sync.Map // target -> *sync.Mutex
+
+// lockExternalTarget 返回目标文件的下载锁。
+func lockExternalTarget(target string) func() {
+	v, _ := externalCacheMu.LoadOrStore(target, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }

@@ -12,8 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 )
 
 // Item 可配置项定义。
@@ -102,6 +104,50 @@ var Registry = []Item{
 	{Key: "agent.auto_update", Group: "Agent", Label: "自动升级旧 Agent（下载新二进制并重启 Agent）", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.AutoUpdate) },
 		Set: func(c *config.Config, v string) { c.Agent.AutoUpdate = v == "true" }},
+
+	// 外部文件代缓存（供老系统通过 HTTP 获取公网文件）
+	{Key: "server.external_binaries", Group: "外部文件代缓存",
+		Label: "白名单（每行 name=地址；脚本用 script: 前缀，如 windows-exporter-install.ps1=script:https://...）",
+		Type:  "text",
+		Get:   func(c *config.Config) string { return extbin.FormatText(c.Server.ExternalBinaries) },
+		Set: func(c *config.Config, v string) {
+			if m, err := extbin.ParseText(v); err == nil {
+				c.Server.ExternalBinaries = m
+			}
+		},
+		Validate: func(v string) error {
+			m, err := extbin.ParseText(v)
+			if err != nil {
+				return err
+			}
+			return extbin.ValidateConfig(m, nil)
+		}},
+	{Key: "server.external_binary_hosts", Group: "外部文件代缓存",
+		Label: "允许的上游域名（逗号分隔；留空用默认 github.com/raw.githubusercontent.com/proxy.xiaonuo.live）",
+		Type:  "string",
+		Get:   func(c *config.Config) string { return strings.Join(c.Server.ExternalBinaryHosts, ",") },
+		Set: func(c *config.Config, v string) {
+			if strings.TrimSpace(v) == "" {
+				c.Server.ExternalBinaryHosts = nil
+				return
+			}
+			c.Server.ExternalBinaryHosts = splitComma(v)
+		}},
+	{Key: "server.external_binary_ttl", Group: "外部文件代缓存",
+		Label: "缓存有效期（如 24h；留空默认 24h）", Type: "string",
+		Get: func(c *config.Config) string { return c.Server.ExternalBinaryTTL },
+		Set: func(c *config.Config, v string) { c.Server.ExternalBinaryTTL = strings.TrimSpace(v) },
+		Validate: func(v string) error {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return nil
+			}
+			d, err := time.ParseDuration(v)
+			if err != nil || d <= 0 {
+				return fmt.Errorf("无效时长（示例 24h / 30m）")
+			}
+			return nil
+		}},
 
 	// 日志
 	{Key: "log.level", Group: "日志", Label: "级别", Type: "string",
@@ -266,7 +312,17 @@ func (s *Service) View() []map[string]any {
 func (s *Service) Snapshot() config.Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return *s.cfg
+	snap := *s.cfg
+	// map 是引用类型：浅拷贝后并发读写会触发 data race，
+	// 这里克隆使用中的 map 字段（外部文件白名单）。
+	if s.cfg.Server.ExternalBinaries != nil {
+		m := make(map[string]string, len(s.cfg.Server.ExternalBinaries))
+		for k, v := range s.cfg.Server.ExternalBinaries {
+			m[k] = v
+		}
+		snap.Server.ExternalBinaries = m
+	}
+	return snap
 }
 
 // NeedsConsulReload 判断变更是否涉及 Consul 连接（需重建客户端）。
@@ -296,6 +352,18 @@ const MaskedSecret = "******"
 func IsMasked(v string) bool { return v == MaskedSecret }
 
 func b2s(b bool) string { return strconv.FormatBool(b) }
+
+// splitComma 按逗号拆分并去空白。
+func splitComma(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 func setInt(dst *int, v string) {
 	if n, err := strconv.Atoi(v); err == nil {

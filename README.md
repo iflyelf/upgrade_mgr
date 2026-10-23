@@ -1959,6 +1959,21 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 外部文件代缓存改为通用白名单（可页面配置、热加载）
+
+- 白名单不再硬编码：`server.external_binaries`（配置文件 map 或「设置 → 外部文件代缓存」）：
+  - 键 = `/api/external/binary/{name}` 的 name；值 = 上游 URL，前缀 `script:` 表示文本脚本；
+  - 环境变量 `EXTERNAL_BINARIES` 支持 `name=url,name2=script:url2`。
+- 支持热加载：接口每次请求读取设置快照，页面保存后立即生效，**无需重启**；
+  白名单为空时回退内置默认（windows_exporter amd64/arm64 + install.ps1），升级不断流。
+- 新增 `server.external_binary_hosts`（上游域名白名单，默认 github.com /
+  raw.githubusercontent.com / proxy.xiaonuo.live）与 `server.external_binary_ttl`（默认 24h）。
+- SSRF 防护：只允许配置内名称、只允许白名单域名、拒绝解析到环回/私网/链路本地地址、
+  200MB 上限、内容校验（exe 必须 MZ、脚本不能是 HTML）、同一文件并发下载串行化。
+- 设置页支持多行文本控件（`type: text`），白名单按行编辑；`Snapshot()` 深拷贝 map，
+  避免并发读写下 data race。
+- 启动时校验配置白名单（域名不在白名单直接启动失败，便于尽早发现配置错误）。
+
 ### 2026-10-23 Server 2008 R2 支持：平台代缓存与 PS2 兼容修复
 
 日志证据（17:05）：`PowerShell 2.0`、`CLR` 为 .NET 2.0，`TLS 1.2 可用: False`，
