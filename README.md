@@ -184,7 +184,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 - 示例 script_url 指向 examples/windows_exporter/install.ps1（经 proxy 代理）；Agent 默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行。
 - install.ps1 支持 install / update / uninstall / status；安装到 C:\Program Files\windows_exporter，服务名 windows_exporter，端口 16666，自动创建防火墙规则。
 - textfile 采集目录：C:\monitor\windows_exporter\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。
-- 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。
+- 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把命令脚本转为 UTF-8 BOM + CRLF，平台下发 install.ps1 时也会自动补 BOM，避免中文脚本乱码/语法错误。
 - Windows 10 / Server 2016 及以上自动使用 latest；Windows 7 / Server 2008 R2 ~ 2012 R2 自动切换 legacy（基于官方 v0.23.1 + Go 1.20，默认启用 hardware_info 移植），也可用 -Flavor latest|legacy 强制。
 - 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl。
 - 平台也无法出网（控制台请求 GitHub 502）时：在「外部文件」为 windows-exporter-`<arch>`（旧系统为 windows-exporter-`<arch>`-legacy）点「上传离线文件」，脚本会自动优先从平台获取；exe 与脚本都可离线上传。
@@ -316,7 +316,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<console
 - script_url points to examples/windows_exporter/install.ps1 (via proxy); the agent runs it with powershell.exe -NoProfile -ExecutionPolicy Bypass -File.
 - install.ps1 supports install / update / uninstall / status. It installs to C:\Program Files\windows_exporter, service windows_exporter, port 16666 and creates a firewall rule.
 - Textfile collector directory: C:\monitor\windows_exporter\textfile_inputs; use -ConfigPath for a custom config.
-- PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites .ps1 to UTF-8 BOM + CRLF to avoid encoding issues.
+- PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites command scripts to UTF-8 BOM + CRLF, and the console adds a BOM when serving install.ps1, avoiding encoding/parse errors.
 - Windows 10 / Server 2016 and newer use latest automatically; Windows 7 / Server 2008 R2 – 2012 R2 switch to legacy (based on official v0.23.1 + Go 1.20, with the ported hardware_info collector enabled by default). Force it with -Flavor latest|legacy.
 - On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl.
 - If the console also cannot reach GitHub (502), upload the exe under External files → windows-exporter-`<arch>` (legacy systems: windows-exporter-`<arch>`-legacy) → Upload offline file; the script then prefers the platform copy. Both exe and scripts can be uploaded offline.
@@ -2389,6 +2389,18 @@ MIT © iflyelf
   未上传时快速失败并提示上传，避免 WebClient 约 100 秒超时；直连仅在有 TLS 1.2 时尝试。
 - `/api/external/binary/{name}?local=1`：只读本地/缓存，绝不触发上游下载。
 - 新增单测：离线上传/优先下载/删除、HTML 伪脚本拒绝、默认重定向域名、代理回退。
+
+### 2026-10-24 修复 2008 R2 执行 install.ps1 语法错误（UnexpectedToken）
+
+- **根因**：PowerShell 2.0 对**无 BOM** 的 `.ps1` 按系统 ANSI（简体中文为 GBK）解码。
+  平台以 `text/plain` 原样下发 UTF-8 脚本，中文注释被拆成乱码字节，字符串引号失衡，
+  解析器在第 232 行报 `UnexpectedToken`；外层命令又用 `exit $LASTEXITCODE`
+  吞掉退出码，任务被误标为成功。
+- 平台下载接口对脚本**统一补 UTF-8 BOM**（本地离线、缓存、上游三种来源都生效），
+  仓库中的 `examples/windows_exporter/install.ps1` 也改为带 BOM 保存。
+- Windows 命令示例改为**子进程执行** `powershell.exe -File`，并显式传递退出码；
+  下载后先检查 BOM，缺失则用 UTF-8 重写，避免乱码与“失败却成功”。
+- 新增单测：脚本接口返回 BOM，且 `?local=1` 与普通下载一致。
 
 ### 2026-10-24 Windows Server 2008 R2 legacy 通道
 

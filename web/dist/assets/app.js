@@ -472,18 +472,49 @@
 
   // windowsInstallScript(action) 生成“先下载 install.ps1 再执行”的 PowerShell 命令脚本。
   // 兼容 PowerShell 2.0：用 System.Net.WebClient，不用 Invoke-WebRequest。
+  //
+  // 两个 2008 R2 关键点：
+  //   1. 下载的 .ps1 必须带 UTF-8 BOM，否则 PowerShell 2.0 按系统 ANSI(GBK) 解码，
+  //      中文注释会导致 UnexpectedToken（平台新版已在服务端补齐，这里再兜底一次）；
+  //   2. 用子进程 powershell.exe -File 执行，确保语法错误/脚本失败能拿到非 0 退出码，
+  //      不会被外层 `exit $LASTEXITCODE` 吞成成功。
   function windowsInstallScript(action) {
     var args = action === 'uninstall' ? ' uninstall -Yes' : ' ' + action;
     return [
       "$ErrorActionPreference = 'Stop'",
       "# 优先从平台下载（http 即可，兼容 Server 2008 R2 的 PowerShell 2.0）",
+      "# 不用 if 表达式赋值：PowerShell 2.0 上兼容性更稳妥",
       "$base = $env:UPGRADE_AGENT_SERVER_URL",
-      "$url = if ($base) { $base.TrimEnd('/') + '" + WINDOWS_INSTALL_SCRIPT_PLATFORM_URL + "' } " +
-        "else { '" + WINDOWS_INSTALL_SCRIPT_URL + "' }",
-      "$f = Join-Path $env:TEMP 'windows_exporter-install.ps1'",
+      "$url = '" + WINDOWS_INSTALL_SCRIPT_URL + "'",
+      "if ($base) {",
+      "  $url = $base.TrimEnd('/') + '" + WINDOWS_INSTALL_SCRIPT_PLATFORM_URL + "'",
+      "}",
+      "$tmpDir = $env:TEMP",
+      "if (-not $tmpDir) { $tmpDir = [System.IO.Path]::GetTempPath() }",
+      "$f = Join-Path $tmpDir 'windows_exporter-install.ps1'",
       '(New-Object System.Net.WebClient).DownloadFile($url, $f)',
-      '& $f' + args,
-      'exit $LASTEXITCODE'
+      "# 确保 UTF-8 BOM：PowerShell 2.0 只有看到 BOM 才按 UTF-8 解析",
+      '$bytes = [System.IO.File]::ReadAllBytes($f)',
+      'if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {',
+      '  $text = [System.IO.File]::ReadAllText($f, [System.Text.Encoding]::UTF8)',
+      '  [System.IO.File]::WriteAllText($f, $text, (New-Object System.Text.UTF8Encoding($true)))',
+      '}',
+      "# 子进程执行：语法错误/脚本失败都会返回非 0 退出码",
+      "$ps = $env:WINDOWS_EXPORTER_POWERSHELL",
+      "if (-not $ps) { $ps = 'powershell.exe' }",
+      "if ($env:SystemRoot) {",
+      "  $candidate = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'",
+      "  if (Test-Path $candidate) { $ps = $candidate }",
+      "}",
+      "$code = 1",
+      "try {",
+      '  & $ps -NoProfile -ExecutionPolicy Bypass -File $f' + args,
+      "  if ($LASTEXITCODE -ne $null) { $code = $LASTEXITCODE }",
+      "} catch {",
+      "  [Console]::Error.WriteLine('ERROR: ' + $_.Exception.Message)",
+      "  $code = 1",
+      "}",
+      "exit $code"
     ].join('\n');
   }
 
