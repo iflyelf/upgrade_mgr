@@ -40,7 +40,6 @@ cross:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/upgrade-agent-linux-amd64 ./cmd/agent
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/upgrade-agent-linux-arm64 ./cmd/agent
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm go build -trimpath -ldflags "$(LDFLAGS)" -o dist/upgrade-agent-linux-arm ./cmd/agent
-	$(MAKE) agent-windows
 
 ## agent-legacy: 用 Go 1.23（最后一个支持内核 2.6.32 的版本）编译 Agent，兼容 CentOS 6
 ## Agent 只依赖标准库，借助独立 modfile 避开主 go.mod 的 go 1.26 要求
