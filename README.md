@@ -54,6 +54,9 @@
 
 Go 1.26（`CGO_ENABLED=0`，交叉编译 linux/amd64、arm64、arm）· 标准库 net/http（Go 1.22 路由）· PostgreSQL(`lib/pq`) · hashicorp/consul/api · Prometheus · 前端原生内嵌（后续可替换为 Vue3 构建产物）
 
+Agent 构建矩阵：Linux 普通构建（Go 1.26）、Linux legacy（Go 1.23，CentOS 6）、
+Windows（Go 1.20，Server 2008 R2 ~ Windows 11，amd64/arm64，依赖 `golang.org/x/sys`）。
+
 ---
 
 ## 快速开始
@@ -81,7 +84,13 @@ export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
 ## 部署方式
 
 > 下载均通过 `https://down.xiaonuo.live?url=` 代理加速，`wget` 支持断点续传(`-c`)。
-> 按需把 `amd64` 换成 `arm64` 或 `arm`。CentOS 6 请使用 `*-legacy` 版本。
+> Linux 按需把 `amd64` 换成 `arm64` 或 `arm`；CentOS 6 请使用 `*-legacy` 版本。
+> 接入 **Windows 主机**（Server 2008 R2 ~ Windows 11）时，还要把
+> `upgrade-agent-windows-amd64.zip`（或 `arm64`）解压到控制台的 `dist` 目录，否则下载 404。
+>
+> **Windows Agent 是否包含在 Release 里？** 包含。CI 的 `agent-windows` 作业会构建
+> `upgrade-agent-windows-{amd64,arm64}.exe` 并打包为 `.zip`，随 `latest`/版本 Release 一起发布；
+> 但 **Docker 镜像只内置 Linux 当前架构**，接 Windows 主机需按下文把 `dist` 挂进容器。
 
 ### 方式一：systemd（推荐，直接跑在宿主机）
 
@@ -91,16 +100,47 @@ wget -q -c --no-check-certificate -O /tmp/upgrade-mgr.tar.gz \
   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-mgr-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-mgr.tar.gz -C /tmp
 
-# 1.1 下载 Agent 二进制（供控制台生成一键安装命令时下载）
+# 1.1 下载 Linux Agent 二进制（供控制台生成一键安装命令时下载）
 wget -q -c --no-check-certificate -O /tmp/upgrade-agent.tar.gz \
   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-agent.tar.gz -C /tmp
+
+# 1.2 下载 Windows Agent 二进制（Windows 主机接入必需，缺了会 404）
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.zip \
+  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
+unzip -o /tmp/upgrade-agent-windows-amd64.zip -d /tmp
+
+# 可选：按需补充其他平台/架构（Windows on ARM、Linux arm64、CentOS 6 legacy）
+# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-arm64.zip \
+#   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-arm64.zip"
+# unzip -o /tmp/upgrade-agent-windows-arm64.zip -d /tmp
+# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-arm64.tar.gz \
+#   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-arm64.tar.gz"
+# tar -xzf /tmp/upgrade-agent-linux-arm64.tar.gz -C /tmp
+# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-legacy.tar.gz \
+#   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64-legacy.tar.gz"
+# tar -xzf /tmp/upgrade-agent-legacy.tar.gz -C /tmp
 
 # 2. 替换二进制(mv -f 原子覆盖)
 mkdir -p /opt/upgrade-mgr/dist
 mv -f /tmp/upgrade-mgr-linux-amd64 /usr/local/bin/upgrade-mgr
 chmod +x /usr/local/bin/upgrade-mgr
-mv -f /tmp/upgrade-agent-linux-amd64 /opt/upgrade-mgr/dist/upgrade-agent-linux-amd64
+# 文件名必须保持 upgrade-agent-<os>-<arch>[-legacy][.exe]，控制台按此名下发
+mv -f /tmp/upgrade-agent-linux-amd64      /opt/upgrade-mgr/dist/upgrade-agent-linux-amd64
+mv -f /tmp/upgrade-agent-windows-amd64.exe /opt/upgrade-mgr/dist/upgrade-agent-windows-amd64.exe
+# 可选（与上面 1.2 的下载项对应）
+# mv -f /tmp/upgrade-agent-windows-arm64.exe /opt/upgrade-mgr/dist/upgrade-agent-windows-arm64.exe
+# mv -f /tmp/upgrade-agent-linux-arm64       /opt/upgrade-mgr/dist/upgrade-agent-linux-arm64
+# mv -f /tmp/upgrade-agent-linux-amd64-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-amd64-legacy
+
+# 2.1 确认 dist 目录（控制台的 Agent 下载目录，默认 server.agent_binary_dir=./dist，
+#     systemd 单元里 WorkingDirectory=/opt/upgrade-mgr，所以实际是 /opt/upgrade-mgr/dist）
+ls -l /opt/upgrade-mgr/dist/
+# 应至少包含：
+#   upgrade-agent-linux-amd64             Linux x86_64
+#   upgrade-agent-windows-amd64.exe       Windows Server 2008 R2 ~ Windows 11（x64）
+# 需要接入 Windows on ARM / Linux arm64 / CentOS 6 时，再补充对应文件。
+# 缺少目标平台文件时，页面上该主机只会被跳过并提示「二进制不可用 / 下载 404」。
 
 # 3. 准备配置目录和数据库
 mkdir -p /etc/upgrade-mgr /data/artifacts
@@ -146,6 +186,45 @@ systemctl status upgrade-mgr
 # 访问 http://your-server-ip:8090
 ```
 
+> `unzip` 不可用时先安装：`yum install -y unzip` / `apt install -y unzip`。
+> 也可以只下载当前要接入的平台：只接 Linux 主机就不必放 Windows 的 `.exe`，反之亦然。
+> Docker 镜像已内置 linux/amd64 的 Agent，Windows Agent 需按下文单独放入 `dist` 目录。
+
+#### Windows 目标机接入（同属 systemd 部署方式）
+
+1. 控制台「主机」页 →「接入主机」→ 操作系统选 **Windows** → 选架构（绝大多数为 `amd64`）→
+   生成接入命令；
+2. 把命令粘贴到目标机的**管理员 PowerShell** 中执行（Server 2008 R2 自带的 PowerShell 2.0 即可）：
+
+```powershell
+# 控制台生成的就是下面这种形式（令牌一次性、15 分钟有效，每台机器生成一次；
+# 换行在 PowerShell 里可直接分行粘贴，也可用分号连成一行）
+Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP 'upgrade-agent.exe')
+(New-Object System.Net.WebClient).DownloadFile('http://your-server-ip:8090/api/agent/binary/windows-amd64', (Join-Path $env:TEMP 'upgrade-agent.exe'))
+Start-Process -FilePath (Join-Path $env:TEMP 'upgrade-agent.exe') -ArgumentList 'install','--server','http://your-server-ip:8090','--enroll-token','<token>' -Wait -NoNewWindow
+```
+
+3. 验证：
+
+```powershell
+Get-Service upgrade-agent            # 状态应为 Running，启动类型 Automatic
+Get-Content "$env:ProgramData\upgrade-agent\state.json"   # 注册凭据（仅管理员可读）
+```
+
+- 如果是在 **cmd** 里操作，先执行 `powershell -NoProfile -ExecutionPolicy Bypass` 再粘贴命令；
+- 服务以 `LocalSystem` 运行，重启后自动恢复；失败恢复动作 5s/10s/30s 自动重启；
+  另注册计划任务 `upgrade-agent-watchdog` 每分钟兜底；
+- 默认路径：`%ProgramFiles%\upgrade-agent\upgrade-agent.exe`、`%ProgramData%\upgrade-agent\state.json`；
+- 卸载：`& "$env:ProgramFiles\upgrade-agent\upgrade-agent.exe" uninstall`；
+- **平台地址填写**：Windows 主机若只能通过专线/VPN 隧道访问平台，在主机页「编辑」里填
+  「平台侧隧道地址」，保存后 Agent 约 30 秒内自动切换（详见下文「隧道连通性测试」）；
+- **证书**：若控制台开启了 HTTPS/双向 TLS，安装命令追加
+  `--tls-ca C:\path\ca.crt`（双向 TLS 再加 `--tls-cert` / `--tls-key`），
+  证书路径会写入 state。注意 Windows Server 2008 R2 默认未启用 TLS 1.2，需先打 KB3140245。
+
+> 控制台必须能提供 `upgrade-agent-windows-amd64.exe`：即上文步骤 1.2/2 放到
+> `/opt/upgrade-mgr/dist/` 下的文件；否则 Windows 主机会下载 404。
+
 ### 方式二：Docker（推荐用于快速体验）
 
 ```bash
@@ -163,12 +242,28 @@ cat > config/config.yaml <<'EOF'
 # 配置内容同上
 EOF
 
-# 4. 启动
+# 4. （可选）放入 Windows Agent 等其他平台的二进制
+#    镜像内置的只有 Linux 当前架构；要接 Windows 主机必须挂载 dist 目录，
+#    并把文件命名为 upgrade-agent-windows-amd64.exe。
+mkdir -p dist
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.zip \
+  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
+unzip -o /tmp/upgrade-agent-windows-amd64.zip -d dist
+
+# 5. 在 docker-compose.yml 中放开 dist 挂载（见下方说明）
+#      volumes:
+#        - ./dist:/opt/upgrade-mgr/dist:ro
+
+# 6. 启动
 docker compose up -d
 
-# 5. 查看日志
+# 7. 查看日志
 docker compose logs -f
 ```
+
+> Windows 主机接入：容器内 `server.agent_binary_dir` 为 `/opt/upgrade-mgr/dist`，
+> 所以必须把宿主机的 `./dist` 挂到该路径（`deploy/docker/docker-compose.yml` 里已预留注释）。
+> 只在容器里放 Linux Agent 时，Windows 主机下载会 404。
 
 镜像仓库：
 - 华为云 SWR（推荐，国内可访问）: `swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest`
@@ -514,13 +609,36 @@ systemctl status upgrade-agent  # systemd
 status upgrade-agent            # upstart
 ```
 
+**Windows 主机（手动安装）**
+
+```powershell
+# 在管理员 PowerShell 中执行；Server 2008 R2 的 PowerShell 2.0 可用
+$dir = "$env:TEMP\upgrade-agent-install"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+(New-Object System.Net.WebClient).DownloadFile('https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip', "$dir\agent.zip")
+
+# PowerShell 5+：Expand-Archive -Path "$dir\agent.zip" -DestinationPath $dir -Force
+# PowerShell 2.0（2008 R2）没有 Expand-Archive，用 Shell.Application 解压：
+$shell = New-Object -ComObject Shell.Application
+$shell.Namespace($dir).CopyHere($shell.Namespace("$dir\agent.zip").Items())
+
+& "$dir\upgrade-agent-windows-amd64.exe" install --server https://upgrade.example.com --enroll-token <token>
+Get-Service upgrade-agent
+```
+
+> 更简单的方式是在控制台「接入主机」选择 Windows 后复制一键命令（走
+> `/api/agent/binary/windows-amd64`，无需手工解压）。
+> Windows 的默认安装路径、服务名、卸载方式见上文「Windows 目标机接入」。
+
 > **一键安装说明**：控制台生成的安装命令从 `server.agent_binary_dir`（默认 `./dist`）下载
-> `upgrade-agent-linux-<arch>`。systemd 部署请按上面步骤把 Agent 二进制放到
-> `/opt/upgrade-mgr/dist/`（服务的 `WorkingDirectory`），Docker 镜像已内置对应架构的 Agent。
-> 若自定义目录，请设置环境变量 `AGENT_BINARY_DIR`。
+> 对应平台的 Agent：Linux 为 `upgrade-agent-linux-<arch>`，Windows 为
+> `upgrade-agent-windows-<arch>.exe`。systemd 部署请按上面步骤把二进制放到
+> `/opt/upgrade-mgr/dist/`（服务的 `WorkingDirectory`），Docker 镜像只内置了 Linux 当前架构的
+> Agent；接 Windows 主机需额外挂载 `dist` 目录。若自定义目录，请设置环境变量 `AGENT_BINARY_DIR`。
 
 > **注册状态说明**：`install` 会在启动服务前把 `--server` / `--enroll-token` 写入
-> `/var/lib/upgrade-agent/state.json`（0600），因此 systemd/upstart 启动 `run` 时无需再带令牌。
+> `/var/lib/upgrade-agent/state.json`（0600；Windows 为
+> `%ProgramData%\upgrade-agent\state.json`），因此 systemd/upstart/SCM 启动 `run` 时无需再带令牌。
 > 已注册且凭据完整的 state 不会被重装覆盖；如需换服务器或重新注册，先执行
 > `systemctl stop upgrade-agent && rm -f /var/lib/upgrade-agent/state.json`，
 > 再在控制台生成新令牌（一次性，默认 15 分钟有效）并重新执行安装命令。
@@ -1075,13 +1193,20 @@ API 创建示例：
                              │ HTTP/HTTPS (长轮询)
                              ▼
         ┌────────────────────────────────────────────┐
-        │              Agent 集群 (upgrade-agent)     │
+        │        Agent 集群 (upgrade-agent)           │
         │  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  │
         │  │ host1│  │ host2│  │ host3│  │ host4│  │
         │  └──────┘  └──────┘  └──────┘  └──────┘  │
         │    服务A      服务A      服务B      服务C   │
+        │  Linux(systemd/upstart) · Windows(SCM)     │
         └────────────────────────────────────────────┘
 ```
+
+控制台只主动**下发**指令，所有连接均由 Agent 发起（长轮询）。因此：
+
+- 主机无需开放入站端口，NAT/多网卡/隧道场景只需保证 Agent 能访问控制台；
+- 控制台需提供目标平台对应的 Agent 二进制（`server.agent_binary_dir`）；
+- Windows 主机以 SCM 服务运行，与 Linux 的 systemd/upstart 处于同一套编排流程。
 
 ### 核心特性
 
@@ -1153,7 +1278,6 @@ DELETE /api/components/{id}?cascade_tasks=true  # 连带删除引用任务后删
   做二次确认；无论成功失败都会写审计日志（`component.delete`，详情包含 `cascade_tasks`、
   `deleted_tasks`、`referenced_tasks`）。
 - 制品文件在预检通过后才清理，避免组件删不掉但文件已丢。
-```
 
 ### 制品管理
 
@@ -1219,11 +1343,14 @@ PUT /api/hosts/{id}                     # 编辑主机业务字段（管理员�
 DELETE /api/hosts/{id}                  # 删除主机（管理员）
 GET /api/hosts/{ip}/upgrade-history     # 主机升级历史
 POST /api/hosts/sync                    # 从 Consul 同步主机
+POST /api/hosts/{id}/tunnel-test        # 从平台侧拨测隧道地址（管理员）
 ```
 
 **主机编辑**
 
 - 可维护字段：`hostname`、`account`、`app_code`、`biz_group`、`department`、`vendor`、`host_type`。
+- 网络字段（可选）：`tunnel_ip`（主机侧隧道 IP，仅展示/筛选）、`server_tunnel_url`
+  （平台侧隧道地址，Agent 连接使用，保存后自动切换并触发自检）。
 - 未提交的字段保持原值，传空字符串表示清空。
 - `ip`、`os_family`、`arch`、`agent_status` 等由 Agent 上报，不允许页面修改。
 - Agent 重新注册会覆盖 `hostname`；Consul 同步返回非空业务字段时会覆盖对应字段。
@@ -1359,7 +1486,7 @@ ldd your-binary  # 应为静态链接（not a dynamic executable）
 | `SESSION_SECRET` | 建议所有副本显式设置相同值（32+ 字节）；留空时程序会生成一次并持久化到 `app_settings`，多副本/重启共享 | 会话 Cookie 和 Casdoor OAuth state 都用它做 HMAC；滚动重启时不要随意更换 |
 | 制品存储 | `artifact.storage_type: s3` 或 `oss`；或所有副本挂载同一个 RWX 共享目录 | 默认 `local` 写在容器本地盘，上传和下载命中不同副本会 404 |
 | 编排器 | 无需额外配置；数据库连接可用即可 | PostgreSQL advisory lock 自动保证同一时刻只有一个副本推进批次 |
-| Agent 二进制 | 使用镜像内置的 `/opt/upgrade-mgr/dist/upgrade-agent-linux-<arch>`，或共享 `agent_binary_dir` | 一键安装命令需要从服务端目录读取二进制 |
+| Agent 二进制 | 使用镜像内置的 `/opt/upgrade-mgr/dist/upgrade-agent-linux-<arch>`，或共享 `agent_binary_dir`；接 Windows 主机还需放入 `upgrade-agent-windows-<arch>.exe` | 一键安装命令需要从服务端目录读取二进制，缺失对应平台文件会 404 |
 | 连接池 | `database.max_open_conns` 至少 4（默认 50；小于 4 时自动调整，建议 10+） | 编排器、维护、Consul 同步各自可能持锁并同时查询 |
 
 推荐配置：
@@ -1684,8 +1811,10 @@ cmd/server/   控制台入口          cmd/agent/    被控端入口
 internal/
   config/ setting/ svc/ auth/ middleware/ handler/
   logic/{agentgw,component,artifact,sync,task}
-  agent/{watchdog,svcmgr,downloader,binswap,executor,installer,selfupdate}
-  pkg/{ipx,runner,notify,signer,consul,httpx,safepath,pglock,...}
+  agent/{watchdog,svcmgr,downloader,binswap,executor,installer,selfupdate,
+         agentpath,osinfo,winsvc,tlsclient}
+  pkg/{ipx,runner,notify,signer,consul,httpx,safepath,pglock,
+       netinfo,hostnet,tunnelprobe,...}
   migrate/       数据库迁移
   storage/       制品存储（local/s3/oss）
   metrics/       Prometheus 指标

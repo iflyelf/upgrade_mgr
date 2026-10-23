@@ -11,6 +11,9 @@ services:
       - ./config/config.yaml:/etc/upgrade-mgr/config.yaml:ro
       - ./data/artifacts:/data/artifacts
       - ./logs:/var/log/upgrade-mgr
+      # 需要接入 Windows / 其他架构主机时放开：把宿主 ./dist 挂进 Agent 下载目录
+      # （文件名需为 upgrade-agent-<os>-<arch>[-legacy][.exe]）
+      # - ./dist:/opt/upgrade-mgr/dist:ro
     environment:
       # 可选：通过环境变量覆盖配置
       - TZ=Asia/Shanghai
