@@ -27,11 +27,11 @@ type tunnelTestRequest struct {
 	TimeoutSeconds int `json:"timeout_seconds"`
 }
 
-// HostTunnelTest 从平台侧拨测隧道地址（管理员，租户隔离）。
+// HostTunnelTest 从平台侧拨测连接地址（管理员，租户隔离）。
 //
-// 说明：平台不反连主机，这里拨测的是「Agent 要连接的平台隧道地址」，
+// 说明：平台不反连主机，这里拨测的是「Agent 要连接的平台地址」，
 // 用于在保存前发现地址填错、端口未放行、TLS 证书不匹配等问题。
-// 它不能替代主机侧实测（隧道可能是单向或仅主机网段可达）。
+// 它不参与隧道建立，也不能替代主机侧实测（隧道可能仅主机网段可达）。
 func HostTunnelTest(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -51,8 +51,8 @@ func HostTunnelTest(s *svc.ServiceContext) http.HandlerFunc {
 		}
 
 		var (
-			ip, tunnelIP, serverTunnel, agentDefault string
-			opErr                                    error
+			ip, tunnelIP, serverURLOverride, agentDefault string
+			opErr                                         error
 		)
 		defer func() {
 			auditOpDetails(s, r, audit.ActionHostTunnelTest, "host", strconv.FormatInt(id, 10), ip, opErr,
@@ -61,11 +61,11 @@ func HostTunnelTest(s *svc.ServiceContext) http.HandlerFunc {
 
 		cond, condArgs := reqScope(r).Where("", 2)
 		err = s.DB.QueryRowContext(r.Context(), `
-			SELECT ip, COALESCE(tunnel_ip,''), COALESCE(server_tunnel_url,''),
+			SELECT ip, COALESCE(tunnel_ip,''), COALESCE(server_url_override,''),
 			       COALESCE(agent_default_server_url,'')
 			FROM hosts WHERE id=$1 AND `+cond,
 			append([]any{id}, condArgs...)...).
-			Scan(&ip, &tunnelIP, &serverTunnel, &agentDefault)
+			Scan(&ip, &tunnelIP, &serverURLOverride, &agentDefault)
 		if errors.Is(err, sql.ErrNoRows) {
 			opErr = err
 			httpx.Fail(w, http.StatusNotFound, "主机不存在或无权访问")
@@ -79,11 +79,11 @@ func HostTunnelTest(s *svc.ServiceContext) http.HandlerFunc {
 
 		target := strings.TrimSpace(req.Target)
 		if target == "" {
-			target = serverTunnel
+			target = serverURLOverride
 		}
 		if target == "" {
 			httpx.Fail(w, http.StatusBadRequest,
-				"该主机未配置平台侧隧道地址（也可在请求体中传 target 测试候选地址）")
+				"该主机未配置连接地址覆盖（也可在请求体中传 target 测试候选地址）")
 			return
 		}
 
@@ -93,7 +93,7 @@ func HostTunnelTest(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		resolved := hostnet.ResolveServerURL(target, fallback)
 		if resolved == "" {
-			httpx.Fail(w, http.StatusBadRequest, "隧道地址非法：支持 IP、IP:端口或 http(s) URL")
+			httpx.Fail(w, http.StatusBadRequest, "连接地址非法：支持 IP、IP:端口或 http(s) URL")
 			return
 		}
 

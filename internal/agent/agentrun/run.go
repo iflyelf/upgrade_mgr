@@ -34,15 +34,19 @@ type Config struct {
 	// ServerURL 是 Agent 当前实际连接的服务端地址：管理员为该主机配置
 	// 隧道地址后会被心跳响应覆盖。
 	ServerURL string
-	// DefaultServerURL 是安装时写入的默认地址。隧道切换后保留原值，
-	// 服务端清空隧道地址时 Agent 据此回退，避免隧道配置误删后失去连接。
+	// DefaultServerURL 是安装时写入的默认地址。连接地址被覆盖后保留原值，
+	// 服务端清空覆盖时 Agent 据此回退，避免配置误删后失去连接。
 	DefaultServerURL string `json:"default_server_url,omitempty"`
-	EnrollToken      string
-	AgentID          string
-	Token            string
-	Secret           string
-	StatePath        string
-	LastHeartbeat    time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
+	// ServerURLs 是备用连接地址列表（安装时用逗号分隔多个 --server 或手工写入
+	// state）。当前地址连续连接失败时按顺序轮换，减少对服务端下发覆盖的依赖。
+	// 隧道由隧道软件负责建立；这里只负责"连哪个入口"。
+	ServerURLs    []string `json:"server_urls,omitempty"`
+	EnrollToken   string
+	AgentID       string
+	Token         string
+	Secret        string
+	StatePath     string
+	LastHeartbeat time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
 	// Version/Variant 是编译期注入的构建信息，不写入 state：
 	// 自升级替换二进制并重启后，新进程会自动使用新值。
 	Version string `json:"-"`
@@ -71,10 +75,10 @@ type Agent struct {
 	// executed 记录本进程已执行过的指令 ID，防止至少一次投递导致重复升级。
 	// 只在验签通过、准备执行时写入；进程重启后服务端不会重新投递已派发指令。
 	executed map[string]time.Time
-	// tunnelFailures 连续多少次心跳在隧道地址上失败。不落盘：
-	// 进程重启后重新计数，避免旧值导致立即回退。达到阈值即退回默认地址，
-	// 防止隧道配置错误把 Agent 永久锁死在不可达地址上。
-	tunnelFailures int
+	// connectFailures 连续多少次心跳失败。不落盘：进程重启后重新计数，
+	// 避免旧值导致立即回退。在覆盖地址上达到阈值即退回默认地址，
+	// 在默认地址上达到阈值则轮换到下一个备用地址。
+	connectFailures int
 	// tunnelFailURL/tunnelFailAt 记录刚失败的隧道地址，短期内不再重复切换，
 	// 避免「切过去失败 → 回退 → 服务端再次下发 → 再失败」的来回抖动。
 	tunnelFailURL string
@@ -103,6 +107,7 @@ const (
 func New(cfg Config) *Agent {
 	// 容忍 --server 末尾多写斜杠，避免请求路径变成 //api/...
 	cfg.ServerURL = strings.TrimRight(cfg.ServerURL, "/")
+	cfg.ServerURLs = normalizeServerList(cfg.ServerURL, cfg.ServerURLs)
 	if cfg.DefaultServerURL == "" {
 		// 旧 state 没有该字段：把当前地址当作默认地址，保证可回退。
 		cfg.DefaultServerURL = cfg.ServerURL
@@ -256,7 +261,7 @@ func (a *Agent) heartbeat() {
 	err := a.postJSON("/api/agent/heartbeat", req, &resp)
 	if err != nil {
 		log.Printf("⚠️ 心跳失败: %v", err)
-		a.handleTunnelFailure()
+		a.handleConnectFailure()
 	} else {
 		// 结果已送达：清除待上报值（仅当期间没有新结果覆盖）。
 		if pending != nil {
@@ -768,28 +773,83 @@ func (a *Agent) exitIP() string {
 	return a.cfg.ExitIP
 }
 
-// handleTunnelFailure 在隧道地址连续不可达时回退到默认地址。
+// handleConnectFailure 处理连续心跳失败：覆盖地址先回退，默认地址再轮换备用。
 //
-// 场景：管理员填了错误的隧道地址 → Agent 切过去后连不上服务端，
-// 也就收不到「清空隧道」的指令。连续 3 次（约 90 秒）失败即自动回退，
-// 回退后若服务端仍要求隧道地址，会再次切换，从而形成自愈循环。
-func (a *Agent) handleTunnelFailure() {
-	if a.cfg.ServerURL == a.cfg.DefaultServerURL || a.cfg.DefaultServerURL == "" {
-		a.tunnelFailures = 0
+// 场景一：管理员填了错误的「连接地址覆盖」→ Agent 切过去后连不上服务端，
+// 也就收不到「清空覆盖」的心跳响应。连续 3 次（约 90 秒）失败即回退默认地址。
+// 场景二：默认地址本身不可用（DNS/入口故障）→ 连续 2 次失败后轮换到下一个
+// 备用地址（安装时 --server 传入的多个地址），避免必须依赖服务端下发才能恢复。
+func (a *Agent) handleConnectFailure() {
+	onDefault := a.cfg.DefaultServerURL == "" || a.cfg.ServerURL == a.cfg.DefaultServerURL
+	if !onDefault {
+		a.connectFailures++
+		if a.connectFailures < 3 {
+			return
+		}
+		log.Printf("⚠️ 连接地址连续 %d 次心跳失败，回退默认地址 %s", a.connectFailures, a.cfg.DefaultServerURL)
+		a.tunnelFailURL = a.cfg.ServerURL
+		a.tunnelFailAt = time.Now()
+		a.cfg.ServerURL = a.cfg.DefaultServerURL
+		a.connectFailures = 0
+		if err := a.saveState(); err != nil {
+			log.Printf("⚠️ 保存回退地址失败: %v", err)
+		}
 		return
 	}
-	a.tunnelFailures++
-	if a.tunnelFailures < 3 {
+
+	a.connectFailures++
+	if a.connectFailures < 2 {
 		return
 	}
-	log.Printf("⚠️ 隧道地址连续 %d 次心跳失败，回退默认地址 %s", a.tunnelFailures, a.cfg.DefaultServerURL)
-	a.tunnelFailURL = a.cfg.ServerURL
-	a.tunnelFailAt = time.Now()
-	a.cfg.ServerURL = a.cfg.DefaultServerURL
-	a.tunnelFailures = 0
+	a.connectFailures = 0
+	next := a.nextServerURL()
+	if next == "" || next == a.cfg.ServerURL {
+		return
+	}
+	log.Printf("🔁 默认地址不可达，切换备用地址: %s -> %s", a.cfg.ServerURL, next)
+	a.cfg.ServerURL = next
 	if err := a.saveState(); err != nil {
-		log.Printf("⚠️ 保存回退地址失败: %v", err)
+		log.Printf("⚠️ 保存备用地址失败: %v", err)
 	}
+}
+
+// nextServerURL 返回备用地址列表中的下一个地址（循环）。
+func (a *Agent) nextServerURL() string {
+	urls := a.cfg.ServerURLs
+	if len(urls) < 2 {
+		return ""
+	}
+	cur := strings.TrimRight(a.cfg.ServerURL, "/")
+	for i, u := range urls {
+		if strings.TrimRight(u, "/") == cur {
+			return urls[(i+1)%len(urls)]
+		}
+	}
+	return urls[0]
+}
+
+// normalizeServerList 去重并规范化备用地址列表。
+//
+// 当前地址始终包含在列表首位（若原本不在），保证轮换时有完整集合。
+func normalizeServerList(current string, list []string) []string {
+	seen := make(map[string]bool, len(list)+1)
+	out := make([]string, 0, len(list)+1)
+	add := func(u string) {
+		u = strings.TrimRight(strings.TrimSpace(u), "/")
+		if u == "" || seen[u] {
+			return
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	add(current)
+	for _, u := range list {
+		add(u)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // applyServerURL 应用服务端下发的隧道地址，返回是否有变化。
@@ -809,7 +869,7 @@ func (a *Agent) applyServerURL(raw string) bool {
 	}
 	log.Printf("🔗 切换服务端地址: %s -> %s", a.cfg.ServerURL, next)
 	a.cfg.ServerURL = next
-	a.tunnelFailures = 0
+	a.connectFailures = 0
 	return true
 }
 

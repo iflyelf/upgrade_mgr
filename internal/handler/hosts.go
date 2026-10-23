@@ -24,10 +24,10 @@ type Host struct {
 	ExitIP string `json:"exit_ip"`
 	// TunnelIP 是主机侧隧道 IP（展示/筛选）。
 	TunnelIP string `json:"tunnel_ip"`
-	// ServerTunnelURL 是平台侧隧道地址：Agent 连接使用，非空时下发切换。
-	ServerTunnelURL  string `json:"server_tunnel_url"`
-	AgentServerURL   string `json:"agent_server_url"`
-	DefaultServerURL string `json:"agent_default_server_url"`
+	// ServerURLOverride 是连接地址覆盖：非空时服务端下发给 Agent 切换连接入口。
+	ServerURLOverride string `json:"server_url_override"`
+	AgentServerURL    string `json:"agent_server_url"`
+	DefaultServerURL  string `json:"agent_default_server_url"`
 	// 隧道自检结果：nil 表示未检查/已清空；false 时列表标红。
 	TunnelCheckOK        *bool      `json:"tunnel_check_ok"`
 	TunnelCheckSource    string     `json:"tunnel_check_source"`
@@ -81,7 +81,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			where = append(where,
 				"(ip ILIKE $"+strconv.Itoa(i)+" OR exit_ip ILIKE $"+strconv.Itoa(i)+
 					" OR tunnel_ip ILIKE $"+strconv.Itoa(i)+
-					" OR server_tunnel_url ILIKE $"+strconv.Itoa(i)+
+					" OR server_url_override ILIKE $"+strconv.Itoa(i)+
 					" OR hostname ILIKE $"+strconv.Itoa(i)+
 					" OR biz_group ILIKE $"+strconv.Itoa(i)+")")
 			args = append(args, "%"+kw+"%")
@@ -126,7 +126,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 		listArgs := append(append([]any{}, args...), size, offset)
 		rows, err := s.DB.QueryContext(r.Context(),
 			`SELECT id, ip, COALESCE(exit_ip,''), COALESCE(tunnel_ip,''),
-			        COALESCE(server_tunnel_url,''),
+			        COALESCE(server_url_override,''),
 			        COALESCE(agent_server_url,''), COALESCE(agent_default_server_url,''),
 			        tunnel_check_ok, COALESCE(tunnel_check_source,''), tunnel_check_at,
 			        COALESCE(tunnel_check_latency_ms,0), COALESCE(tunnel_check_detail,''),
@@ -147,7 +147,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			var h Host
 			var checkOK sql.NullBool
 			var checkAt sql.NullTime
-			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerTunnelURL,
+			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerURLOverride,
 				&h.AgentServerURL, &h.DefaultServerURL,
 				&checkOK, &h.TunnelCheckSource, &checkAt,
 				&h.TunnelCheckLatencyMS, &h.TunnelCheckDetail,

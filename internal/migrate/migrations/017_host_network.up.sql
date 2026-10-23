@@ -8,9 +8,9 @@
 -- hosts.exit_ip   Agent 用 UDP 路由探测到的实际出口 IP（多网卡时选择路由出口网卡），
 --                 仅用于展示、搜索与任务 IP 段匹配。
 -- hosts.tunnel_ip 运维手工填写的主机侧隧道 IP（展示/筛选，平台不反连主机）。
--- hosts.server_tunnel_url 运维手工填写的「平台侧隧道地址」，Agent 连接使用：
---                 非空时服务端在心跳响应中下发，Agent 自动切换并持久化，
---                 之后指令下发与日志回传都走这条已经建立的隧道连接；
+-- hosts.server_tunnel_url 运维手工填写的「连接地址覆盖」（迁移 019 重命名为
+--                 server_url_override）：非空时服务端在心跳响应中下发，Agent
+--                 自动切换并持久化。它不参与隧道建立，仅切换 Agent 的连接入口；
 --                 清空后 Agent 下一次心跳回退安装时的默认地址。
 -- hosts.agent_server_url  Agent 最近一次心跳自报的「当前实际连接的平台地址」，
 --                 用于确认隧道切换是否已生效。

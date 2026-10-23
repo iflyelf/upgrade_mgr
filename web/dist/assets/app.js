@@ -881,8 +881,8 @@
   // ipCell 展示主机地址：
   //   - 主地址为注册来源 IP（服务端观察到的地址，作为主机身份）；
   //   - 多网卡时补充 Agent 探测到的出口 IP；
-  //   - 配置了隧道时，分别显示主机侧隧道 IP 与平台侧隧道地址，
-  //     并用 Agent 自报的连接地址确认是否已切换成功。
+  //   - 主机隧道 IP 仅作展示/筛选；
+  //   - 连接地址覆盖非空时展示，并用 Agent 自报的连接地址确认是否已切换。
   function ipCell(x) {
     var out = [h('div', {}, [x.ip])];
     if (x.exit_ip && x.exit_ip !== x.ip) {
@@ -891,20 +891,20 @@
     if (x.tunnel_ip) {
       out.push(h('div', { class: 'muted' }, ['主机隧道 ' + x.tunnel_ip]));
     }
-    if (x.server_tunnel_url) {
-      out.push(h('div', { class: 'muted' }, ['平台隧道 ' + x.server_tunnel_url]));
+    if (x.server_url_override) {
+      out.push(h('div', { class: 'muted' }, ['连接覆盖 ' + x.server_url_override]));
       var connected = x.agent_server_url || '';
       out.push(h('div', { class: 'muted' }, [
-        connected && connected.indexOf('://') >= 0 && sameEndpoint(connected, x.server_tunnel_url)
-          ? '✓ 已通过隧道连接'
-          : (connected ? ('当前连接 ' + connected) : '隧道已配置，等待 Agent 心跳')
+        connected && connected.indexOf('://') >= 0 && sameEndpoint(connected, x.server_url_override)
+          ? '✓ 已连接到覆盖地址'
+          : (connected ? ('当前连接 ' + connected) : '等待 Agent 心跳切换')
       ]));
       out.push(tunnelCheckLine(x));
     }
     return h('div', {}, out);
   }
 
-  // tunnelCheckLine 展示保存后自动拨测的结论（平台侧 + 主机侧）。
+  // tunnelCheckLine 展示连接地址保存后自动拨测的结论（平台侧 + 主机侧）。
   // 未检查完成时显示「检查中」，失败标红并在悬停时给出阶段明细。
   function tunnelCheckLine(x) {
     if (x.tunnel_check_ok === undefined || x.tunnel_check_ok === null) {
@@ -938,7 +938,7 @@
     if (!t.result) return h('div', { class: 'hint' }, ['正在拨测 ' + (t.target || '已保存地址') + '…']);
     var r = t.result;
     return h('div', { class: 'card' }, [
-      h('h3', {}, [r.ok ? '✅ 隧道拨测通过' : '❌ 隧道拨测未通过']),
+      h('h3', {}, [r.ok ? '✅ 连接地址拨测通过' : '❌ 连接地址拨测未通过']),
       hint('拨测地址：' + (r.url || t.target) + ' · 耗时 ' + (r.latency_ms || 0) + ' ms'),
       h('div', { class: 'table-wrap' }, [h('table', {}, [
         h('thead', {}, [h('tr', {}, [h('th', {}, ['阶段']), h('th', {}, ['结果']), h('th', {}, ['耗时']), h('th', {}, ['详情'])])]),
@@ -954,7 +954,7 @@
       r.tls ? hint('TLS 证书：' + (r.tls.subject || '-') + '；签发者 ' + (r.tls.issuer || '-') +
         '；到期 ' + (r.tls.not_after || '-') + (r.tls.verified ? '' : '；校验失败：' + (r.tls.verify_error || ''))) : null,
       r.hint ? hint('💡 ' + r.hint) : null,
-      hint('说明：这是从平台侧发起的拨测，只能证明平台所在环境能到达该地址；目标主机是否能通过隧道访问仍需看 Agent 心跳（约 30 秒内自动切换）。')
+      hint('说明：这是从平台侧发起的拨测，只能证明平台所在环境能到达该地址；目标主机能否经隧道访问仍需看 Agent 心跳（约 30 秒内自动切换）。')
     ]);
   }
 
@@ -973,15 +973,15 @@
       value: host.tunnel_ip || '',
       placeholder: '如 172.16.0.9'
     }, []);
-    var serverTunnelEl = h('input', {
-      value: host.server_tunnel_url || '',
-      placeholder: '如 10.8.0.5、10.8.0.5:8090 或 https://tunnel.example.com'
+    var serverOverrideEl = h('input', {
+      value: host.server_url_override || '',
+      placeholder: '如 10.8.0.5、10.8.0.5:8090 或 https://mgr.example.com'
     }, []);
 
-    // testTunnel 从平台侧拨测候选隧道地址；结果保留在 state.tunnelTest，
+    // testTunnel 从平台侧拨测候选连接地址；结果保留在 state.tunnelTest，
     // 便于在保存前确认端口/证书是否正常。
     var testTunnel = function () {
-      var target = (serverTunnelEl.value || '').trim();
+      var target = (serverOverrideEl.value || '').trim();
       state.tunnelTest = { target: target, loading: true, result: null, err: '' };
       render();
       api('/api/hosts/' + host.id + '/tunnel-test', {
@@ -1008,7 +1008,7 @@
         vendor: vendorEl.value,
         host_type: typeEl.value,
         tunnel_ip: hostTunnelEl.value,
-        server_tunnel_url: serverTunnelEl.value
+        server_url_override: serverOverrideEl.value
       };
       api('/api/hosts/' + host.id, { method: 'PUT', body: JSON.stringify(payload) })
         .then(function () {
@@ -1017,7 +1017,7 @@
           state.tunnelTest = null;
           loadHosts();
           // 保存会触发平台侧拨测 + 主机侧自检，几秒后再刷新一次让结论尽早出现。
-          if (payload.server_tunnel_url) {
+          if (payload.server_url_override) {
             setTimeout(loadHosts, 3000);
             setTimeout(loadHosts, 12000);
           }
@@ -1027,7 +1027,7 @@
 
     return h('div', { class: 'card' }, [
       h('h3', {}, ['编辑主机 ' + host.ip]),
-      hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。出口 IP 与隧道地址见下方说明。'),
+      hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。出口 IP 与连接地址覆盖见下方说明。'),
       h('div', { class: 'grid2' }, [
         field('主机名 (hostname)', nameEl),
         field('账号 (account)', accountEl)
@@ -1046,23 +1046,25 @@
       ]),
       h('div', { class: 'grid2' }, [
         field('主机侧隧道 IP (tunnel_ip)', hostTunnelEl,
-          '主机在隧道网段里的地址（如 WireGuard/IPSec 分配的 172.16.x.x），仅用于展示与筛选。平台不主动反连主机，指令仍由 Agent 取回。'),
-        field('平台侧隧道地址 (server_tunnel_url)', serverTunnelEl,
-          'Agent 实际连接的平台地址：主机直连不到默认地址、只能走专线/VPN 隧道时填写。' +
+          '可选。主机在隧道网段里的地址（如 WireGuard/IPSec 分配的 172.16.x.x），仅用于展示与筛选。' +
+          '平台不主动反连主机，指令仍由 Agent 外连取回。'),
+        field('连接地址覆盖 (server_url_override)', serverOverrideEl,
+          '可选。临时改写该主机 Agent 连接平台的地址，例如该主机只能走某条专线/VPN 入口。' +
+          '注意：它不参与隧道建立——隧道由隧道软件负责，这里只切换 Agent 的连接入口。' +
           '支持纯 IP、IP:端口或完整 http(s) URL，缺省协议/端口沿用安装时的地址。' +
-          '保存后 Agent 在下一次心跳（约 30 秒内）自动切换并持久化，之后指令与日志都走这条隧道；' +
-          '清空后自动回退默认地址。连续 3 次心跳失败会自动回退并在 5 分钟内不再重试，避免失联。')
+          '保存后 Agent 在下一次心跳（约 30 秒内）自动切换并持久化；清空后回退默认地址。' +
+          '连续 3 次心跳失败会自动回退并在 5 分钟内不再重试，避免失联。')
       ]),
       (host.exit_ip ? hint('Agent 上报的出口 IP：' + host.exit_ip + '（多网卡时用于确认实际出口网卡）') : null),
       (host.agent_server_url ? hint('Agent 当前连接地址：' + host.agent_server_url) : null),
-      (host.server_tunnel_url && host.tunnel_check_ok === false
-        ? h('div', { class: 'err' }, ['上次隧道自检未通过：' + (host.tunnel_check_detail || '')])
+      (host.server_url_override && host.tunnel_check_ok === false
+        ? h('div', { class: 'err' }, ['上次连接地址自检未通过：' + (host.tunnel_check_detail || '')])
         : null),
       tunnelTestBlock(),
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn', onclick: save }, ['保存']),
         h('button', { class: 'btn ghost', onclick: testTunnel, disabled: (state.tunnelTest && state.tunnelTest.loading) ? 'disabled' : null },
-          [(state.tunnelTest && state.tunnelTest.loading) ? '拨测中…' : '测试隧道连通性']),
+          [(state.tunnelTest && state.tunnelTest.loading) ? '拨测中…' : '测试连接地址']),
         h('button', {
           class: 'btn ghost', onclick: function () {
             state.editingHost = null;

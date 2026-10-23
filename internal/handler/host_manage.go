@@ -30,9 +30,12 @@ type hostUpdateRequest struct {
 	// TunnelIP 是「主机侧隧道 IP」：主机在隧道网段里的地址，仅用于展示与筛选
 	// （平台不主动反连主机，指令仍由 Agent 外连取回）。只接受 IP 字面量。
 	TunnelIP *string `json:"tunnel_ip"`
-	// ServerTunnelURL 是「平台侧隧道地址」：Agent 实际要连接的地址。
-	// 支持纯 IP、IP:端口或完整 http(s) URL；留空表示不使用隧道（Agent 回退默认地址）。
-	ServerTunnelURL *string `json:"server_tunnel_url"`
+	// ServerURLOverride 是「连接地址覆盖」：临时改写该主机 Agent 连接平台的地址。
+	//
+	// 它不参与隧道建立——隧道由隧道软件（WireGuard/IPSec/frp/专线等）负责，
+	// 这里只解决"同一平台存在多个可达入口，需要按主机远程切换"的情况。
+	// 支持纯 IP、IP:端口或完整 http(s) URL；留空表示取消覆盖，Agent 回退默认地址。
+	ServerURLOverride *string `json:"server_url_override"`
 }
 
 type hostField struct {
@@ -100,16 +103,16 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			}
 			req.TunnelIP = &v
 		}
-		// 平台侧隧道地址：允许 IP / IP:端口 / 完整 URL。
-		if req.ServerTunnelURL != nil {
-			v, err := hostnet.NormalizeAddr(*req.ServerTunnelURL)
+		// 连接地址覆盖：允许 IP / IP:端口 / 完整 URL。
+		if req.ServerURLOverride != nil {
+			v, err := hostnet.NormalizeAddr(*req.ServerURLOverride)
 			if err != nil {
 				httpx.Fail(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			req.ServerTunnelURL = &v
+			req.ServerURLOverride = &v
 		}
-		hasField := req.TunnelIP != nil || req.ServerTunnelURL != nil
+		hasField := req.TunnelIP != nil || req.ServerURLOverride != nil
 		for _, f := range fields {
 			if f.value != nil {
 				hasField = true
@@ -127,12 +130,12 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			auditOp(s, r, audit.ActionHostUpdate, "host", strconv.FormatInt(id, 10), ip, opErr)
 		}()
 
-		tunnelChanged := req.ServerTunnelURL != nil
+		overrideChanged := req.ServerURLOverride != nil
 		// 字段占位符 $2..$10，租户条件从 $11 开始。
 		cond, condArgs := reqScope(r).Where("", 11)
 		args := append([]any{
 			id, req.Hostname, req.Account, req.AppCode, req.BizGroup,
-			req.Department, req.Vendor, req.HostType, req.TunnelIP, req.ServerTunnelURL,
+			req.Department, req.Vendor, req.HostType, req.TunnelIP, req.ServerURLOverride,
 		}, condArgs...)
 		err = s.DB.QueryRowContext(r.Context(), `
 			UPDATE hosts SET
@@ -144,7 +147,7 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 				vendor     = COALESCE($7, vendor),
 				host_type  = COALESCE($8, host_type),
 				tunnel_ip  = COALESCE($9, tunnel_ip),
-				server_tunnel_url = COALESCE($10, server_tunnel_url),
+				server_url_override = COALESCE($10, server_url_override),
 				updated_at = NOW()
 			WHERE id=$1 AND `+cond+`
 			RETURNING ip`, args...).Scan(&ip)
@@ -158,9 +161,9 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		// 隧道地址变化后自动做一次平台侧拨测，并请求主机侧自检，
+		// 连接地址覆盖变化后自动做一次平台侧拨测，并请求主机侧自检，
 		// 列表可直接看到结论，不必等运维手动点「测试」。
-		if tunnelChanged {
+		if overrideChanged {
 			triggerTunnelCheck(s, id)
 		}
 		httpx.OK(w, map[string]any{"id": id, "ip": ip})

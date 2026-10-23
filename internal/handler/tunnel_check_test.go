@@ -28,7 +28,7 @@ func insertHeartbeatAgent(t *testing.T, agentID, token, tunnelURL string) int64 
 		t.Fatalf("插入 Agent 失败: %v", err)
 	}
 	if err := db.QueryRow(`
-		INSERT INTO hosts (ip, hostname, tenant_id, source, agent_id, server_tunnel_url)
+		INSERT INTO hosts (ip, hostname, tenant_id, source, agent_id, server_url_override)
 		VALUES ($1, 'hb', 1, 'agent', $2, $3) RETURNING id`,
 		ip, agentID, tunnelURL).Scan(&hostID); err != nil {
 		t.Fatalf("插入主机失败: %v", err)

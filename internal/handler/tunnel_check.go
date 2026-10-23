@@ -46,19 +46,19 @@ func runPlatformTunnelCheck(s *svc.ServiceContext, hostID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), platformProbeTimeout*2)
 	defer cancel()
 
-	var serverTunnel, agentDefault string
+	var serverURLOverride, agentDefault string
 	err := s.DB.QueryRowContext(ctx, `
-		SELECT COALESCE(server_tunnel_url,''), COALESCE(agent_default_server_url,'')
-		FROM hosts WHERE id=$1`, hostID).Scan(&serverTunnel, &agentDefault)
+		SELECT COALESCE(server_url_override,''), COALESCE(agent_default_server_url,'')
+		FROM hosts WHERE id=$1`, hostID).Scan(&serverURLOverride, &agentDefault)
 	if err != nil {
 		if err != sql.ErrNoRows {
 			log.Printf("⚠️ 读取隧道地址失败 host=%d: %v", hostID, err)
 		}
 		return
 	}
-	target := strings.TrimSpace(serverTunnel)
+	target := strings.TrimSpace(serverURLOverride)
 	if target == "" {
-		// 隧道被清空：清掉检查结果，列表不再标红。
+		// 覆盖被清空：清掉检查结果，列表不再标红。
 		_, _ = s.DB.Exec(`UPDATE hosts
 			SET tunnel_check_ok=NULL, tunnel_check_source='', tunnel_check_at=NULL,
 			    tunnel_check_latency_ms=0, tunnel_check_detail='', tunnel_check_requested_at=NULL
@@ -73,7 +73,7 @@ func runPlatformTunnelCheck(s *svc.ServiceContext, hostID int64) {
 	resolved := hostnet.ResolveServerURL(target, fallback)
 	if resolved == "" {
 		savePlatformTunnelCheck(ctx, s.DB, hostID, tunnelprobe.Result{
-			Target: target, OK: false, Hint: "隧道地址非法：支持 IP、IP:端口或 http(s) URL",
+			Target: target, OK: false, Hint: "连接地址非法：支持 IP、IP:端口或 http(s) URL",
 		})
 		return
 	}

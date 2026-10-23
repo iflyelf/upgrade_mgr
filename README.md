@@ -217,7 +217,7 @@ Get-Content "$env:ProgramData\upgrade-agent\state.json"   # 注册凭据（仅�
 - 默认路径：`%ProgramFiles%\upgrade-agent\upgrade-agent.exe`、`%ProgramData%\upgrade-agent\state.json`；
 - 卸载：`& "$env:ProgramFiles\upgrade-agent\upgrade-agent.exe" uninstall`；
 - **平台地址填写**：Windows 主机若只能通过专线/VPN 隧道访问平台，在主机页「编辑」里填
-  「平台侧隧道地址」，保存后 Agent 约 30 秒内自动切换（详见下文「隧道连通性测试」）；
+  「连接地址覆盖」，保存后 Agent 约 30 秒内自动切换（详见下文「连接地址覆盖与连通性测试」）；
 - **证书**：若控制台开启了 HTTPS/双向 TLS，安装命令追加
   `--tls-ca C:\path\ca.crt`（双向 TLS 再加 `--tls-cert` / `--tls-key`），
   证书路径会写入 state。注意 Windows Server 2008 R2 默认未启用 TLS 1.2，需先打 KB3140245。
@@ -653,19 +653,66 @@ Get-Service upgrade-agent
 > `/tmp/upgrade-agent install --server '<url>' --enroll-token '<新令牌>' --force`。
 > `--force` 必须同时提供 `--enroll-token`；普通重装请勿勾选，否则会生成新的 Agent 身份。
 
-#### 隧道连通性测试
+#### 连接地址覆盖与连通性测试
 
-主机页「编辑」→ 填「平台侧隧道地址」→ 点「测试隧道连通性」，服务端会按顺序执行
+> **先厘清职责**：隧道由隧道软件（WireGuard / IPSec / frp / 专线 / SSH 端口转发等）
+> 负责建立，平台**不参与建隧道**。平台是 Agent 主动外连服务端（长轮询），隧道只需
+> 保证「Agent → 平台」可达，指令下发与日志回传复用同一条连接，无需平台反连主机。
+>
+> 因此大多数情况下**不需要**在平台里配置任何隧道参数：
+> - 隧道透明（路由/内网 DNS 让原地址自动走隧道）→ 什么都不用配；
+> - 安装时直接用隧道地址 `--server http://10.8.0.1:8090` → 也不用配。
+>
+> 只有当「同一批主机已在用 A 地址运行，但其中部分主机只能走 B 入口，又不方便重装
+> 或逐台登录」时，才需要「连接地址覆盖」临时改写 Agent 的连接入口。
+
+**字段与用途**
+
+| 字段 | 含义 | 是否必需 |
+|---|---|---|
+| `hosts.tunnel_ip` | 主机在隧道网段里的 IP（如 `172.16.0.9`） | 可选，仅展示/筛选 |
+| `hosts.server_url_override` | 临时改写该主机 Agent 连接平台的地址 | 可选，见上文条件 |
+| `hosts.agent_server_url` | Agent 自报的当前连接地址 | 自动上报，用于确认切换 |
+| `hosts.agent_default_server_url` | 安装时的默认地址 | 自动上报，用于补齐协议/端口 |
+
+页面操作：主机页「编辑」→ 填「连接地址覆盖」→ 保存。
+
+- 支持 `10.8.0.5`、`10.8.0.5:8090`、`https://mgr.example.com` 三种写法；
+  只填 IP 时沿用安装时的协议与端口（默认地址无端口则按协议补 80/443）。
+- 保存后 Agent 在下一次心跳（约 30 秒）自动切换并持久化到 state（`server_url`），
+  后续心跳、取指令、制品下载全部走新地址。
+- 清空该字段 → 心跳响应不再下发 → Agent 自动回退到 `default_server_url`。
+- **失效保护**：覆盖地址连续 3 次心跳失败（约 90 秒）自动回退默认地址，并在 5 分钟内
+  不再切回同一地址，避免填错导致 Agent 永久失联；之后会自动重新尝试。
+
+**Agent 多地址 fallback（推荐）**
+
+比服务端下发更可靠：安装时用逗号分隔多个地址，Agent 在默认地址不可达时自动轮换。
+
+```bash
+upgrade-agent install \
+  --server 'https://mgr.example.com,http://10.8.0.1:8090' \
+  --enroll-token <token>
+```
+
+- 第一个为当前地址，其余为备用；地址列表保存在 `state.json`（`server_urls`）。
+- 默认地址连续 2 次心跳失败 → 轮换到下一个；覆盖地址连续 3 次失败 → 回退默认地址。
+- 轮换是循环的，隧道/入口恢复后会自动回到可用地址。
+- 该能力不依赖服务端配置，也不会因为服务端推送错误地址而失联。
+
+**手动拨测**
+
+主机页「编辑」→ 点「测试连接地址」，服务端会按顺序执行
 DNS 解析 → TCP 连接 → TLS 握手（https）→ `GET /health`，并逐步返回结果。
 
-**保存后自动校验**：保存「平台侧隧道地址」后会自动做两件事，无需手动点按钮：
+**保存后自动校验**：保存「连接地址覆盖」后会自动做两件事，无需手动点按钮：
 
 1. **平台侧拨测**（异步）：立即写入 `hosts.tunnel_check_*`，列表显示「✓/✗ 平台侧自检」；
 2. **主机侧自检**：服务端在心跳响应里下发 `tunnel_check_url`，Agent 从主机内部回连并
    把结果放在下一次心跳回报（`source=agent`），列表结论改为「主机侧自检」。
    10 分钟内未回报（主机离线/旧 Agent）则清除标记，保留平台侧结论。
 
-列表对未通过的隧道标红并在悬停时显示阶段明细；清空隧道地址会自动清除检查结果。
+列表对未通过的覆盖地址标红并在悬停时显示阶段明细；清空覆盖会自动清除检查结果。
 
 - 通过：目标地址上的服务自报 `upgrade_mgr`，说明地址、端口、反向代理与证书都没问题。
 - 失败：直接给出对应阶段的错误与排查建议（端口未放行、TLS 证书不匹配、反向代理指向了别的服务等）。
@@ -676,80 +723,9 @@ DNS 解析 → TCP 连接 → TLS 握手（https）→ `GET /health`，并逐步
 接口：`POST /api/hosts/{id}/tunnel-test`（管理员，租户隔离，审计 `host.tunnel_test`）
 
 ```json
-// 请求（body 可省略，省略时测试已保存的 server_tunnel_url）
+// 请求（body 可省略，省略时测试已保存的 server_url_override）
 {"target": "10.8.0.5:8090", "timeout_seconds": 5}
 ```
-
-#### 可选 HTTPS 与双向 TLS（mTLS）
-
-控制台默认以 HTTP 提供服务；需要加密或要求 Agent 持有客户端证书时，配置：
-
-```yaml
-server:
-  tls_cert: /etc/upgrade-mgr/server.crt       # 服务端证书
-  tls_key:  /etc/upgrade-mgr/server.key       # 服务端私钥
-  tls_client_ca: /etc/upgrade-mgr/agent-ca.crt # 可选：Agent 客户端证书的 CA
-  tls_client_auth: require                      # none（默认）/ request / require
-```
-
-对应环境变量：`SERVER_TLS_CERT`、`SERVER_TLS_KEY`、`SERVER_TLS_CLIENT_CA`、
-`SERVER_TLS_CLIENT_AUTH`。`tls_client_auth=require` 时只有持受信客户端证书的 Agent
-能建立连接，构成双向 TLS。
-
-Agent 侧：
-
-```bash
-# 私有 CA（服务端证书不是公共 CA 签发时必须指定）
-upgrade-agent install --server https://mgr.example.com --enroll-token <token> \
-  --tls-ca /etc/upgrade-mgr/agent-ca.crt
-
-# 双向 TLS：再加上客户端证书
-upgrade-agent install --server https://mgr.example.com --enroll-token <token> \
-  --tls-ca /etc/upgrade-mgr/agent-ca.crt \
-  --tls-cert /etc/upgrade-mgr/agent.crt \
-  --tls-key  /etc/upgrade-mgr/agent.key
-```
-
-证书路径会保存到 `state.json`，服务重启后继续生效；`run` 子命令也支持同样参数，
-命令行优先于 state 中的值。配置后 Agent 的心跳、取指令、制品与自升级下载统一使用
-该 TLS 客户端。
-
-> ⚠️ 最低 TLS 1.2。Windows Server 2008 R2 默认未启用 TLS 1.2，需先安装
-> KB3140245 并开启 `SchUseStrongCrypto`，或继续使用 HTTP（建议配合内网/隧道）。
-> ⚠️ 开启 `require` 前请先在单台主机验证证书链，否则已在运行的 Agent 会立即断连。
-
-#### 多网卡出口 IP 与隧道地址
-
-Agent 用「向服务端地址发起一次 UDP connect」让内核按路由表选出出口网卡（不发包），
-把出口 IP（`hosts.exit_ip`）随注册/心跳上报。用于：
-
-- 主机列表显示「出口 x.x.x.x」，多网卡时能看出实际走哪块网卡；
-- 列表搜索与任务 IP 段选择同时匹配 `hosts.ip`（注册来源地址）和 `hosts.exit_ip`，
-  按业务网段填报也能选中主机；
-- `hosts.ip` 仍是服务端观察到的来源地址，作为主机身份（唯一键）与安全边界，
-  Agent 不能通过上报出口 IP 覆盖身份。
-
-**隧道地址**用于「主机连不上平台默认地址、只能走专线/VPN 隧道」的场景。平台是
-Agent 主动外连服务端，隧道只需保证 **Agent → 平台** 可达，指令下发与日志回传
-复用同一条连接（长轮询 + 上报），无需平台反连主机。
-
-| 字段 | 含义 | 谁使用 |
-|---|---|---|
-| `hosts.tunnel_ip` | 主机在隧道网段里的 IP（如 `172.16.0.9`） | 仅展示与筛选 |
-| `hosts.server_tunnel_url` | Agent 实际连接的平台隧道地址 | 心跳响应下发，Agent 自动切换 |
-| `hosts.agent_server_url` | Agent 自报的当前连接地址 | 页面确认切换是否生效 |
-| `hosts.agent_default_server_url` | 安装时的默认地址 | 补齐隧道地址缺省的协议/端口 |
-
-页面操作：主机页「编辑」→ 填「平台侧隧道地址」→ 保存。
-
-- 支持 `10.8.0.5`、`10.8.0.5:8090`、`https://tunnel.example.com` 三种写法；
-  只填 IP 时沿用安装时的协议与端口（默认地址无端口则按协议补 80/443）。
-- 保存后 Agent 在下一次心跳（约 30 秒）自动切换并持久化到 state（`server_url`），
-  后续心跳、取指令、制品下载全部走隧道。
-- 清空该字段 → 心跳响应不再下发隧道 → Agent 自动回退到 `default_server_url`。
-- **失效保护**：隧道地址连续 3 次心跳失败（约 90 秒）自动回退默认地址，并在 5 分钟内
-  不再切回同一地址，避免填错隧道导致 Agent 永久失联；隧道恢复后 5 分钟自动重新尝试。
-- 隧道本身（WireGuard / IPSec / 专线 / SSH 端口转发等）由运维保障，平台不负责建链。
 
 #### Agent 自升级（无需逐台登录）
 
@@ -1349,8 +1325,9 @@ POST /api/hosts/{id}/tunnel-test        # 从平台侧拨测隧道地址（管�
 **主机编辑**
 
 - 可维护字段：`hostname`、`account`、`app_code`、`biz_group`、`department`、`vendor`、`host_type`。
-- 网络字段（可选）：`tunnel_ip`（主机侧隧道 IP，仅展示/筛选）、`server_tunnel_url`
-  （平台侧隧道地址，Agent 连接使用，保存后自动切换并触发自检）。
+- 网络字段（可选）：`tunnel_ip`（主机侧隧道 IP，仅展示/筛选）、`server_url_override`
+  （连接地址覆盖：临时改写 Agent 连接平台的入口，保存后自动切换并触发自检）。
+  两者都不参与隧道建立。
 - 未提交的字段保持原值，传空字符串表示清空。
 - `ip`、`os_family`、`arch`、`agent_status` 等由 Agent 上报，不允许页面修改。
 - Agent 重新注册会覆盖 `hostname`；Consul 同步返回非空业务字段时会覆盖对应字段。
@@ -1612,7 +1589,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 ### 2026-10-23 隧道自检自动化与主机侧回连
 
-- 保存平台侧隧道地址后自动触发校验：平台侧异步拨测写回结果，同时标记待主机侧自检。
+- 保存「连接地址覆盖」后自动触发校验：平台侧异步拨测写回结果，同时标记待主机侧自检。
 - 心跳响应新增 `tunnel_check_url`，Agent 从主机内部回连拨测并在下一次心跳回报
   （`tunnel_check` 字段），服务端写入 `hosts.tunnel_check_*`（迁移 018）。
 - 主机侧结论优先于平台侧：解决「平台在容器内、隧道接口只在宿主机」时平台侧误判的问题；
@@ -1639,10 +1616,10 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
   注册/心跳上报 `exit_ip`；探测失败沿用上一次值，不覆盖为空。
 - 主机列表新增「出口 IP」「主机隧道 IP」「平台隧道地址」「当前连接地址」，搜索与任务 IP 段选择同时匹配
   `hosts.ip` 与 `hosts.exit_ip`；`hosts.ip` 仍是注册来源地址，作为主机身份不被 Agent 覆盖。
-- 隧道地址支持主机侧 IP（`tunnel_ip`，仅展示/筛选）与平台侧地址（`server_tunnel_url`，Agent 连接使用）：
-  心跳响应下发，Agent 自动切换并持久化到 state；清空后回退安装时的默认地址。
+- 连接地址覆盖：`server_url_override`（原 `server_tunnel_url`，迁移 019 重命名）由心跳响应下发，
+  Agent 自动切换并持久化到 state；清空后回退安装时的默认地址。该字段不参与隧道建立。
 - 失效保护：隧道连续 3 次心跳失败自动回退默认地址，并在 5 分钟内不再切回同一地址，避免填错隧道导致失联。
-- 隧道地址只填 IP 时按 Agent 上报的默认地址补齐协议与端口；只接受 http/https，拒绝带凭据的 URL。
+- 连接地址只填 IP 时按 Agent 上报的默认地址补齐协议与端口；只接受 http/https，拒绝带凭据的 URL。
 - 新增迁移 `017_host_network`、`internal/pkg/hostnet`（地址校验/解析）与前端隧道编辑表单。
 
 ### 2026-10-23 Windows Agent 支持
@@ -1849,3 +1826,13 @@ MIT © iflyelf
 ## 贡献与支持
 
 如发现问题或有改进建议，请提交 [GitHub Issues](https://github.com/iflyelf/upgrade_mgr/issues)。
+
+### 2026-10-23 连接地址覆盖重命名与多地址 fallback
+
+- 将 `hosts.server_tunnel_url` 重命名为 `hosts.server_url_override`（迁移 019，原值保留），
+  语义明确为「临时改写 Agent 连接入口」，并统一文档/接口/前端措辞：该字段不参与隧道建立。
+- Agent 支持 `--server` 逗号分隔多个地址（`install` / `run` 均可），保存为 `state.server_urls`：
+  默认地址连续 2 次心跳失败自动轮换到下一个备用地址，循环尝试；覆盖地址连续 3 次失败仍回退默认。
+- 备用地址轮换不依赖服务端配置，避免「服务端推送错误覆盖地址」导致主机失联。
+- 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
+  列表标签改为「连接覆盖 / 已连接到覆盖地址」。
