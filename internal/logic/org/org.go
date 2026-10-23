@@ -57,6 +57,8 @@ type Team struct {
 	Code        string `json:"code"`
 	Description string `json:"description"`
 	Status      int    `json:"status"`
+	// OwnerOnly 任务操作策略：inherit（跟随全局）/ on / off。
+	OwnerOnly   string `json:"owner_only"`
 	CreatedBy   string `json:"created_by"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
@@ -236,6 +238,7 @@ func (s *Service) DeleteRole(ctx context.Context, id int64) error {
 func (s *Service) ListTeams(ctx context.Context) ([]Team, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.name, COALESCE(t.code,''), COALESCE(t.description,''), t.status,
+		       COALESCE(t.owner_only,'inherit'),
 		       COALESCE(t.created_by,''),
 		       TO_CHAR(t.created_at,'YYYY-MM-DD HH24:MI:SS'),
 		       TO_CHAR(t.updated_at,'YYYY-MM-DD HH24:MI:SS'),
@@ -250,7 +253,7 @@ func (s *Service) ListTeams(ctx context.Context) ([]Team, error) {
 	for rows.Next() {
 		var t Team
 		if err := rows.Scan(&t.ID, &t.Name, &t.Code, &t.Description, &t.Status,
-			&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.MemberCount, &t.GroupCount); err != nil {
+			&t.OwnerOnly, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.MemberCount, &t.GroupCount); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -260,6 +263,31 @@ func (s *Service) ListTeams(ctx context.Context) ([]Team, error) {
 
 // CreateTeam 创建团队。
 func (s *Service) CreateTeam(ctx context.Context, name, code, description string, members []string, createdBy string) (int64, error) {
+	return s.CreateTeamWithPolicy(ctx, name, code, description, members, createdBy, teamOwnerInherit)
+}
+
+// 团队任务操作策略取值。
+const (
+	teamOwnerInherit = "inherit"
+	teamOwnerOn      = "on"
+	teamOwnerOff     = "off"
+)
+
+// NormalizeTeamOwnerOnly 校验并规范化策略值（空/未知 → inherit）。
+func NormalizeTeamOwnerOnly(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case teamOwnerOn, "true", "1":
+		return teamOwnerOn
+	case teamOwnerOff, "false", "0":
+		return teamOwnerOff
+	default:
+		return teamOwnerInherit
+	}
+}
+
+// CreateTeamWithPolicy 创建团队并指定任务操作策略。
+func (s *Service) CreateTeamWithPolicy(ctx context.Context, name, code, description string,
+	members []string, createdBy, ownerOnly string) (int64, error) {
 	name = trimName(name)
 	if name == "" {
 		return 0, fmt.Errorf("团队名称不能为空")
@@ -274,9 +302,9 @@ func (s *Service) CreateTeam(ctx context.Context, name, code, description string
 	defer tx.Rollback()
 	var id int64
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO teams (name, code, description, created_by)
-		VALUES ($1,$2,$3,$4) RETURNING id`,
-		name, code, trimName(description), createdBy).Scan(&id); err != nil {
+		INSERT INTO teams (name, code, description, created_by, owner_only)
+		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		name, code, trimName(description), createdBy, NormalizeTeamOwnerOnly(ownerOnly)).Scan(&id); err != nil {
 		if isUnique(err) {
 			return 0, fmt.Errorf("团队名称「%s」已存在", name)
 		}
@@ -298,6 +326,12 @@ func (s *Service) CreateTeam(ctx context.Context, name, code, description string
 
 // UpdateTeam 更新团队基本信息。
 func (s *Service) UpdateTeam(ctx context.Context, id int64, name, description string, status int) error {
+	return s.UpdateTeamWithPolicy(ctx, id, name, description, status, "")
+}
+
+// UpdateTeamWithPolicy 更新团队（ownerOnly 为空表示不修改）。
+func (s *Service) UpdateTeamWithPolicy(ctx context.Context, id int64, name, description string,
+	status int, ownerOnly string) error {
 	name = trimName(name)
 	if name == "" {
 		return fmt.Errorf("团队名称不能为空")
@@ -305,9 +339,15 @@ func (s *Service) UpdateTeam(ctx context.Context, id int64, name, description st
 	if status != 0 {
 		status = 1
 	}
+	policy := NormalizeTeamOwnerOnly(ownerOnly)
+	if strings.TrimSpace(ownerOnly) == "" {
+		policy = "" // 不修改
+	}
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE teams SET name=$2, description=$3, status=$4, updated_at=NOW() WHERE id=$1`,
-		id, name, trimName(description), status)
+		UPDATE teams SET name=$2, description=$3, status=$4,
+		       owner_only = COALESCE(NULLIF($5,''), owner_only), updated_at=NOW()
+		WHERE id=$1`,
+		id, name, trimName(description), status, policy)
 	if err != nil {
 		if isUnique(err) {
 			return fmt.Errorf("团队名称「%s」已存在", name)
@@ -753,6 +793,50 @@ func (s *Service) rolePermissions(ctx context.Context) (map[int64][]string, erro
 		}
 	}
 	return out, rows.Err()
+}
+
+// TeamOwnerPolicy 返回该用户所属团队的任务操作策略（去重后的集合）。
+//
+// 返回 "" 表示未加入任何团队（调用方回退全局设置）。
+func (s *Service) TeamOwnerPolicy(ctx context.Context, username string) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT COALESCE(t.owner_only,'inherit')
+		FROM team_members m JOIN teams t ON t.id = m.team_id
+		WHERE m.user_id = $1`, strings.TrimSpace(username))
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	hasOn, hasOff, hasInherit := false, false, false
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return "", err
+		}
+		switch NormalizeTeamOwnerOnly(v) {
+		case teamOwnerOn:
+			hasOn = true
+		case teamOwnerOff:
+			hasOff = true
+		default:
+			hasInherit = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	// 任一团队要求 on → 受限（更严格优先，避免绕过）。
+	if hasOn {
+		return teamOwnerOn, nil
+	}
+	if hasOff && !hasInherit {
+		return teamOwnerOff, nil
+	}
+	if hasInherit || hasOff {
+		return teamOwnerInherit, nil
+	}
+	return "", nil
 }
 
 // ---- 辅助 ----

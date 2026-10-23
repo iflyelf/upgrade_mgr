@@ -123,6 +123,7 @@ func TeamCreate(s *svc.ServiceContext) http.HandlerFunc {
 			Code        string   `json:"code"`
 			Description string   `json:"description"`
 			Members     []string `json:"members"`
+			OwnerOnly   string   `json:"owner_only"`
 		}
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
@@ -132,7 +133,8 @@ func TeamCreate(s *svc.ServiceContext) http.HandlerFunc {
 		if u := actorOf(r); u != nil {
 			creator = u.Username
 		}
-		id, err := orgService(s).CreateTeam(r.Context(), req.Name, req.Code, req.Description, req.Members, creator)
+		id, err := orgService(s).CreateTeamWithPolicy(r.Context(), req.Name, req.Code,
+			req.Description, req.Members, creator, req.OwnerOnly)
 		auditOp(s, r, audit.ActionTeamCreate, "team", req.Name, req.Name, err)
 		if err != nil {
 			httpx.Fail(w, http.StatusBadRequest, err.Error())
@@ -154,12 +156,14 @@ func TeamUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			Name        string `json:"name"`
 			Description string `json:"description"`
 			Status      int    `json:"status"`
+			OwnerOnly   string `json:"owner_only"`
 		}
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
-		err := orgService(s).UpdateTeam(r.Context(), id, req.Name, req.Description, req.Status)
+		err := orgService(s).UpdateTeamWithPolicy(r.Context(), id, req.Name, req.Description,
+			req.Status, req.OwnerOnly)
 		auditOp(s, r, audit.ActionTeamUpdate, "team", strconv.FormatInt(id, 10), req.Name, err)
 		if err != nil {
 			httpx.Fail(w, http.StatusBadRequest, err.Error())
