@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -85,36 +86,37 @@ func scriptExt(scriptPath string) string {
 	}
 }
 
-// prepareScriptPath 确保脚本路径带 PowerShell/cmd 可识别的扩展名。
+// prepareScriptPath 确保脚本可被执行，并统一编码。
 //
-// 平台制品下载地址常是 /api/artifacts/{id}/download，落盘成 artifact-1.bin；
-// PowerShell 的 -File 只接受 .ps1，因此无扩展名时复制一份 .ps1。
+// Windows PowerShell 读取 .ps1 时按「有 BOM 则 UTF-8，无 BOM 则系统 ANSI(GBK)」解码。
+// 我们仓库里的脚本是无 BOM 的 UTF-8（含中文注释/output），直接执行在中英文系统上
+// 可能出现乱码甚至语法错误；这里统一重写为「UTF-8 BOM + CRLF」的临时副本。
+//
+// 同时处理没有扩展名的下载制品（如 artifact-1.bin），否则 PowerShell -File 拒绝执行。
 func prepareScriptPath(scriptPath string) (string, func(), error) {
-	switch strings.ToLower(filepath.Ext(scriptPath)) {
-	case ".ps1", ".cmd", ".bat":
+	ext := strings.ToLower(filepath.Ext(scriptPath))
+	switch ext {
+	case ".cmd", ".bat":
+		// cmd 脚本按系统 ANSI 读取，保持原样。
 		return scriptPath, func() {}, nil
 	case ".sh", ".bash", ".py":
 		// 保留原扩展名，让 scriptArgv 给出「Windows 无法执行 Shell 脚本」的明确错误。
 		return scriptPath, func() {}, nil
 	}
-	src, err := os.Open(scriptPath)
+
+	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("读取安装脚本失败: %w", err)
 	}
-	defer src.Close()
+	// 去掉可能存在的旧 BOM，再统一写入。
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
+	// 统一换行，避免混合换行影响 PowerShell 解析。
+	normalized := bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+	normalized = bytes.ReplaceAll(normalized, []byte("\n"), []byte("\r\n"))
+
 	dstPath := scriptPath + ".ps1"
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		return "", nil, fmt.Errorf("创建 PowerShell 脚本失败: %w", err)
-	}
-	if _, err := dst.ReadFrom(src); err != nil {
-		dst.Close()
-		_ = os.Remove(dstPath)
-		return "", nil, fmt.Errorf("写入 PowerShell 脚本失败: %w", err)
-	}
-	if err := dst.Close(); err != nil {
-		_ = os.Remove(dstPath)
-		return "", nil, err
+	if err := os.WriteFile(dstPath, append([]byte{0xEF, 0xBB, 0xBF}, normalized...), 0600); err != nil {
+		return "", nil, fmt.Errorf("准备 PowerShell 脚本失败: %w", err)
 	}
 	return dstPath, func() { _ = os.Remove(dstPath) }, nil
 }

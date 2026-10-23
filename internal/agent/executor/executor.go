@@ -283,6 +283,12 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	// 8. 健康检查（健康检查失败总是回滚，忽略 IgnoreError）
 	if len(comp.HealthCmd) > 0 {
 		logf(protocol.StageVerifying, "健康检查")
+		// 服务声明了但安装脚本没注册：先给出根因，避免只看到“健康检查失败”。
+		if pendingStart && comp.ServiceName != "" && !svcExists() {
+			logf(protocol.StageVerifying,
+				"服务 %s 未注册，健康检查大概率失败；请检查安装脚本输出（是否以管理员运行、下载是否成功）",
+				comp.ServiceName)
+		}
 		if !runHealthCheck(ctx, comp.HealthCmd) {
 			logf(protocol.StageRollback, "健康检查失败，执行回滚")
 			if res.BackupPath != "" {
@@ -345,6 +351,12 @@ func runExec(ctx context.Context, comp protocol.ComponentSpec) error {
 // 通过解释器执行，避免备份目录挂载 noexec 时直接 exec 失败；
 // 脚本参数来自 exec_args，环境变量来自 exec_env，超时来自 exec_timeout。
 func runScript(ctx context.Context, comp protocol.ComponentSpec, scriptPath string) (string, error) {
+	// 下载内容校验：空文件或 HTML 错误页（代理/网关返回 200）会让解释器
+	// 立刻以 0 退出且没有任何输出，任务随后卡在「服务未注册 / 健康检查失败」，
+	// 掩盖真实原因。这里提前拒绝并给出明确错误。
+	if err := validateScriptContent(scriptPath); err != nil {
+		return "", err
+	}
 	// Windows 上下载的制品名可能没有脚本扩展名（如 artifact-1.bin），
 	// 需要先落到带 .ps1 的路径，PowerShell -File 才能执行。
 	prepared, cleanup, err := prepareScriptPath(scriptPath)
@@ -379,6 +391,37 @@ func runScript(ctx context.Context, comp protocol.ComponentSpec, scriptPath stri
 		return stdout, fmt.Errorf("安装脚本退出码 %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return stdout, nil
+}
+
+// validateScriptContent 校验下载到的脚本内容是否可执行。
+//
+// 覆盖最常见的两类“假成功”：
+//   - 空文件（下载中断但返回 200）；
+//   - HTML 错误页（代理/网关拦截，返回 200 + 页面内容）。
+//
+// 其余情况（如 .exe、有效的 shell/PowerShell 脚本）原样放行。
+func validateScriptContent(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("读取安装脚本失败: %w", err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("安装脚本为空（下载可能被中断或代理返回了空响应）: %s", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("读取安装脚本失败: %w", err)
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	head := strings.TrimSpace(strings.ToLower(string(buf[:n])))
+	for _, prefix := range []string{"<!doctype", "<html", "<head", "<body", "<?xml"} {
+		if strings.HasPrefix(head, prefix) {
+			return fmt.Errorf("安装脚本内容不是脚本，而是 HTML/XML 页面（代理或网关拦截）：%s", path)
+		}
+	}
+	return nil
 }
 
 // runPostInstallScript 把组件中的 post_install_script 写入临时文件后执行。

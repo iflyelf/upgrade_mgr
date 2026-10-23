@@ -101,10 +101,13 @@ $ExePath = Join-Path $InstallDir 'windows_exporter.exe'
 $ExeBak = "$ExePath.bak"
 $ConfigFile = Join-Path $InstallDir 'config.yaml'
 
-function Write-Step([string]$Message) { Write-Host "==> $Message" }
-function Write-Warn([string]$Message) { Write-Host "WARN: $Message" }
+# 注意：平台执行脚本时 stdout 是管道。Windows PowerShell 的 Write-Host 写的是
+# host/information 流，不会进入被重定向的 stdout，导致任务日志里看不到任何脚本输出。
+# 因此这里统一用 Write-Output（交互执行时同样会打印到控制台）。
+function Write-Step([string]$Message) { Write-Output "==> $Message" }
+function Write-Warn([string]$Message) { Write-Output "WARN: $Message" }
 function Fail([string]$Message, [int]$Code = 1) {
-    Write-Host "ERROR: $Message" -ForegroundColor Red
+    Write-Output "ERROR: $Message"
     exit $Code
 }
 
@@ -227,7 +230,8 @@ collector:
     # examples/windows_exporter/config.yaml
     include: "windows_exporter|upgrade-agent"
 "@
-        Set-Content -Path $ConfigFile -Value $content -Encoding ASCII
+        # 配置里含中文注释：用 UTF8 写入（PowerShell 5 的 -Encoding ASCII 会丢失中文）。
+        Set-Content -Path $ConfigFile -Value $content -Encoding UTF8
     } else {
         Write-Step "保留已有配置 $ConfigFile"
     }
@@ -348,10 +352,10 @@ function Do-Install {
         }
         Fail "服务未能启动。请查看事件日志：Get-EventLog -LogName Application -Source $ServiceName -Newest 20" 1
     }
-    Write-Host ''
-    Write-Host "安装完成：$ExePath"
-    Write-Host "配置文件：$ConfigFile"
-    Write-Host "指标地址：http://<主机IP>:$ListenPort/metrics"
+    Write-Output ''
+    Write-Output "安装完成：$ExePath"
+    Write-Output "配置文件：$ConfigFile"
+    Write-Output "指标地址：http://<主机IP>:$ListenPort/metrics"
 }
 
 function Do-Update {
@@ -381,8 +385,8 @@ function Do-Update {
         }
         Fail '更新失败，回滚后服务仍未运行，请查看事件日志' 1
     }
-    Write-Host ''
-    Write-Host '更新完成。'
+    Write-Output ''
+    Write-Output '更新完成。'
 }
 
 function Do-Uninstall {
@@ -411,35 +415,38 @@ function Do-Uninstall {
         if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
         if (Test-Path $TextfileDir) { Remove-Item -Recurse -Force $TextfileDir -ErrorAction SilentlyContinue }
     }
-    Write-Host ''
-    Write-Host '卸载完成。'
+    Write-Output ''
+    Write-Output '卸载完成。'
 }
 
 function Do-Status {
     $state = Get-ServiceState
-    Write-Host "服务:     $ServiceName（$state）"
+    Write-Output "服务:     $ServiceName（$state）"
     if ($state -ne 'Missing') {
         $svc = Get-Service -Name $ServiceName
-        Write-Host "启动类型: $($svc.StartType)"
+        Write-Output "启动类型: $($svc.StartType)"
     }
-    Write-Host "安装路径: $ExePath（存在: $(Test-Path $ExePath)）"
-    Write-Host "配置文件: $ConfigFile（存在: $(Test-Path $ConfigFile)）"
-    Write-Host "指标目录: $TextfileDir"
-    Write-Host "监听端口: $ListenPort"
+    Write-Output "安装路径: $ExePath（存在: $(Test-Path $ExePath)）"
+    Write-Output "配置文件: $ConfigFile（存在: $(Test-Path $ConfigFile)）"
+    Write-Output "指标目录: $TextfileDir"
+    Write-Output "监听端口: $ListenPort"
     $ver = Get-ExporterVersion
-    if ($ver) { Write-Host "版本:     $ver" }
+    if ($ver) { Write-Output "版本:     $ver" }
     if ($state -eq 'Running') {
         try {
             $req = [System.Net.WebRequest]::Create("http://127.0.0.1:$ListenPort/metrics")
             $req.Timeout = 3000
             $resp = $req.GetResponse()
             $resp.Close()
-            Write-Host '端口检查: /metrics 可访问'
+            Write-Output '端口检查: /metrics 可访问'
         } catch {
-            Write-Host "端口检查: 不可访问（$($_.Exception.Message)）"
+            Write-Output "端口检查: 不可访问（$($_.Exception.Message)）"
         }
     }
 }
+
+Write-Output "==> windows_exporter install.ps1：动作=$Action，端口=$ListenPort，安装目录=$InstallDir"
+Write-Output "==> PowerShell $($PSVersionTable.PSVersion)；管理员=$((Test-Admin))"
 
 switch ($Action) {
     'install' { Do-Install }
