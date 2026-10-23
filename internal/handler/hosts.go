@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,30 +25,36 @@ type Host struct {
 	// TunnelIP 是主机侧隧道 IP（展示/筛选）。
 	TunnelIP string `json:"tunnel_ip"`
 	// ServerTunnelURL 是平台侧隧道地址：Agent 连接使用，非空时下发切换。
-	ServerTunnelURL   string     `json:"server_tunnel_url"`
-	AgentServerURL    string     `json:"agent_server_url"`
-	DefaultServerURL  string     `json:"agent_default_server_url"`
-	Hostname          string     `json:"hostname"`
-	OSFamily          string     `json:"os_family"`
-	OSType            string     `json:"os_type"`
-	Arch              string     `json:"arch"`
-	Account           string     `json:"account"`
-	AppCode           string     `json:"app_code"`
-	BizGroup          string     `json:"biz_group"`
-	Department        string     `json:"department"`
-	Vendor            string     `json:"vendor"`
-	HostType          string     `json:"host_type"`
-	AgentID           string     `json:"agent_id"`
-	AgentVersion      string     `json:"agent_version"`
-	AgentBuildVersion string     `json:"agent_build_version"`
-	AgentBuildHash    string     `json:"agent_build_hash"`
-	AgentBuildVariant string     `json:"agent_build_variant"`
-	AgentStatus       string     `json:"agent_status"`
-	AgentUpdateStatus string     `json:"agent_update_status,omitempty"`
-	AgentUpdateStage  string     `json:"agent_update_stage,omitempty"`
-	AgentUpdateLog    string     `json:"agent_update_log,omitempty"`
-	AgentUpdateAt     *time.Time `json:"agent_update_at,omitempty"`
-	Source            string     `json:"source"`
+	ServerTunnelURL  string `json:"server_tunnel_url"`
+	AgentServerURL   string `json:"agent_server_url"`
+	DefaultServerURL string `json:"agent_default_server_url"`
+	// 隧道自检结果：nil 表示未检查/已清空；false 时列表标红。
+	TunnelCheckOK        *bool      `json:"tunnel_check_ok"`
+	TunnelCheckSource    string     `json:"tunnel_check_source"`
+	TunnelCheckAt        *time.Time `json:"tunnel_check_at,omitempty"`
+	TunnelCheckLatencyMS int        `json:"tunnel_check_latency_ms"`
+	TunnelCheckDetail    string     `json:"tunnel_check_detail"`
+	Hostname             string     `json:"hostname"`
+	OSFamily             string     `json:"os_family"`
+	OSType               string     `json:"os_type"`
+	Arch                 string     `json:"arch"`
+	Account              string     `json:"account"`
+	AppCode              string     `json:"app_code"`
+	BizGroup             string     `json:"biz_group"`
+	Department           string     `json:"department"`
+	Vendor               string     `json:"vendor"`
+	HostType             string     `json:"host_type"`
+	AgentID              string     `json:"agent_id"`
+	AgentVersion         string     `json:"agent_version"`
+	AgentBuildVersion    string     `json:"agent_build_version"`
+	AgentBuildHash       string     `json:"agent_build_hash"`
+	AgentBuildVariant    string     `json:"agent_build_variant"`
+	AgentStatus          string     `json:"agent_status"`
+	AgentUpdateStatus    string     `json:"agent_update_status,omitempty"`
+	AgentUpdateStage     string     `json:"agent_update_stage,omitempty"`
+	AgentUpdateLog       string     `json:"agent_update_log,omitempty"`
+	AgentUpdateAt        *time.Time `json:"agent_update_at,omitempty"`
+	Source               string     `json:"source"`
 }
 
 // ListHosts 主机列表，支持关键字与分组过滤（?q=&app_code=&os_family=&page=&size=）。
@@ -121,6 +128,8 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			`SELECT id, ip, COALESCE(exit_ip,''), COALESCE(tunnel_ip,''),
 			        COALESCE(server_tunnel_url,''),
 			        COALESCE(agent_server_url,''), COALESCE(agent_default_server_url,''),
+			        tunnel_check_ok, COALESCE(tunnel_check_source,''), tunnel_check_at,
+			        COALESCE(tunnel_check_latency_ms,0), COALESCE(tunnel_check_detail,''),
 			        hostname, os_family, os_type, arch, account, app_code,
 			        biz_group, department, vendor, host_type, COALESCE(agent_id,''),
 			        agent_version, COALESCE(agent_build_version,''), COALESCE(agent_build_hash,''),
@@ -136,14 +145,26 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 		list := []Host{}
 		for rows.Next() {
 			var h Host
+			var checkOK sql.NullBool
+			var checkAt sql.NullTime
 			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerTunnelURL,
 				&h.AgentServerURL, &h.DefaultServerURL,
+				&checkOK, &h.TunnelCheckSource, &checkAt,
+				&h.TunnelCheckLatencyMS, &h.TunnelCheckDetail,
 				&h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
 				&h.Account, &h.AppCode, &h.BizGroup, &h.Department, &h.Vendor, &h.HostType,
 				&h.AgentID, &h.AgentVersion, &h.AgentBuildVersion, &h.AgentBuildHash,
 				&h.AgentBuildVariant, &h.AgentStatus, &h.Source); err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
+			}
+			if checkOK.Valid {
+				v := checkOK.Bool
+				h.TunnelCheckOK = &v
+			}
+			if checkAt.Valid {
+				t := checkAt.Time
+				h.TunnelCheckAt = &t
 			}
 			list = append(list, h)
 		}

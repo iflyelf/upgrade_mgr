@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -220,4 +221,80 @@ func TestHostTunnelTestRejectsOtherTenant(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("跨租户应 404，实际 %d", rec.Code)
 	}
+}
+
+// TestTriggerTunnelCheckWritesResult 保存隧道地址后异步拨测并写回结果。
+func TestTriggerTunnelCheckWritesResult(t *testing.T) {
+	db, sc := setupHostDB(t)
+
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok","service":"upgrade_mgr"}`))
+	}))
+	defer health.Close()
+
+	ip := fmt.Sprintf("auto-tunnel-%d", time.Now().UnixNano())
+	var id int64
+	if err := db.QueryRow(`
+		INSERT INTO hosts (ip, hostname, tenant_id, source, server_tunnel_url)
+		VALUES ($1, 'auto-tunnel', 1, 'manual', $2) RETURNING id`, ip, health.URL).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE id=$1`, id) })
+
+	triggerTunnelCheck(sc, id)
+
+	// 异步拨测，最多等 5 秒。
+	deadline := time.Now().Add(5 * time.Second)
+	var ok bool
+	var source, detail string
+	var requested sql.NullTime
+	for time.Now().Before(deadline) {
+		err := db.QueryRow(`
+			SELECT COALESCE(tunnel_check_ok,false), COALESCE(tunnel_check_source,''),
+			       COALESCE(tunnel_check_detail,''), tunnel_check_requested_at
+			FROM hosts WHERE id=$1`, id).Scan(&ok, &source, &detail, &requested)
+		if err == nil && source == "platform" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ok || source != "platform" {
+		t.Fatalf("平台侧拨测结果未写回: ok=%v source=%q detail=%q", ok, source, detail)
+	}
+	if !requested.Valid {
+		t.Fatal("应同时标记待主机侧自检")
+	}
+	if !strings.Contains(detail, "HTTP /health") {
+		t.Fatalf("明细应包含阶段信息: %q", detail)
+	}
+}
+
+// TestTriggerTunnelCheckClearsWhenEmpty 清空隧道地址后清除自检状态。
+func TestTriggerTunnelCheckClearsWhenEmpty(t *testing.T) {
+	db, sc := setupHostDB(t)
+	ip := fmt.Sprintf("auto-tunnel-empty-%d", time.Now().UnixNano())
+	var id int64
+	if err := db.QueryRow(`
+		INSERT INTO hosts (ip, hostname, tenant_id, source, tunnel_check_ok,
+		                   tunnel_check_source, tunnel_check_detail)
+		VALUES ($1, 'empty', 1, 'manual', false, 'platform', 'old') RETURNING id`, ip).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE id=$1`, id) })
+
+	triggerTunnelCheck(sc, id)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var source, detail string
+		var ok sql.NullBool
+		db.QueryRow(`SELECT tunnel_check_ok, COALESCE(tunnel_check_source,''),
+		                    COALESCE(tunnel_check_detail,'') FROM hosts WHERE id=$1`, id).
+			Scan(&ok, &source, &detail)
+		if !ok.Valid && source == "" && detail == "" {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("清空隧道后自检状态应被清除")
 }

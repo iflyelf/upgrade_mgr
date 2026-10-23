@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/agent/executor"
@@ -24,6 +25,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/netinfo"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/signer"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/tunnelprobe"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
 )
 
@@ -77,6 +79,13 @@ type Agent struct {
 	// 避免「切过去失败 → 回退 → 服务端再次下发 → 再失败」的来回抖动。
 	tunnelFailURL string
 	tunnelFailAt  time.Time
+	// 主机侧回连自检：服务端在心跳响应中下发待测地址，Agent 拨测后把结果
+	// 放在下一次心跳里回报（tunnelPending），避免阻塞心跳请求。
+	tunnelMu      sync.Mutex
+	tunnelPending *protocol.TunnelCheckResult
+	tunnelProbing bool
+	tunnelLastURL string
+	tunnelLastAt  time.Time
 }
 
 // tunnelRetryAfter 隧道地址失败后的重试间隔。
@@ -225,6 +234,10 @@ func (a *Agent) register() error {
 }
 
 func (a *Agent) heartbeat() {
+	a.tunnelMu.Lock()
+	pending := a.tunnelPending
+	a.tunnelMu.Unlock()
+
 	req := protocol.HeartbeatRequest{
 		AgentID:               a.cfg.AgentID,
 		Busy:                  false,
@@ -237,12 +250,28 @@ func (a *Agent) heartbeat() {
 		BuildVariant:          a.cfg.Variant,
 		SignatureModes:        protocol.SupportedSignatureModes(),
 		Capabilities:          protocol.SupportedCapabilities(),
+		TunnelCheck:           pending,
 	}
 	var resp protocol.HeartbeatResponse
-	if err := a.postJSON("/api/agent/heartbeat", req, &resp); err != nil {
+	err := a.postJSON("/api/agent/heartbeat", req, &resp)
+	if err != nil {
 		log.Printf("⚠️ 心跳失败: %v", err)
 		a.handleTunnelFailure()
-	} else if a.applyServerURL(resp.ServerURL) {
+	} else {
+		// 结果已送达：清除待上报值（仅当期间没有新结果覆盖）。
+		if pending != nil {
+			a.tunnelMu.Lock()
+			if a.tunnelPending == pending {
+				a.tunnelPending = nil
+			}
+			a.tunnelMu.Unlock()
+		}
+		// 服务端要求从主机侧回连自检。
+		if resp.TunnelCheckURL != "" {
+			a.startTunnelProbe(resp.TunnelCheckURL)
+		}
+	}
+	if err == nil && a.applyServerURL(resp.ServerURL) {
 		// 隧道地址变化（含被服务端清空后回退默认地址）：立即落盘，
 		// 后续心跳/轮询/下载都使用新地址。
 		a.cfg.LastHeartbeat = time.Now()
@@ -798,4 +827,57 @@ func (a *Agent) resolveServerURL(raw string) string {
 		log.Printf("⚠️ 忽略非法的隧道地址: %q", raw)
 	}
 	return next
+}
+
+// startTunnelProbe 异步从主机侧拨测服务端下发的地址，结果缓存到下一次心跳上报。
+//
+// 同一地址 5 分钟内不重复拨测；拨测进行中不并发重入，避免心跳密集时压满主机。
+func (a *Agent) startTunnelProbe(url string) {
+	a.tunnelMu.Lock()
+	if a.tunnelProbing {
+		a.tunnelMu.Unlock()
+		return
+	}
+	if url == a.tunnelLastURL && time.Since(a.tunnelLastAt) < 5*time.Minute {
+		a.tunnelMu.Unlock()
+		return
+	}
+	a.tunnelProbing = true
+	a.tunnelLastURL = url
+	a.tunnelLastAt = time.Now()
+	a.tunnelMu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		res := tunnelprobe.ProbeWithClient(ctx, url, 8*time.Second, a.client)
+		result := &protocol.TunnelCheckResult{
+			URL: url, OK: res.OK, LatencyMS: res.LatencyMS,
+		}
+		if !res.OK {
+			result.Detail = tunnelProbeDetail(res)
+			log.Printf("⚠️ 主机侧隧道自检未通过 %s: %s", url, result.Detail)
+		} else {
+			log.Printf("✅ 主机侧隧道自检通过 %s（%dms）", url, res.LatencyMS)
+		}
+		a.tunnelMu.Lock()
+		a.tunnelPending = result
+		a.tunnelProbing = false
+		a.tunnelMu.Unlock()
+	}()
+}
+
+// tunnelProbeDetail 把拨测失败原因压缩成一行（服务端写入 tunnel_check_detail）。
+func tunnelProbeDetail(res tunnelprobe.Result) string {
+	parts := make([]string, 0, len(res.Stages)+1)
+	for _, st := range res.Stages {
+		if st.OK {
+			continue
+		}
+		parts = append(parts, st.Name+": "+st.Detail)
+	}
+	if res.Hint != "" {
+		parts = append(parts, res.Hint)
+	}
+	return strings.Join(parts, "；")
 }

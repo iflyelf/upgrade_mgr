@@ -899,8 +899,27 @@
           ? '✓ 已通过隧道连接'
           : (connected ? ('当前连接 ' + connected) : '隧道已配置，等待 Agent 心跳')
       ]));
+      out.push(tunnelCheckLine(x));
     }
     return h('div', {}, out);
+  }
+
+  // tunnelCheckLine 展示保存后自动拨测的结论（平台侧 + 主机侧）。
+  // 未检查完成时显示「检查中」，失败标红并在悬停时给出阶段明细。
+  function tunnelCheckLine(x) {
+    if (x.tunnel_check_ok === undefined || x.tunnel_check_ok === null) {
+      return x.tunnel_check_detail
+        ? h('div', { class: 'muted' }, [x.tunnel_check_detail])
+        : h('div', { class: 'muted' }, ['隧道自检：检查中…']);
+    }
+    var where = x.tunnel_check_source === 'agent' ? '主机侧' : '平台侧';
+    var text = (x.tunnel_check_ok ? '✓ ' : '✗ ') + where + '自检' +
+      (x.tunnel_check_ok ? '通过' : '未通过') +
+      (x.tunnel_check_latency_ms ? '（' + x.tunnel_check_latency_ms + 'ms）' : '');
+    var cls = x.tunnel_check_ok ? 'tag tunnel-ok' : 'tag tunnel-fail';
+    return h('div', { title: x.tunnel_check_detail || '' }, [
+      h('span', { class: cls }, [text])
+    ]);
   }
 
   // sameEndpoint 判断 Agent 自报地址是否命中配置的平台隧道地址（忽略协议/结尾斜杠）。
@@ -995,7 +1014,13 @@
         .then(function () {
           state.editingHost = null;
           state.hostErr = '';
+          state.tunnelTest = null;
           loadHosts();
+          // 保存会触发平台侧拨测 + 主机侧自检，几秒后再刷新一次让结论尽早出现。
+          if (payload.server_tunnel_url) {
+            setTimeout(loadHosts, 3000);
+            setTimeout(loadHosts, 12000);
+          }
         })
         .catch(function (e) { state.hostErr = '保存失败: ' + e.message; render(); });
     };
@@ -1030,6 +1055,9 @@
       ]),
       (host.exit_ip ? hint('Agent 上报的出口 IP：' + host.exit_ip + '（多网卡时用于确认实际出口网卡）') : null),
       (host.agent_server_url ? hint('Agent 当前连接地址：' + host.agent_server_url) : null),
+      (host.server_tunnel_url && host.tunnel_check_ok === false
+        ? h('div', { class: 'err' }, ['上次隧道自检未通过：' + (host.tunnel_check_detail || '')])
+        : null),
       tunnelTestBlock(),
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn', onclick: save }, ['保存']),

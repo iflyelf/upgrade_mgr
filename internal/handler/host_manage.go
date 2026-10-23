@@ -127,6 +127,7 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			auditOp(s, r, audit.ActionHostUpdate, "host", strconv.FormatInt(id, 10), ip, opErr)
 		}()
 
+		tunnelChanged := req.ServerTunnelURL != nil
 		// 字段占位符 $2..$10，租户条件从 $11 开始。
 		cond, condArgs := reqScope(r).Where("", 11)
 		args := append([]any{
@@ -156,6 +157,11 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			opErr = err
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
+		}
+		// 隧道地址变化后自动做一次平台侧拨测，并请求主机侧自检，
+		// 列表可直接看到结论，不必等运维手动点「测试」。
+		if tunnelChanged {
+			triggerTunnelCheck(s, id)
 		}
 		httpx.OK(w, map[string]any{"id": id, "ip": ip})
 	}
