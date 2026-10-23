@@ -14,6 +14,9 @@ server:
   cors_origins: []
   metrics_token: ""           # /metrics Bearer 令牌（env METRICS_TOKEN）；留空则需登录会话
   agent_binary_dir: ./dist    # Agent 二进制目录（env AGENT_BINARY_DIR），供 /api/agent/binary/{name} 下载
+                              # 文件名：upgrade-agent-<os>-<arch>[-legacy][.exe]
+                              # 例：upgrade-agent-linux-amd64、upgrade-agent-windows-amd64.exe
+                              # 接入 Windows 主机时必须放入 windows-*.exe，否则下载 404
 
 database:                     # 必填
   dsn: ""                     # 优先使用；如 postgresql://user:pass@host:5432/upgrade_mgr?sslmode=disable
