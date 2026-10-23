@@ -16,6 +16,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/agent/agentpath"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/agentrun"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/binswap"
+	"github.com/iflyelf/upgrade_mgr/internal/agent/diagnose"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/installer"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/tlsclient"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/watchdog"
@@ -52,6 +53,8 @@ func main() {
 		watchdogCmd()
 	case "status":
 		statusCmd()
+	case "diagnose":
+		diagnoseCmd()
 	case "self-update", "upgrade":
 		fmt.Printf("子命令 %s 将在后续版本实现\n", os.Args[1])
 		os.Exit(1)
@@ -159,6 +162,7 @@ func usage() {
   uninstall    卸载
   watchdog     保活看门狗（cron / 计划任务调用）
   status       打印连接地址、备用列表、最近切换原因等排查信息
+  diagnose     主动拨测服务端链路（DNS/TCP/TLS/HTTP，可选鉴权心跳）
   self-update  自升级（P3）
   upgrade      单机升级指定组件（P3）
   version      显示版本
@@ -250,5 +254,34 @@ func statusCmd() {
 	fmt.Print(st.FormatText())
 	if !st.Registered {
 		os.Exit(2)
+	}
+}
+
+// diagnoseCmd 主动诊断到服务端的完整链路，输出各阶段耗时。
+//
+// 与 status 的区别：status 只读本地 state；diagnose 会真实发起网络请求。
+func diagnoseCmd() {
+	fs := flag.NewFlagSet("diagnose", flag.ExitOnError)
+	statePath := fs.String("state", agentpath.StatePath(), "状态文件路径")
+	serverURL := fs.String("server", "", "覆盖待测试地址（不写回 state）")
+	timeout := fs.Duration("timeout", diagnose.DefaultTimeout, "单个网络阶段超时")
+	heartbeat := fs.Bool("heartbeat", false, "执行一次带凭据心跳（会更新服务端 last_seen，可能触发自动升级）")
+	asJSON := fs.Bool("json", false, "以 JSON 输出")
+	fs.Parse(os.Args[2:])
+
+	res, err := diagnose.Run(diagnose.Options{
+		StatePath: *statePath, ServerURL: *serverURL, Timeout: *timeout,
+		Heartbeat: *heartbeat, Version: version, Variant: variant,
+	})
+	if err != nil {
+		log.Fatalf("诊断失败: %v", err)
+	}
+	if *asJSON {
+		fmt.Println(res.FormatJSON())
+	} else {
+		fmt.Print(res.FormatText())
+	}
+	if !res.OK {
+		os.Exit(1)
 	}
 }

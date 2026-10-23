@@ -783,6 +783,77 @@ Linux legacy 追加 `-legacy`；Windows 文件名带 `.exe`。服务端按主机
 自动选择平台二进制，同一个 fleet 可混合 Linux 与 Windows 主机。
 若使用 Nginx/域名，请正确设置 `server.external_url`，否则 Agent 可能无法访问下载地址。
 
+### 5. windows_exporter 安装示例（Windows 主机）
+
+与 `node_exporter` 示例完全对齐：仓库自带单文件 `examples/windows_exporter/install.ps1`
+（内嵌默认配置），支持 `install / update / uninstall / status` 四个动作，并可在控制台
+「组件」页点示例一键填好。
+
+- 二进制来源：`iflyelf/windows_exporter` 的 `latest` 发布（`amd64` / `arm64`），
+  经 `proxy.xiaonuo.live` 代理下载，兼容 Server 2008 R2 ~ Windows 11 的 PowerShell 2.0；
+- 安装位置：`C:\Program Files\windows_exporter`，服务名 `windows_exporter`
+  （SCM，自动启动 + 失败重启 5s/10s/30s）；
+- 监听端口：**16666**（默认），防火墙入站规则自动创建；
+- textfile 目录：`C:\monitor\windows_exporter\textfile_inputs`
+  （原 `C:\zabbix_agentd\...` 已按你的要求改为 `monitor`）；
+- 配置：`C:\Program Files\windows_exporter\config.yaml`，仓库示例见
+  `examples/windows_exporter/config.yaml`（含 `service.exclude` 大清单，可直接用）。
+
+| 动作 | 说明 |
+|---|---|
+| `install` | 安装或覆盖升级：下载 exe → 备份旧版本 → 替换 → 建服务 → 建防火墙规则 → 启动 |
+| `update` | 备份旧 exe → 替换 → 重启；启动失败自动回滚旧版本 |
+| `uninstall` | 停止并删除服务、防火墙规则、安装目录（`-Yes` 跳过确认，`-KeepData` 保留配置） |
+| `status` | 输出服务状态、启动类型、版本、路径与 `/metrics` 连通性 |
+
+**控制台操作**（两种方式，与 Linux 示例一一对应）：
+
+1. **脚本方式（推荐）**：「组件」页 → Windows 分组 →「脚本安装 / 脚本更新 / 脚本卸载」
+   → 保存；再到「任务」页选中对应组件启动。组件名分别为
+   `windows_exporter_script` / `windows_exporter_script_update` / `windows_exporter_script_uninstall`。
+2. **命令任务方式**：「任务」页类型选「执行命令/脚本」→ Windows 分组 →「安装脚本 / 更新脚本 / 卸载脚本」。
+   生成的脚本会自动下载 `install.ps1` 并以 `install / update / uninstall -Yes` 执行，
+   解释器预填 `powershell.exe`。
+
+手工在目标机执行：
+
+```powershell
+# 管理员 PowerShell（PowerShell 2.0 亦可）
+$url = 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1'
+$f = Join-Path $env:TEMP 'windows_exporter-install.ps1'
+(New-Object System.Net.WebClient).DownloadFile($url, $f)
+
+& $f install                       # 安装/覆盖升级
+& $f update                        # 升级（失败自动回滚）
+& $f status                        # 查看状态
+& $f uninstall -Yes                # 卸载（-KeepData 保留配置）
+```
+
+常用参数：
+
+```powershell
+& $f install -ListenPort 9182                  # 改端口
+& $f install -TextfileDir 'D:\metrics'        # 改 textfile 目录
+& $f install -ConfigPath 'C:\dist\config.yaml' # 使用自定义配置
+& $f install -Arch arm64                       # Windows on ARM
+& $f install -NoFirewall                       # 不创建防火墙规则
+```
+
+> `-Version latest` 默认取 `iflyelf/windows_exporter` 的 latest；固定版本时传
+> `-Version v0.32.0` 形式（需该 tag 已发布对应资产）。
+> 也可用环境变量覆盖：`WINDOWS_EXPORTER_VERSION`、`WINDOWS_EXPORTER_PROXY`、
+> `WINDOWS_EXPORTER_BASE`、`WINDOWS_EXPORTER_LISTEN_PORT`。
+
+组件健康检查与版本检查使用 PowerShell（与 Agent 的 Windows 解释器一致）：
+
+```
+health_cmd : [["powershell.exe","-NoProfile","-Command","if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]]
+version_cmd: [["powershell.exe","-NoProfile","-Command","(Get-Item 'C:\Program Files\windows_exporter\windows_exporter.exe').VersionInfo.FileVersion"]]
+```
+
+> 只在 Windows 主机上执行：任务按 `os_family=windows` 选主机（本平台任务筛选支持），
+> 或直接填 Windows 主机的 IP。Linux 主机执行 PowerShell 脚本会明确报错。
+
 ### 5. node_exporter 安装示例（可选，推荐脚本安装）
 
 控制台「组件」页点「填入示例：脚本安装 / 脚本更新 / 脚本卸载」会自动填好组件；
@@ -1850,6 +1921,17 @@ MIT © iflyelf
 - 备用地址轮换不依赖服务端配置，避免「服务端推送错误覆盖地址」导致主机失联。
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
+
+### 2026-10-23 windows_exporter 示例与 diagnose
+
+- 新增 `examples/windows_exporter/install.ps1`（install/update/uninstall/status 四动作，
+  PowerShell 2.0 兼容）与 `examples/windows_exporter/config.yaml`（含 service.exclude 清单，
+  textfile 目录改为 `C:\monitor\windows_exporter\textfile_inputs`）。
+- 组件示例新增 Windows 三项：`windows_exporter_script` / `_update` / `_uninstall`，
+  列表与表单按钮按 Linux / Windows 分组，任务页示例同样区分（名称带「Linux 示例」「Windows 示例」）。
+- 任务命令示例新增 Windows 三项（安装/更新/卸载脚本），解释器预填 `powershell.exe`。
+- 新增 `upgrade-agent diagnose`：主动拨测 DNS → TCP → TLS → HTTP /health 并输出各阶段耗时，
+  可选 `--heartbeat` 验证鉴权链路；`status` 增加「服务端覆盖 vs 本机生效」对比。
 
 ### 2026-10-23 Agent status 子命令
 

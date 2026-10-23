@@ -66,6 +66,10 @@ type Config struct {
 	// AppliedOverride 当前生效的「连接地址覆盖」；用于 status 判断地址来源。
 	// 服务端清空覆盖、覆盖地址失败回退时清空。
 	AppliedOverride string `json:"applied_override,omitempty"`
+	// RequestedOverride 是服务端最近一次下发的覆盖地址（空表示未下发/已清空）。
+	// status 用它对比「服务端要求」与「本机生效」，判断配置是否已生效。
+	RequestedOverride   string    `json:"requested_override,omitempty"`
+	RequestedOverrideAt time.Time `json:"requested_override_at,omitempty"`
 	// ---- 最近一次连接地址切换（供 `upgrade-agent status` 现场排查）----
 	// 持久化在 state.json，跨进程可见；不包含任何凭据。
 	LastSwitchFrom   string    `json:"last_switch_from,omitempty"`
@@ -271,6 +275,11 @@ func (a *Agent) heartbeat() {
 		log.Printf("⚠️ 心跳失败: %v", err)
 		a.handleConnectFailure()
 	} else {
+		// 记录服务端本次下发的覆盖地址，供 status 对比是否已生效。
+		if got := strings.TrimSpace(resp.ServerURL); got != a.cfg.RequestedOverride {
+			a.cfg.RequestedOverride = got
+			a.cfg.RequestedOverrideAt = time.Now()
+		}
 		// 结果已送达：清除待上报值（仅当期间没有新结果覆盖）。
 		if pending != nil {
 			a.tunnelMu.Lock()

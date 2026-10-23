@@ -30,8 +30,12 @@ type Status struct {
 	CrashCount    int         `json:"crash_count"`
 	PendingCount  int         `json:"pending_reports"`
 	LastSwitch    *SwitchInfo `json:"last_switch,omitempty"`
-	TLSEnabled    bool        `json:"tls_enabled"`
-	TLSClientCert bool        `json:"tls_client_cert"`
+	// 服务端下发的覆盖地址与本机生效地址的对比。
+	RequestedOverride string     `json:"requested_override,omitempty"`
+	RequestedAt       *time.Time `json:"requested_at,omitempty"`
+	OverrideApplied   bool       `json:"override_applied"`
+	TLSEnabled        bool       `json:"tls_enabled"`
+	TLSClientCert     bool       `json:"tls_client_cert"`
 }
 
 // SwitchInfo 最近一次连接地址切换。
@@ -77,21 +81,27 @@ func BuildStatus(statePath, version, variant string) (Status, error) {
 	urls := displayServerList(cur, cfg.ServerURLs)
 
 	st := Status{
-		OS:            osinfo.Detect(),
-		Version:       version,
-		Variant:       variant,
-		StatePath:     statePath,
-		Registered:    cfg.AgentID != "",
-		AgentID:       cfg.AgentID,
-		ServerURL:     cur,
-		DefaultURL:    def,
-		AddressSource: addressSource(cur, def, urls, cfg.AppliedOverride),
-		ServerURLs:    urls,
-		ExitIP:        cfg.ExitIP,
-		CrashCount:    crashCount,
-		PendingCount:  len(cfg.PendingReports),
-		TLSEnabled:    cfg.TLSCA != "" || cfg.TLSCert != "",
-		TLSClientCert: cfg.TLSCert != "" && cfg.TLSKey != "",
+		OS:                osinfo.Detect(),
+		Version:           version,
+		Variant:           variant,
+		StatePath:         statePath,
+		Registered:        cfg.AgentID != "",
+		AgentID:           cfg.AgentID,
+		ServerURL:         cur,
+		DefaultURL:        def,
+		AddressSource:     addressSource(cur, def, urls, cfg.AppliedOverride),
+		ServerURLs:        urls,
+		ExitIP:            cfg.ExitIP,
+		CrashCount:        crashCount,
+		PendingCount:      len(cfg.PendingReports),
+		TLSEnabled:        cfg.TLSCA != "" || cfg.TLSCert != "",
+		TLSClientCert:     cfg.TLSCert != "" && cfg.TLSKey != "",
+		RequestedOverride: cfg.RequestedOverride,
+		OverrideApplied:   overrideApplied(cur, cfg.RequestedOverride),
+	}
+	if !cfg.RequestedOverrideAt.IsZero() {
+		at := cfg.RequestedOverrideAt
+		st.RequestedAt = &at
 	}
 	if !cfg.LastHeartbeat.IsZero() {
 		hb := cfg.LastHeartbeat
@@ -106,6 +116,22 @@ func BuildStatus(statePath, version, variant string) (Status, error) {
 		}
 	}
 	return st, nil
+}
+
+// overrideApplied 判断服务端要求与本机生效地址是否一致。
+//
+// 服务端未下发（空）时视为「无覆盖要求」，本机应处于默认地址才算一致。
+func overrideApplied(current, requested string) bool {
+	cur := strings.TrimRight(strings.TrimSpace(current), "/")
+	req := strings.TrimRight(strings.TrimSpace(requested), "/")
+	if req == "" {
+		return cur != ""
+	}
+	if req == cur {
+		return true
+	}
+	// 服务端可能只下发 IP（由 Agent 补协议/端口），用后缀主机比较兜底。
+	return strings.Contains(req, "://") && strings.HasSuffix(cur, req)
 }
 
 // displayServerList 去重并保留配置顺序，确保当前地址在列表中。
@@ -192,6 +218,18 @@ func (s Status) FormatText() string {
 	if s.PendingCount > 0 {
 		line("待补报", fmt.Sprintf("%d 条（网络恢复后自动补报）", s.PendingCount))
 	}
+	if s.RequestedOverride != "" || s.RequestedAt != nil {
+		reqText := s.RequestedOverride
+		if reqText == "" {
+			reqText = "（服务端未下发覆盖）"
+		}
+		status := "已生效"
+		if !s.OverrideApplied {
+			status = "未生效（等待下一次心跳或地址不可达）"
+		}
+		line("服务端覆盖", reqText)
+		line("覆盖状态", status+overrideAtText(s.RequestedAt))
+	}
 	if s.LastSwitch != nil {
 		fmt.Fprintf(&b, "%s%s → %s\n", padLabel("最近切换:", labelWidth),
 			orDash(s.LastSwitch.From), orDash(s.LastSwitch.To))
@@ -230,6 +268,14 @@ func padLabel(s string, width int) string {
 		return s + " "
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// overrideAtText 附加服务端下发时间，便于判断是否为新配置。
+func overrideAtText(at *time.Time) string {
+	if at == nil {
+		return ""
+	}
+	return "（下发于 " + at.Format("2006-01-02 15:04:05") + "）"
 }
 
 func ifVariant(v string) string {
