@@ -22,7 +22,7 @@ func SyncDepartmentsFromFlyIAM(s *svc.ServiceContext) http.HandlerFunc {
 				"未配置 FlyIAM 地址与服务令牌，请先到「设置 → FlyIAM」填写")
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
 		deps, err := client.FetchDepartments(ctx)

@@ -67,7 +67,8 @@ func NewClient(endpoint, serviceToken string) *Client {
 	return &Client{
 		endpoint: strings.TrimRight(endpoint, "/"),
 		token:    serviceToken,
-		http:     &http.Client{Timeout: 15 * time.Second},
+		// 组织导出需要遍历全部用户，大组织可能超过 15s；放宽到 60s。
+		http: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
