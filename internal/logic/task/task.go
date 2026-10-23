@@ -102,6 +102,9 @@ type Service struct {
 	// hostGroups 返回用户对组件可操作的主机分组（空/含 "*" 表示不限）。
 	// 为 nil 时不校验主机范围。
 	hostGroups func(ctx context.Context, actor *auth.User, componentName string) (map[string]bool, error)
+	// allowTaskOwnerOnly 为 true 时，非管理员只能操作自己创建的任务。
+	// 用函数读取设置，页面修改后无需重启。
+	allowTaskOwnerOnly func() bool
 }
 
 // SetAuthorizer 注入组件级权限校验（由服务端启动时设置）。
@@ -112,6 +115,38 @@ func (s *Service) SetAuthorizer(fn func(context.Context, *auth.User, int64, stri
 // SetHostGroupResolver 注入主机分组范围解析（由服务端启动时设置）。
 func (s *Service) SetHostGroupResolver(fn func(context.Context, *auth.User, string) (map[string]bool, error)) {
 	s.hostGroups = fn
+}
+
+// SetOwnerOnlyPolicy 注入「仅本人可操作任务」开关（由服务端启动时设置）。
+func (s *Service) SetOwnerOnlyPolicy(fn func() bool) { s.allowTaskOwnerOnly = fn }
+
+// checkTaskOwner 校验非管理员是否可操作指定任务。
+//
+// 仅在开启 agent.task_owner_only 时生效；管理员（admin/superadmin）始终放行。
+// 用于「启动 / 暂停 / 推进 / 取消 / 重试 / 删除」等写操作。
+//
+// actor 从 ctx 取（handler 已通过 middleware 注入当前用户），
+// 这样所有既有方法签名无需改动。
+func (s *Service) checkTaskOwner(ctx context.Context, sc scope.Scope, taskID int64) error {
+	if s.allowTaskOwnerOnly == nil || !s.allowTaskOwnerOnly() {
+		return nil
+	}
+	actor, _ := auth.FromContext(ctx)
+	if actor == nil || actor.IsAdmin || actor.IsSuperAdmin() || actor.HasRole(auth.RoleAdmin) {
+		return nil
+	}
+	tCond, tArgs := sc.Where("", 2)
+	var createdBy string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(created_by,'') FROM upgrade_tasks WHERE id=$1 AND `+tCond,
+		append([]any{taskID}, tArgs...)...).Scan(&createdBy)
+	if err != nil {
+		return fmt.Errorf("任务不存在或无权访问")
+	}
+	if createdBy != "" && createdBy != actor.Username {
+		return fmt.Errorf("该任务由 %s 创建，仅创建者或管理员可操作", createdBy)
+	}
+	return nil
 }
 
 // NewService 创建任务服务。allowExecMode 为 nil 时视为禁止。
@@ -276,8 +311,9 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 	}
 	var taskID int64
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO upgrade_tasks (kind, name, component_id, version, command, selector, strategy, status, created_by, tenant_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9) RETURNING id`,
+		INSERT INTO upgrade_tasks (kind, name, component_id, version, command, selector, strategy, status,
+		                           created_by, updated_by, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$8,$9) RETURNING id`,
 		kind, req.Name, componentID, req.Version, cmdJSON, selJSON, stratJSON, req.CreatedBy,
 		sc.TenantForWrite()).Scan(&taskID)
 	if err != nil {

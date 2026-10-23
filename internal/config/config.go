@@ -196,6 +196,9 @@ type AgentConfig struct {
 	// AutoUpdate 是否在 Agent 心跳发现旧版本时自动下发自升级（默认 false）。
 	// 开启后 Agent 会下载新二进制并重启，建议确认 dist 目录已放置目标版本再开启。
 	AutoUpdate bool `yaml:"auto_update"`
+	// TaskOwnerOnly 为 true 时，非管理员只能操作自己创建的任务（启动/暂停/推进/
+	// 取消/重试/删除）。默认 false（保持既有协作行为）。
+	TaskOwnerOnly bool `yaml:"task_owner_only"`
 }
 
 // FlyIAMConfig FlyIAM 服务间集成（与 consul_mgr 复用同一部署）。
@@ -344,6 +347,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.Artifact.OSSAccessKey, "ARTIFACT_OSS_ACCESS_KEY")
 	setStr(&c.Artifact.OSSSecretKey, "ARTIFACT_OSS_SECRET_KEY")
 	setBool(&c.Agent.AutoUpdate, "AGENT_AUTO_UPDATE")
+	setBool(&c.Agent.TaskOwnerOnly, "AGENT_TASK_OWNER_ONLY")
 	setStr(&c.FlyIAM.Endpoint, "FLYIAM_ENDPOINT")
 	setStr(&c.FlyIAM.ServiceToken, "FLYIAM_SERVICE_TOKEN")
 	setStr(&c.Log.Level, "LOG_LEVEL")

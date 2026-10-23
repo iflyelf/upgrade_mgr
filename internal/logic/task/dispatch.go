@@ -15,6 +15,9 @@ import (
 // 简化的编排：P2 先将全部命中主机的 pending task_hosts 生成待下发指令（按批次顺序），
 // Agent 侧串行执行；灰度门禁与自动推进在 P3 增强。
 func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error {
+	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
+		return err
+	}
 	tCond, tArgs := sc.Where("", 2)
 	var status string
 	var componentID sql.NullInt64
@@ -60,6 +63,9 @@ func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error
 // 「跳过失败批次」和「恢复任务」在同一事务内完成：先锁批次行，再更新任务，
 // 与 completeBatch 的加锁顺序一致，避免并发 Promote/编排器互相死锁。
 func (s *Service) Promote(ctx context.Context, sc scope.Scope, taskID int64) error {
+	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
+		return err
+	}
 	tCond, tArgs := sc.Where("", 2)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -87,6 +93,9 @@ func (s *Service) Promote(ctx context.Context, sc scope.Scope, taskID int64) err
 
 // Pause 暂停任务（仅限 running 状态）。
 func (s *Service) Pause(ctx context.Context, sc scope.Scope, taskID int64) error {
+	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
+		return err
+	}
 	tCond, tArgs := sc.Where("", 2)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE upgrade_tasks SET status='paused', updated_at=NOW() WHERE id=$1 AND `+tCond+` AND status='running'`,
@@ -103,6 +112,9 @@ func (s *Service) Pause(ctx context.Context, sc scope.Scope, taskID int64) error
 // Cancel 取消任务：仅作用于非终态任务（draft/running/paused），
 // 将未完成的 commands 和 task_hosts 置为 canceled。
 func (s *Service) Cancel(ctx context.Context, sc scope.Scope, taskID int64) error {
+	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
+		return err
+	}
 	tCond, tArgs := sc.Where("", 2)
 
 	tx, err := s.db.BeginTx(ctx, nil)

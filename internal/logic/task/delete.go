@@ -17,6 +17,9 @@ import (
 //
 // task_batches / task_hosts / commands 均通过外键 ON DELETE CASCADE 清理。
 func (s *Service) Delete(ctx context.Context, sc scope.Scope, taskID int64) error {
+	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
+		return err
+	}
 	tCond, tArgs := sc.Where("", 2)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
