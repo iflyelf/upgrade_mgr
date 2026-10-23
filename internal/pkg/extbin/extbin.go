@@ -22,6 +22,26 @@ import (
 // 前缀：标明该条目是文本脚本而不是可执行文件。
 const scriptPrefix = "script:"
 
+// DefaultBinaries 内置默认白名单。
+//
+// 运行期以配置（配置文件 / 设置页）为准；配置为空时回退到这里，
+// 保证升级后原有 Windows 接入不因缺少配置而中断。
+func DefaultBinaries() map[string]string {
+	return map[string]string{
+		"windows-exporter-amd64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64.exe",
+		"windows-exporter-arm64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64.exe",
+		"windows-exporter-install.ps1": "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
+	}
+}
+
+// Effective 返回实际生效的白名单：配置非空用配置，否则用内置默认。
+func Effective(configured map[string]string) map[string]string {
+	if len(configured) > 0 {
+		return configured
+	}
+	return DefaultBinaries()
+}
+
 // DefaultHosts 默认允许的上游域名。
 var DefaultHosts = []string{
 	"github.com",

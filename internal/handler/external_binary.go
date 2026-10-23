@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/metrics"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/keyedlock"
@@ -144,16 +145,21 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		}
 
 		ttl := effectiveExternalTTL(cfg)
-		if !freshFile(target, ttl) {
+		cached := freshFile(target, ttl)
+		if !cached {
 			// 同一文件并发请求只下载一次：锁只覆盖下载阶段，拿到后立即释放，
 			// 后续 ServeContent 流式输出不持锁（否则大文件会阻塞同文件的其它请求）。
 			if fetchErr := downloadWithLock(r.Context(), target, *asset,
 				effectiveExternalHosts(cfg), externalAllowRule(cfg), ttl); fetchErr != nil {
 				log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
+				metrics.ExternalBinaryRequests.WithLabelValues(name, "error").Inc()
 				httpx.Fail(w, http.StatusBadGateway,
 					"控制台下载外部文件失败（请确认控制台能访问该地址）: "+fetchErr.Error())
 				return
 			}
+			metrics.ExternalBinaryRequests.WithLabelValues(name, "fresh").Inc()
+		} else {
+			metrics.ExternalBinaryRequests.WithLabelValues(name, "cache_hit").Inc()
 		}
 
 		f, err := os.Open(target)
@@ -171,6 +177,9 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		if asset.Script {
 			contentType = "text/plain; charset=utf-8"
 		}
+		metrics.ExternalBinaryBytes.WithLabelValues(name).Add(float64(info.Size()))
+		metrics.ExternalBinaryCacheAge.WithLabelValues(name).Set(time.Since(info.ModTime()).Seconds())
+
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", "attachment; filename="+fileName)
 		http.ServeContent(w, r, fileName, info.ModTime(), f)
@@ -196,7 +205,15 @@ func downloadWithLock(ctx context.Context, target string, asset extbin.Entry,
 	if freshFile(target, ttl) {
 		return nil
 	}
-	return fetchExternalBinary(ctx, asset.URL, target, asset.Script, hosts, rule)
+	start := time.Now()
+	err := fetchExternalBinary(ctx, asset.URL, target, asset.Script, hosts, rule)
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.ExternalBinaryDuration.WithLabelValues(asset.Name, result).
+		Observe(time.Since(start).Seconds())
+	return err
 }
 
 // fetchExternalBinary 下载到临时文件再原子替换，避免并发/中断留下半个文件。

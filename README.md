@@ -1959,6 +1959,30 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 外部文件：服务端分页、批量刷新与可用性指标
+
+- **服务端分页 + 搜索**：`GET /api/external/binaries?page=&size=&q=`（size 上限 200，
+  不传 page/size 仍返回全部以兼容旧行为）。表格页改为服务端分页，搜索按回车/按钮触发。
+- **保存语义改为 merge**：`PUT /api/external/binaries` 支持 `merge=true` 与 `deleted[]`。
+  分页后前端只持有当前页，必须用合并语义，否则保存会把其它页条目清空。
+- **批量刷新**：`POST /api/external/binaries/refresh-all`，逐条重下并返回成功/失败明细；
+  与单项刷新、普通下载共用同一把文件锁。
+- **Prometheus 指标（含可用性）**：
+  | 指标 | 说明 |
+  |---|---|
+  | `upgrade_mgr_external_binary_up{name,type}` | 上游是否可用（1/0） |
+  | `upgrade_mgr_external_binary_probe_seconds{name}` | 最近一次探测耗时 |
+  | `upgrade_mgr_external_binary_probe_total{name,result}` | 探测次数（success/error） |
+  | `upgrade_mgr_external_binary_cached{name}` / `_cached_bytes{name}` | 缓存状态与大小 |
+  | `upgrade_mgr_external_binary_cache_age_seconds{name}` | 缓存年龄 |
+  | `upgrade_mgr_external_binary_requests_total{name,result}` | 下载请求（cache_hit/fresh/error/refresh/refresh_error） |
+  | `upgrade_mgr_external_binary_download_seconds{name,result}` | 上游下载耗时 |
+  | `upgrade_mgr_external_binary_bytes_total{name}` | 已下发字节数 |
+- 新增 `internal/pkg/extbinprobe`：每分钟串行探测全部条目（只取前 64KB，不落盘），
+  失败不影响其它条目；每个副本都会探测，多副本时指标按实例分别统计。
+- 探测与下载共用同一套校验（域名白名单、内网放行、重定向逐跳校验），
+  保证「指标显示可用」= 「主机实际能下到」。
+
 ### 2026-10-23 外部文件页增强与并发/死锁修复
 
 - 表格页每行新增「复制地址」（复制完整平台 URL，便于直接粘贴给主机/脚本）

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/metrics"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/safepath"
@@ -44,6 +45,11 @@ type externalBinaryListResponse struct {
 	// 内网放行策略：内网镜像站需要显式开启。
 	AllowPrivate bool     `json:"allow_private"`
 	AllowCIDRs   []string `json:"allow_cidrs"`
+	// 分页信息：page=0 表示返回全部（未分页）。
+	Total int `json:"total"`
+	Page  int `json:"page"`
+	Size  int `json:"size"`
+	Pages int `json:"pages"`
 }
 
 // externalBinarySaveRequest 保存请求。
@@ -57,6 +63,13 @@ type externalBinarySaveRequest struct {
 	TTL          string   `json:"ttl"`
 	AllowPrivate bool     `json:"allow_private"`
 	AllowCIDRs   []string `json:"allow_cidrs"`
+	// Merge=true 时把 items 合并进现有白名单（按 name upsert），
+	// 并从白名单中删除 Deleted 列出的名称。
+	//
+	// 表格页服务端分页后只持有当前页条目，必须用合并语义，
+	// 否则保存当前页会把其它页的条目清空。
+	Merge   bool     `json:"merge"`
+	Deleted []string `json:"deleted"`
 }
 
 // externalBinaryTestRequest 测试下载请求。
@@ -85,7 +98,9 @@ type externalBinaryTestResult struct {
 
 // ListExternalBinaries 返回外部文件白名单（管理员）。
 //
-// 同时给出设置为空的回退来源（default）与缓存状态，页面据此渲染表格。
+// 支持服务端分页与搜索（?q=&page=&size=）：
+// 白名单条目多时避免一次性返回全部（前端也无需全量过滤）。
+// 不传 page/size 时返回全部，保持旧行为。
 func ListExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := externalBinaryConfig(s)
@@ -96,6 +111,48 @@ func ListExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		baseDir := externalBinaryBaseDir(cfg)
+
+		// 搜索：名称或上游地址包含关键字（大小写不敏感）。
+		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		if q != "" {
+			filtered := entries[:0]
+			for _, e := range entries {
+				if strings.Contains(strings.ToLower(e.Name), q) ||
+					strings.Contains(strings.ToLower(e.URL), q) {
+					filtered = append(filtered, e)
+				}
+			}
+			entries = filtered
+		}
+
+		total := len(entries)
+		page := atoiDefault(r.URL.Query().Get("page"), 0)
+		size := atoiDefault(r.URL.Query().Get("size"), 0)
+		if size > 200 {
+			size = 200
+		}
+		pages := 1
+		if page > 0 && size > 0 {
+			pages = (total + size - 1) / size
+			if pages < 1 {
+				pages = 1
+			}
+			if page > pages {
+				page = pages
+			}
+			start := (page - 1) * size
+			end := start + size
+			if start > total {
+				start = total
+			}
+			if end > total {
+				end = total
+			}
+			entries = entries[start:end]
+		} else {
+			page = 0
+		}
+
 		items := make([]externalBinaryItem, 0, len(entries))
 		for _, e := range entries {
 			items = append(items, buildExternalBinaryItem(baseDir, e))
@@ -114,6 +171,10 @@ func ListExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			TTL:    ttl,
 			Source: source,
 			Dir:    baseDir,
+			Total:  total,
+			Page:   page,
+			Size:   size,
+			Pages:  pages,
 		}
 		if cfg != nil {
 			resp.AllowPrivate = cfg.Server.ExternalBinaryAllowPrivate
@@ -139,8 +200,31 @@ func SaveExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 
-		// 组装为 name -> "script:url" 的映射，复用统一校验。
+		// 合并语义：以现有白名单为基线，避免分页保存清空其它页。
 		raw := make(map[string]string, len(req.Items))
+		if req.Merge {
+			if existing, err := extbin.Parse(effectiveExternalBinaries(externalBinaryConfig(s))); err == nil {
+				for _, e := range existing {
+					v := e.URL
+					if e.Script {
+						v = "script:" + v
+					}
+					raw[e.Name] = v
+				}
+			}
+		}
+		for _, name := range req.Deleted {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			// 删除按名称忽略大小写匹配，避免大小写不同导致删不掉。
+			for k := range raw {
+				if strings.EqualFold(k, name) {
+					delete(raw, k)
+				}
+			}
+		}
 		for _, it := range req.Items {
 			name := strings.TrimSpace(it.Name)
 			url := strings.TrimSpace(it.URL)
@@ -152,7 +236,8 @@ func SaveExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			if it.Script {
 				value = "script:" + url
 			}
-			if _, dup := raw[name]; dup {
+			// 同一次提交内重名直接拒绝；跨页同名按 upsert 覆盖（merge 语义）。
+			if _, dup := raw[name]; dup && !req.Merge {
 				httpx.Fail(w, http.StatusBadRequest, "名称重复: "+name)
 				return
 			}
@@ -328,10 +413,17 @@ func RefreshExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 		start := time.Now()
 		if err := fetchExternalBinary(r.Context(), entry.URL, target, entry.Script,
 			effectiveExternalHosts(cfg), externalAllowRule(cfg)); err != nil {
+			metrics.ExternalBinaryRequests.WithLabelValues(name, "refresh_error").Inc()
+			metrics.ExternalBinaryDuration.WithLabelValues(name, "error").
+				Observe(time.Since(start).Seconds())
 			auditOp(s, r, auditActionExternalBinaryRefresh, "external_binary", name, entry.URL, err)
 			httpx.Fail(w, http.StatusBadGateway, "重新下载失败: "+err.Error())
 			return
 		}
+		metrics.ExternalBinaryRequests.WithLabelValues(name, "refresh").Inc()
+		metrics.ExternalBinaryDuration.WithLabelValues(name, "success").
+			Observe(time.Since(start).Seconds())
+		metrics.ExternalBinaryCacheAge.WithLabelValues(name).Set(0)
 		info, _ := os.Stat(target)
 		var size int64
 		if info != nil {
@@ -342,6 +434,84 @@ func RefreshExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 			"name": name, "size": size, "elapsed_ms": time.Since(start).Milliseconds(),
 		})
 	}
+}
+
+// RefreshAllExternalBinaries 批量刷新全部缓存（管理员）。
+//
+// 用途：上游统一升级后一次性更新所有条目。逐个下载，单个失败不影响其它，
+// 返回每个条目的结果摘要。
+func RefreshAllExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cfg := externalBinaryConfig(s)
+		entries, err := extbin.Parse(effectiveExternalBinaries(cfg))
+		if err != nil {
+			httpx.Fail(w, http.StatusInternalServerError, "白名单配置错误")
+			return
+		}
+		baseDir := externalBinaryBaseDir(cfg)
+		hosts := effectiveExternalHosts(cfg)
+		rule := externalAllowRule(cfg)
+
+		type itemResult struct {
+			Name      string `json:"name"`
+			OK        bool   `json:"ok"`
+			Size      int64  `json:"size"`
+			ElapsedMS int64  `json:"elapsed_ms"`
+			Error     string `json:"error,omitempty"`
+		}
+		results := make([]itemResult, 0, len(entries))
+		okCount, failCount := 0, 0
+
+		for _, e := range entries {
+			start := time.Now()
+			res := itemResult{Name: e.Name}
+			target := externalBinaryCachePath(baseDir, e)
+			// 与单项刷新/普通下载共用同一把文件锁，避免并发写同一文件。
+			func() {
+				unlock := lockExternalTarget(target)
+				defer unlock()
+				if rmErr := os.Remove(target); rmErr != nil && !os.IsNotExist(rmErr) {
+					res.Error = rmErr.Error()
+					return
+				}
+				if fetchErr := fetchExternalBinary(r.Context(), e.URL, target, e.Script, hosts, rule); fetchErr != nil {
+					res.Error = fetchErr.Error()
+					return
+				}
+				if info, statErr := os.Stat(target); statErr == nil {
+					res.Size = info.Size()
+				}
+				res.OK = true
+			}()
+			res.ElapsedMS = time.Since(start).Milliseconds()
+			if res.OK {
+				okCount++
+				metrics.ExternalBinaryRequests.WithLabelValues(e.Name, "refresh").Inc()
+				metrics.ExternalBinaryCacheAge.WithLabelValues(e.Name).Set(0)
+			} else {
+				failCount++
+				metrics.ExternalBinaryRequests.WithLabelValues(e.Name, "refresh_error").Inc()
+			}
+			metrics.ExternalBinaryDuration.WithLabelValues(e.Name, boolResult(res.OK)).
+				Observe(time.Since(start).Seconds())
+			results = append(results, res)
+		}
+
+		auditOpDetails(s, r, auditActionExternalBinaryRefresh, "external_binary", "all", "",
+			boolErr(failCount == 0, fmt.Sprintf("%d 个条目刷新失败", failCount)),
+			map[string]any{"ok": okCount, "failed": failCount}, nil)
+		httpx.OK(w, map[string]any{
+			"total": len(entries), "ok": okCount, "failed": failCount, "items": results,
+		})
+	}
+}
+
+// boolResult 把成功/失败映射为指标 label。
+func boolResult(ok bool) string {
+	if ok {
+		return "success"
+	}
+	return "error"
 }
 
 // probeExternalBinary 拉取文件头部做可用性探测。

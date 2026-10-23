@@ -51,6 +51,8 @@ func main() {
 	sc.StartOrchestrator(ctx)
 	sc.StartMetrics(ctx)
 	sc.StartMaintenance(ctx)
+	// 外部文件可用性探测（Prometheus 指标），便于观察公网/内网镜像稳定性。
+	sc.StartExtbinProbe(ctx, handler.NewExtbinProvider(sc), 0)
 
 	mux := http.NewServeMux()
 	limiters := registerRoutes(mux, sc)
@@ -181,6 +183,8 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestExternalBinary(sc))))
 	mux.HandleFunc("POST /api/external/binaries/refresh",
 		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RefreshExternalBinary(sc))))
+	mux.HandleFunc("POST /api/external/binaries/refresh-all",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RefreshAllExternalBinaries(sc))))
 
 	// 组件管理
 	mux.HandleFunc("GET /api/components", middleware.RequireAuth(auth, handler.ComponentList(sc)))

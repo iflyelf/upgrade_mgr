@@ -69,6 +69,65 @@ var (
 		Name: "upgrade_mgr_artifact_download_bytes_total",
 		Help: "Total bytes downloaded",
 	})
+
+	// 外部文件代缓存指标：观察公网/内网依赖稳定性。
+	//
+	//   result=cache_hit 命中本地缓存（未访问上游）
+	//   result=fresh     未命中缓存，本次成功下载
+	//   result=error     下载失败（上游不可达 / 校验失败 / 被 SSRF 策略拒绝）
+	//   result=refresh   管理员强制刷新（成功或失败由 error 计数体现）
+	ExternalBinaryRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "upgrade_mgr_external_binary_requests_total",
+		Help: "External binary proxy requests by asset and result",
+	}, []string{"name", "result"})
+
+	ExternalBinaryBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "upgrade_mgr_external_binary_bytes_total",
+		Help: "Bytes served by external binary proxy",
+	}, []string{"name"})
+
+	ExternalBinaryDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "upgrade_mgr_external_binary_download_seconds",
+		Help:    "Upstream download duration for external binaries",
+		Buckets: []float64{0.1, 0.5, 1, 3, 10, 30, 60, 180},
+	}, []string{"name", "result"})
+
+	ExternalBinaryCacheAge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "upgrade_mgr_external_binary_cache_age_seconds",
+		Help: "Age of cached external binary (0 = not cached)",
+	}, []string{"name"})
+
+	// 外部文件可用性指标：定时探测每个白名单条目，便于配置告警。
+	//
+	//   upgrade_mgr_external_binary_up{name,type}         1=可用 0=不可用
+	//   upgrade_mgr_external_binary_probe_seconds{name}   探测耗时
+	//   upgrade_mgr_external_binary_cached{name}          1=有缓存 0=无
+	//   upgrade_mgr_external_binary_cached_bytes{name}    缓存大小
+	//   upgrade_mgr_external_binary_probe_total{name,result} 探测次数（success/error）
+	ExternalBinaryUp = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "upgrade_mgr_external_binary_up",
+		Help: "Whether the external binary source is reachable (1=up, 0=down)",
+	}, []string{"name", "type"})
+
+	ExternalBinaryProbeSeconds = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "upgrade_mgr_external_binary_probe_seconds",
+		Help: "Last probe duration in seconds",
+	}, []string{"name"})
+
+	ExternalBinaryCached = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "upgrade_mgr_external_binary_cached",
+		Help: "Whether a cached copy exists (1=yes, 0=no)",
+	}, []string{"name"})
+
+	ExternalBinaryCachedBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "upgrade_mgr_external_binary_cached_bytes",
+		Help: "Cached file size in bytes",
+	}, []string{"name"})
+
+	ExternalBinaryProbeTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "upgrade_mgr_external_binary_probe_total",
+		Help: "External binary availability probes by result",
+	}, []string{"name", "result"})
 )
 
 // Collector 指标采集器。
@@ -114,7 +173,7 @@ func (c *Collector) Collect() {
 	defer c.mu.Unlock()
 
 	ctx := context.Background()
-	
+
 	// 清理已结束任务的 gauge（防止标签集无限增长）
 	TaskHostsTotal.Reset()
 	TaskFailureRate.Reset()
