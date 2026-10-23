@@ -124,3 +124,42 @@ func TestValidateConfig(t *testing.T) {
 		t.Fatal("非白名单域名应拒绝")
 	}
 }
+
+// TestDefaultHostsIncludeReleaseAssets GitHub Release 资产重定向域名必须在默认白名单。
+func TestDefaultHostsIncludeReleaseAssets(t *testing.T) {
+	want := []string{
+		"release-assets.githubusercontent.com",
+		"github-releases.githubusercontent.com",
+		"objects.githubusercontent.com",
+	}
+	for _, w := range want {
+		found := false
+		for _, h := range DefaultHosts {
+			if h == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("默认域名白名单缺少 %s: %v", w, DefaultHosts)
+		}
+	}
+}
+
+// TestHostAllowedGitHubAssets 旧配置只列 github.com 时，资产重定向域名也应放行。
+func TestHostAllowedGitHubAssets(t *testing.T) {
+	hosts := []string{"github.com"}
+	for _, h := range []string{
+		"https://release-assets.githubusercontent.com/a.exe",
+		"https://github-releases.githubusercontent.com/b.exe",
+		"https://objects.githubusercontent.com/c.exe",
+	} {
+		if err := HostAllowed(h, hosts); err != nil {
+			t.Fatalf("应隐式放行 %s: %v", h, err)
+		}
+	}
+	if err := HostAllowed("https://release-assets.githubusercontent.com/a.exe",
+		[]string{"raw.githubusercontent.com"}); err == nil {
+		t.Fatal("未配置 github.com 时不应隐式放行")
+	}
+}

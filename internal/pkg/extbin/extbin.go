@@ -46,7 +46,21 @@ func Effective(configured map[string]string) map[string]string {
 var DefaultHosts = []string{
 	"github.com",
 	"raw.githubusercontent.com",
+	// GitHub Release 资产会 302 到以下域名；不加入白名单会被重定向校验拒绝。
+	"release-assets.githubusercontent.com",
+	"github-releases.githubusercontent.com",
+	"objects.githubusercontent.com",
 	"proxy.xiaonuo.live",
+}
+
+// githubAssetHosts GitHub Release 资产重定向域名。
+//
+// 兼容旧配置：只要白名单里有 github.com，就隐式信任这些固定域名，
+// 避免升级后用户手工保存过 hosts 却因缺少重定向域名而 502。
+var githubAssetHosts = map[string]bool{
+	"release-assets.githubusercontent.com":  true,
+	"github-releases.githubusercontent.com": true,
+	"objects.githubusercontent.com":         true,
 }
 
 // DefaultTTLSeconds 默认缓存有效期。
@@ -190,6 +204,7 @@ func HostAllowed(raw string, hosts []string) error {
 	if len(hosts) == 0 {
 		hosts = DefaultHosts
 	}
+	allowGitHubAssets := false
 	for _, h := range hosts {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
@@ -199,9 +214,16 @@ func HostAllowed(raw string, hosts []string) error {
 		if hh, _, err := net.SplitHostPort(h); err == nil {
 			h = hh
 		}
+		if h == "github.com" {
+			allowGitHubAssets = true
+		}
 		if host == h {
 			return nil
 		}
+	}
+	// 旧配置兼容：信任 github.com 时，自动放行 GitHub Release 资产域名。
+	if allowGitHubAssets && githubAssetHosts[host] {
+		return nil
 	}
 	return fmt.Errorf("主机 %s 不在 external_binary_hosts 白名单内", host)
 }

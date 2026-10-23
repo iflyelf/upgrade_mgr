@@ -33,7 +33,14 @@ type externalBinaryItem struct {
 	Cached     bool       `json:"cached"`
 	CachedSize int64      `json:"cached_size"`
 	CachedAt   *time.Time `json:"cached_at,omitempty"`
+	// Local 表示管理员已上传离线文件（优先于上游缓存，平台无需出网）。
+	Local     bool       `json:"local"`
+	LocalSize int64      `json:"local_size"`
+	LocalAt   *time.Time `json:"local_at,omitempty"`
 }
+
+// externalBinaryScriptMaxSize 离线脚本上传上限（exe 使用 200MB 全局上限）。
+const externalBinaryScriptMaxSize = 10 << 20
 
 // externalBinaryListResponse 列表响应。
 type externalBinaryListResponse struct {
@@ -601,6 +608,12 @@ func buildExternalBinaryItem(baseDir string, e extbin.Entry) externalBinaryItem 
 		item.CachedSize = info.Size()
 		item.CachedAt = &at
 	}
+	if li, lerr := os.Stat(externalBinaryLocalPath(baseDir, e)); lerr == nil && !li.IsDir() {
+		at := li.ModTime()
+		item.Local = true
+		item.LocalSize = li.Size()
+		item.LocalAt = &at
+	}
 	return item
 }
 
@@ -610,6 +623,15 @@ func externalBinaryBaseDir(cfg *config.Config) string {
 		return cfg.Server.AgentBinaryDir
 	}
 	return "./dist"
+}
+
+// externalBinaryLocalPath 管理员上传的离线文件路径（优先于上游缓存）。
+func externalBinaryLocalPath(baseDir string, e extbin.Entry) string {
+	name := strings.ToLower(e.Name)
+	if !e.Script {
+		name += ".exe"
+	}
+	return filepath.Join(baseDir, ".external-local", name)
 }
 
 // externalBinaryCachePath 计算缓存文件路径。
@@ -665,3 +687,143 @@ const (
 
 var _ = sql.ErrNoRows
 var _ = safepath.EnsureWithin
+
+// UploadExternalBinary 上传离线文件到平台（管理员）。
+//
+// 典型场景：控制台/目标机都无法出网（如 Windows Server 2008 R2 无 TLS 1.2），
+// 由管理员在本机下载 exe/脚本后上传；/api/external/binary/{name} 将优先返回该本地文件。
+func UploadExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
+		name = strings.TrimSuffix(name, ".exe")
+		cfg := externalBinaryConfig(s)
+		entries, err := extbin.Parse(effectiveExternalBinaries(cfg))
+		if err != nil {
+			httpx.Fail(w, http.StatusInternalServerError, "白名单配置错误")
+			return
+		}
+		var entry *extbin.Entry
+		for i := range entries {
+			if strings.EqualFold(entries[i].Name, name) {
+				entry = &entries[i]
+				break
+			}
+		}
+		if entry == nil {
+			httpx.Fail(w, http.StatusNotFound, "白名单中不存在该名称，请先保存")
+			return
+		}
+
+		baseDir := externalBinaryBaseDir(cfg)
+		target := externalBinaryLocalPath(baseDir, *entry)
+		if err := safepath.EnsureWithin(baseDir, target); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "非法文件名")
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		limit := int64(externalBinaryMaxSize)
+		if entry.Script {
+			limit = externalBinaryScriptMaxSize
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "request body too large") {
+				status = http.StatusRequestEntityTooLarge
+			}
+			httpx.Fail(w, status, "解析上传内容失败: "+err.Error())
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "缺少文件字段 file")
+			return
+		}
+		defer file.Close()
+
+		tmp, err := os.CreateTemp(filepath.Dir(target), ".upload-*")
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		tmpPath := tmp.Name()
+		defer os.Remove(tmpPath)
+
+		n, copyErr := io.Copy(tmp, io.LimitReader(file, limit+1))
+		closeErr := tmp.Close()
+		if copyErr != nil {
+			httpx.FailErr(w, http.StatusBadRequest, copyErr)
+			return
+		}
+		if closeErr != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, closeErr)
+			return
+		}
+		if n == 0 {
+			httpx.Fail(w, http.StatusBadRequest, "上传文件为空")
+			return
+		}
+		if n > limit {
+			httpx.Fail(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("文件超过上限 %d 字节", limit))
+			return
+		}
+		if err := validateExternalContent(tmpPath, entry.Script); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := os.Chmod(tmpPath, 0644); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		// Windows 上 Rename 不能覆盖已存在文件；先删除旧文件。
+		_ = os.Remove(target)
+		if err := os.Rename(tmpPath, target); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		auditOp(s, r, "external_binary.upload", "external_binary", entry.Name, entry.Name, nil)
+		httpx.OK(w, buildExternalBinaryItem(baseDir, *entry))
+	}
+}
+
+// DeleteExternalBinaryUpload 删除管理员上传的离线文件（恢复使用上游/缓存）。
+func DeleteExternalBinaryUpload(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
+		name = strings.TrimSuffix(name, ".exe")
+		cfg := externalBinaryConfig(s)
+		entries, err := extbin.Parse(effectiveExternalBinaries(cfg))
+		if err != nil {
+			httpx.Fail(w, http.StatusInternalServerError, "白名单配置错误")
+			return
+		}
+		var entry *extbin.Entry
+		for i := range entries {
+			if strings.EqualFold(entries[i].Name, name) {
+				entry = &entries[i]
+				break
+			}
+		}
+		if entry == nil {
+			httpx.Fail(w, http.StatusNotFound, "白名单中不存在该名称")
+			return
+		}
+		baseDir := externalBinaryBaseDir(cfg)
+		target := externalBinaryLocalPath(baseDir, *entry)
+		if err := safepath.EnsureWithin(baseDir, target); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "非法文件名")
+			return
+		}
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		auditOp(s, r, "external_binary.upload_delete", "external_binary", entry.Name, entry.Name, nil)
+		httpx.OK(w, map[string]any{"deleted": true})
+	}
+}

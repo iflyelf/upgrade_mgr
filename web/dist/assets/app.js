@@ -18,7 +18,11 @@
 
   function api(path, opts) {
     opts = opts || {};
-    opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+    opts.headers = Object.assign({}, opts.headers || {});
+    // FormData 由浏览器自动设置 multipart boundary，不能覆盖 Content-Type。
+    if (!(typeof FormData !== 'undefined' && opts.body instanceof FormData)) {
+      opts.headers['Content-Type'] = 'application/json';
+    }
     return fetch(path, opts).then(function (r) {
       return r.json().then(function (j) {
         if (!r.ok || (j && j.code && j.code !== 0)) {
@@ -1542,7 +1546,8 @@
     if (!draft) {
       draft = (d && d.items ? d.items : []).map(function (x) {
         return { name: x.name, url: x.url, script: !!x.script,
-          cached: x.cached, cached_size: x.cached_size, platform_url: x.platform_url };
+          cached: x.cached, cached_size: x.cached_size, platform_url: x.platform_url,
+          local: !!x.local, local_size: x.local_size };
       });
       state.extbinDraft = draft;
     }
@@ -1555,7 +1560,7 @@
       : ((d && d.allow_cidrs) || []).join(', ');
 
     var hostsEl = h('input', {
-      value: hostsText, placeholder: 'github.com, raw.githubusercontent.com',
+      value: hostsText, placeholder: 'github.com, release-assets.githubusercontent.com, proxy.xiaonuo.live',
       oninput: function () { state.extbinHosts = hostsEl.value; }
     }, []);
     var ttlEl = h('input', {
@@ -1621,6 +1626,32 @@
       }, []);
       var testOut = h('div', { class: 'muted' }, []);
       var platformURL = row.platform_url || ('/api/external/binary/' + (row.name || '<name>'));
+      var fileEl = h('input', { type: 'file', style: 'display:none' }, []);
+      fileEl.onchange = function () {
+        var f = fileEl.files && fileEl.files[0];
+        if (!f) return;
+        var nm = (row.name || '').trim();
+        if (!nm) { alert('请先保存白名单条目'); fileEl.value = ''; return; }
+        if (!confirm('上传 ' + f.name + ' 作为 ' + nm + ' 的离线文件？\n上传后平台将优先返回该文件。')) {
+          fileEl.value = '';
+          return;
+        }
+        var fd = new FormData();
+        fd.append('file', f);
+        testOut.textContent = '上传中…';
+        api('/api/external/binaries/' + encodeURIComponent(nm) + '/upload', {
+          method: 'POST', body: fd
+        }).then(function () {
+          testOut.textContent = '';
+          state.extbin = null;
+          state.extbinDraft = null;
+          loadExternalBinaries();
+        }).catch(function (e) {
+          testOut.textContent = '';
+          testOut.appendChild(h('span', { class: 'tag tunnel-fail' }, ['✗ ' + e.message]));
+          fileEl.value = '';
+        });
+      };
 
       return h('tr', {}, [
         h('td', {}, [nameEl]),
@@ -1630,6 +1661,9 @@
         h('td', {}, [row.cached
           ? h('span', { class: 'tag status-success' }, ['已缓存 ' + fmtBytes(row.cached_size)])
           : h('span', { class: 'muted' }, ['未缓存'])]),
+        h('td', {}, [row.local
+          ? h('span', { class: 'tag tunnel-ok' }, ['本地 ' + fmtBytes(row.local_size)])
+          : h('span', { class: 'muted' }, ['-'])]),
         h('td', {}, [h('div', { class: 'row-actions' }, [
           h('button', {
             class: 'btn ghost small', onclick: function () {
@@ -1686,6 +1720,23 @@
             }
           }, ['刷新缓存']),
           h('button', {
+            class: 'btn ghost small', onclick: function () {
+              fileEl.click();
+            }
+          }, ['上传离线文件']),
+          row.local ? h('button', {
+            class: 'btn ghost small', onclick: function () {
+              if (!confirm('清除 ' + row.name + ' 的离线文件？之后将回退到平台缓存/上游下载。')) return;
+              api('/api/external/binaries/' + encodeURIComponent((row.name || '').trim()) + '/upload', {
+                method: 'DELETE'
+              }).then(function () {
+                state.extbin = null;
+                state.extbinDraft = null;
+                loadExternalBinaries();
+              }).catch(function (e) { alert('清除失败: ' + e.message); });
+            }
+          }, ['清除离线文件']) : null,
+          h('button', {
             class: 'btn danger small', onclick: function () {
               var nm = (row.name || '').trim();
               if (nm && row.saved) {
@@ -1695,7 +1746,8 @@
               draft.splice(idx, 1);
               render();
             }
-          }, ['删除'])
+          }, ['删除']),
+          fileEl
         ]), testOut])
       ]);
     });
@@ -1796,10 +1848,13 @@
           h('span', { class: 'muted' }, ['共 ' + total + ' 条' + (q ? '（搜索：' + q + '）' : '')]),
           h('span', { class: 'muted' }, ['保存后立即生效（热加载）'])
         ]),
+        hint('平台无法出网（如 Windows Server 2008 R2 无 TLS 1.2）时：在本机下载 exe/脚本，' +
+          '点对应行的「上传离线文件」；/api/external/binary 会优先返回本地文件，平台无需访问 GitHub。'),
         h('div', { class: 'table-wrap' }, [h('table', {}, [
           h('thead', {}, [h('tr', {}, [
             h('th', {}, ['名称 (name)']), h('th', {}, ['上游地址']), h('th', {}, ['类型']),
-            h('th', {}, ['平台地址']), h('th', {}, ['缓存']), h('th', {}, ['操作'])
+            h('th', {}, ['平台地址']), h('th', {}, ['缓存']), h('th', {}, ['本地离线']),
+            h('th', {}, ['操作'])
           ])]),
           h('tbody', {}, rows)
         ])]),
@@ -1811,7 +1866,7 @@
       h('div', { class: 'card' }, [
         h('h3', {}, ['安全设置']),
         h('div', { class: 'grid2' }, [
-          field('允许的上游域名', hostsEl, '逗号分隔。只允许这些域名被代下载；留空用默认 github.com / raw.githubusercontent.com / proxy.xiaonuo.live。内网镜像需把其域名/主机加进来。'),
+          field('允许的上游域名', hostsEl, '逗号分隔。只允许这些域名被代下载；留空用默认 github.com / raw.githubusercontent.com / release-assets.githubusercontent.com / proxy.xiaonuo.live。内网镜像需把其域名/主机加进来。'),
           field('缓存有效期', ttlEl, '如 24h / 30m。过期后下次请求重新下载。')
         ]),
         h('div', { class: 'grid2' }, [

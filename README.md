@@ -185,7 +185,8 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 - install.ps1 支持 install / update / uninstall / status；安装到 C:\Program Files\windows_exporter，服务名 windows_exporter，端口 16666，自动创建防火墙规则。
 - textfile 采集目录：C:\monitor\windows_exporter\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。
 - 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。
-- 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl，控制台「外部文件」也能代缓存 exe 与脚本。
+- 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl。
+- 平台也无法出网（控制台请求 GitHub 502）时：在「外部文件」为 windows-exporter-`<arch>` 点「上传离线文件」，脚本会自动优先从平台获取；exe 与脚本都可离线上传。
 - 低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\LocalService"（或域账户 + -ServicePassword）。
 - 更新示例先备份 windows_exporter.exe.bak，启动失败自动回滚；卸载示例不带 health/version 检查。
 
@@ -313,7 +314,8 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<console
 - install.ps1 supports install / update / uninstall / status. It installs to C:\Program Files\windows_exporter, service windows_exporter, port 16666 and creates a firewall rule.
 - Textfile collector directory: C:\monitor\windows_exporter\textfile_inputs; use -ConfigPath for a custom config.
 - PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites .ps1 to UTF-8 BOM + CRLF to avoid encoding issues.
-- On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl; the console external-file cache can also mirror exe/scripts.
+- On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl.
+- If the console also cannot reach GitHub (502), upload the exe under External files → windows-exporter-`<arch>` → Upload offline file; the script then prefers the platform copy. Both exe and scripts can be uploaded offline.
 - Low privilege: install.ps1 -ServiceAccount "NT AUTHORITY\LocalService" (or a domain account with -ServicePassword).
 - Update backs up windows_exporter.exe.bak and rolls back on startup failure; uninstall omits health/version checks.
 
@@ -1233,6 +1235,28 @@ $f = Join-Path $env:TEMP 'windows_exporter-install.ps1'
 > `-Version v0.32.0` 形式（需该 tag 已发布对应资产）。
 > 也可用环境变量覆盖：`WINDOWS_EXPORTER_VERSION`、`WINDOWS_EXPORTER_PROXY`、
 > `WINDOWS_EXPORTER_BASE`、`WINDOWS_EXPORTER_LISTEN_PORT`。
+
+#### 5.1 平台/目标机都无法出网（Server 2008 R2 常见）
+
+Server 2008 R2 的 PowerShell 2.0/CLR 2.0 不支持 TLS 1.2，无法直连 GitHub；
+如果控制台所在网络也不能访问 GitHub，平台代缓存会返回 **502**。此时在页面上传离线文件即可：
+
+1. 在一台可上网的机器下载 `windows_exporter-amd64.exe`（或 `arm64`）；
+2. 控制台 →「外部文件」→ 找到 `windows-exporter-amd64`（或 `windows-exporter-arm64`）
+   → 点「上传离线文件」，选择下载好的 exe；
+3. 直接重跑组件安装/任务。`install.ps1` 在不支持 TLS 1.2 时会优先请求
+   `http://<控制台>/api/external/binary/windows-exporter-amd64`，平台直接返回本地文件，
+   **不需要平台出网**；
+4. 如需离线 `install.ps1` 本身，可把脚本上传到 `windows-exporter-install.ps1` 同名条目，
+   或继续作为组件制品上传。
+
+列表「本地离线」列会显示已上传大小；「清除离线文件」后回退到平台缓存/上游下载。
+
+> **关键修复**：GitHub Release 资产会 302 到 `release-assets.githubusercontent.com`，
+> 旧版默认域名白名单没有它，平台会以「重定向目标被拒绝」返回 502。当前默认已包含
+> `release-assets.githubusercontent.com`、`github-releases.githubusercontent.com`、
+> `objects.githubusercontent.com`；直连失败时还会自动经 `proxy.xiaonuo.live` 重试一次。
+> 如果配置过 `server.external_binary_hosts`，请把上述域名一并加入，或留空使用默认值。
 
 组件健康检查与版本检查使用 PowerShell（与 Agent 的 Windows 解释器一致）：
 
@@ -2311,6 +2335,21 @@ MIT © iflyelf
 - 备用地址轮换不依赖服务端配置，避免「服务端推送错误覆盖地址」导致主机失联。
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
+
+### 2026-10-24 修复 Windows 外部文件 502 + 平台离线上传
+
+- **根因**：GitHub Release 资产会 302 到 `release-assets.githubusercontent.com`，
+  默认上游域名白名单未包含该域名，平台代缓存因「重定向目标被拒绝」返回 502。
+- 默认域名白名单新增 `release-assets.githubusercontent.com`、
+  `github-releases.githubusercontent.com`、`objects.githubusercontent.com`。
+- 外部文件下载失败时自动经 `proxy.xiaonuo.live` 重试一次（GitHub / raw 地址）。
+- **平台离线上传**：`POST/DELETE /api/external/binaries/{name}/upload`（管理员），
+  文件保存到 `<agent_binary_dir>/.external-local/`；`/api/external/binary/{name}`
+  **优先返回本地文件**，平台完全不需要出网。外部文件页新增「上传离线文件 / 清除离线文件」，
+  列表展示「本地离线」大小。
+- `install.ps1`：不支持 TLS 1.2 时优先从平台地址下载；失败提示明确引导上传离线 exe，
+  并避免重复尝试直连 GitHub。
+- 新增单测：离线上传/优先下载/删除、HTML 伪脚本拒绝、默认重定向域名、代理回退。
 
 ### 2026-10-24 安全与运维补强（审计 / 多租户 / 索引 / 探针）
 
