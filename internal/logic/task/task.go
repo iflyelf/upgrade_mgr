@@ -115,6 +115,8 @@ type Service struct {
 	// shareAllowed 判断 actor 能否操作 creator 创建的任务（同属 off 团队）。
 	// 仅在生效策略为 off 时调用；为 nil 时不做共享校验（保守拒绝）。
 	shareAllowed func(ctx context.Context, actor, creator string) (bool, error)
+	// teamMate 判断两个用户是否同属至少一个团队（详情/日志可见性）。
+	teamMate func(ctx context.Context, a, b string) (bool, error)
 }
 
 // SetAuthorizer 注入组件级权限校验（由服务端启动时设置）。
@@ -138,6 +140,50 @@ func (s *Service) SetOwnerPolicyResolver(fn func(context.Context, string) (strin
 // SetOwnerShareChecker 注入「同团队成员可互相操作任务」校验（由服务端启动时设置）。
 func (s *Service) SetOwnerShareChecker(fn func(context.Context, string, string) (bool, error)) {
 	s.shareAllowed = fn
+}
+
+// SetTeamMateChecker 注入「是否同属一个团队」校验（详情/日志可见性）。
+func (s *Service) SetTeamMateChecker(fn func(context.Context, string, string) (bool, error)) {
+	s.teamMate = fn
+}
+
+// CanViewTaskDetail 判断 actor 能否查看任务详情与执行日志。
+//
+// 规则（与操作权限独立）：
+//   - 管理员与内部调用可见；
+//   - 无创建者的历史任务可见（无法归属，保持兼容）；
+//   - 创建者本人可见；
+//   - 与创建者同属至少一个团队的用户可见；
+//   - 其余不可见（按任务不存在处理，避免泄露存在性与日志）。
+func (s *Service) CanViewTaskDetail(ctx context.Context, actor *auth.User, createdBy string) (bool, error) {
+	if isPrivilegedActor(actor) {
+		return true, nil
+	}
+	createdBy = strings.TrimSpace(createdBy)
+	if createdBy == "" || createdBy == actor.Username {
+		return true, nil
+	}
+	if s.teamMate == nil {
+		return false, nil
+	}
+	return s.teamMate(ctx, actor.Username, createdBy)
+}
+
+// actorUsername 当前请求的操作者；后台/匿名调用返回空串。
+func actorUsername(ctx context.Context) string {
+	if u, ok := auth.FromContext(ctx); ok && u != nil {
+		return strings.TrimSpace(u.Username)
+	}
+	return ""
+}
+
+// updatedByArg 为 UPDATE 追加 updated_by 参数并返回对应 SQL 片段。
+//
+// baseArgs 为已有参数（占位符 $1..$n）；返回片段使用 $n+1。
+// 后台/匿名调用传入空串时保留原值，不覆盖最后一次人工操作。
+func updatedByArg(ctx context.Context, baseArgs []any) ([]any, string) {
+	args := append(baseArgs, actorUsername(ctx))
+	return args, fmt.Sprintf("updated_by=COALESCE(NULLIF($%d,''), updated_by)", len(args))
 }
 
 // ownerModeFor 综合团队策略与全局开关，返回该用户的生效策略：

@@ -1,0 +1,125 @@
+name: Windows E2E
+
+# Windows 真机回归：
+#   1) windows-latest：每次改动 Agent 相关代码都编译并真实执行 PowerShell/cmd 用例；
+#   2) Windows Server 2008 R2：自托管 runner（默认关闭，仓库变量开启后执行）。
+#
+# 2008 R2 自托管 runner 要求：
+#   - GitHub Actions Runner（.NET Framework 4.6.2+，Server 2008 R2 SP1）
+#   - Go 1.20.x 已安装并在 PATH（Go 1.21+ 不再支持 2008 R2）
+#   - 仓库 Settings → Variables 新增 ENABLE_WIN2008R2_RUNNER=true
+#   - runner 标签：self-hosted, windows, server2008r2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/agent/**'
+      - 'internal/agent/**'
+      - 'internal/pkg/runner/**'
+      - 'internal/protocol/**'
+      - 'build/agent-windows.mod'
+      - 'build/agent-windows.sum'
+      - 'scripts/windows_agent_smoke.ps1'
+      - '.github/workflows/windows-e2e.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cmd/agent/**'
+      - 'internal/agent/**'
+      - 'internal/pkg/runner/**'
+      - 'internal/protocol/**'
+      - 'build/agent-windows.mod'
+      - 'build/agent-windows.sum'
+      - 'scripts/windows_agent_smoke.ps1'
+      - '.github/workflows/windows-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-latest:
+    name: Windows 10/Server 2019+（windows-latest）
+    runs-on: windows-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 安装 Go 1.20
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.20.14'
+
+      - name: Go 静态检查
+        run: go vet -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
+
+      - name: Windows 单元测试与真实执行 E2E
+        # executor 的 windows 用例会真实调用 PowerShell / cmd：
+        # 输出、退出码、stdin、中文脚本 BOM 预处理、cmd 退出码透传。
+        run: go test -count=1 -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
+
+      - name: 构建 Agent（amd64）
+        run: go build -modfile=build/agent-windows.mod -o dist/upgrade-agent.exe ./cmd/agent
+
+      - name: 交叉编译校验（arm64）
+        env:
+          GOARCH: arm64
+        run: go build -modfile=build/agent-windows.mod -o dist/upgrade-agent-arm64.exe ./cmd/agent
+
+      - name: CLI 冒烟（version/status/diagnose）
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/windows_agent_smoke.ps1 -AgentExe dist\upgrade-agent.exe
+
+      - name: 上传 Agent 产物
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: upgrade-agent-windows-e2e
+          path: dist/upgrade-agent*.exe
+
+  windows-2008r2:
+    name: Windows Server 2008 R2（自托管）
+    # 默认关闭：首次需在真实 2008 R2 机器安装 runner，并设置仓库变量开启。
+    if: ${{ vars.ENABLE_WIN2008R2_RUNNER == 'true' }}
+    runs-on: [self-hosted, windows, server2008r2]
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 校验 Go 1.20
+        shell: powershell
+        run: |
+          $v = (go version) 2>&1
+          Write-Host $v
+          if ($v -notmatch "go1\.20\.") {
+            Write-Host "[FAIL] 需要预装 Go 1.20.x（Go 1.21+ 不支持 Server 2008 R2）"
+            exit 1
+          }
+
+      - name: Windows 单元测试与真实执行 E2E
+        shell: powershell
+        run: |
+          go vet -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -count=1 -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
+          exit $LASTEXITCODE
+
+      - name: 构建 Agent
+        shell: powershell
+        run: |
+          $env:CGO_ENABLED = "0"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -modfile=build/agent-windows.mod -o dist\upgrade-agent.exe ./cmd/agent
+          exit $LASTEXITCODE
+
+      - name: CLI 冒烟（PowerShell 2.0）
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts\windows_agent_smoke.ps1 -AgentExe dist\upgrade-agent.exe

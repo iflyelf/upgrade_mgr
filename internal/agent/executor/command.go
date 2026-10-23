@@ -88,7 +88,16 @@ func ExecuteCommand(ctx context.Context, spec protocol.CommandSpec, onOutput fun
 		logf(protocol.StageRunCommand, "设置脚本权限失败（继续执行）: %v", err)
 	}
 
-	argv := interpreterArgv(interp, path, spec.Args)
+	// 与安装脚本一致：Windows PowerShell 需要 UTF-8 BOM + CRLF，
+	// 否则含中文的命令脚本会按系统 ANSI(GBK) 解码而乱码/语法错误。
+	prepared, cleanup, prepErr := prepareScriptPath(path)
+	if prepErr != nil {
+		res.Log = fmt.Sprintf("[exec] 准备脚本失败: %v\n", prepErr)
+		return res
+	}
+	defer cleanup()
+
+	argv := interpreterArgv(interp, prepared, spec.Args)
 	useTTY := spec.TTY && ttySupported()
 	if useTTY {
 		argv = ttyCommand(interp, path, spec.Args)

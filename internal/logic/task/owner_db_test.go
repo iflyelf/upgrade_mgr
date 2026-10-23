@@ -300,3 +300,75 @@ func TestPreviewHostGroupScope(t *testing.T) {
 		t.Fatalf("预览命中数不符: %d", res.TotalHosts)
 	}
 }
+
+// TestUpdatedByOnActions 启动/暂停/取消记录最后操作人；后台调用保留原值。
+func TestUpdatedByOnActions(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sc := scope.New(1, false)
+	sfx := time.Now().UnixNano()
+
+	newTask := func(name string) int64 {
+		var id int64
+		if err := db.QueryRow(`
+			INSERT INTO upgrade_tasks (name, version, kind, status, created_by, updated_by, tenant_id)
+			VALUES ($1,'command','command','draft','alice','alice',1) RETURNING id`,
+			name).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM upgrade_tasks WHERE id=$1`, id) })
+		return id
+	}
+	updatedBy := func(id int64) string {
+		var v string
+		if err := db.QueryRow(`SELECT COALESCE(updated_by,'') FROM upgrade_tasks WHERE id=$1`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	s := NewService(db, nil, nil, func() bool { return true })
+	admin := func(name string) context.Context {
+		return auth.WithUser(ctx, &auth.User{Username: name, TenantID: 1, IsAdmin: true})
+	}
+
+	id := newTask(fmt.Sprintf("updated-by-%d", sfx))
+	if err := s.Start(admin("operator1"), sc, id); err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	if got := updatedBy(id); got != "operator1" {
+		t.Fatalf("启动后 updated_by=%q", got)
+	}
+	if err := s.Pause(admin("operator2"), sc, id); err != nil {
+		t.Fatalf("暂停失败: %v", err)
+	}
+	if got := updatedBy(id); got != "operator2" {
+		t.Fatalf("暂停后 updated_by=%q", got)
+	}
+	if err := s.Cancel(admin("operator3"), sc, id); err != nil {
+		t.Fatalf("取消失败: %v", err)
+	}
+	if got := updatedBy(id); got != "operator3" {
+		t.Fatalf("取消后 updated_by=%q", got)
+	}
+
+	// 后台/匿名调用（无 actor）不覆盖最后一次人工操作
+	bg := newTask(fmt.Sprintf("updated-by-bg-%d", sfx))
+	if err := s.Start(ctx, sc, bg); err != nil {
+		t.Fatalf("后台启动失败: %v", err)
+	}
+	if got := updatedBy(bg); got != "alice" {
+		t.Fatalf("后台调用不应覆盖 updated_by, got %q", got)
+	}
+}

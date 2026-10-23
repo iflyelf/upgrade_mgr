@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/task"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
@@ -125,6 +126,7 @@ func TestTaskListVisibility(t *testing.T) {
 		Kind       string `json:"kind"`
 		CreatedBy  string `json:"created_by"`
 		CanOperate bool   `json:"can_operate"`
+		CanView    bool   `json:"can_view"`
 	} {
 		req := httptest.NewRequest("GET", "/api/tasks", nil)
 		req = req.WithContext(auth.WithUser(req.Context(), u))
@@ -140,6 +142,7 @@ func TestTaskListVisibility(t *testing.T) {
 					Kind       string `json:"kind"`
 					CreatedBy  string `json:"created_by"`
 					CanOperate bool   `json:"can_operate"`
+					CanView    bool   `json:"can_view"`
 				} `json:"list"`
 				Total int `json:"total"`
 			} `json:"data"`
@@ -162,6 +165,12 @@ func TestTaskListVisibility(t *testing.T) {
 		}
 		if row.ID == aliceTask && !row.CanOperate {
 			t.Fatal("本人任务应可操作")
+		}
+		if row.ID == bobTask && row.CanView {
+			t.Fatal("非同一团队不应可查看他人任务详情")
+		}
+		if row.ID == aliceTask && !row.CanView {
+			t.Fatal("本人任务应可查看")
 		}
 	}
 
@@ -227,5 +236,55 @@ func TestTaskListPagination(t *testing.T) {
 	}
 	if out.Data.Page != 3 || len(out.Data.List) != 1 {
 		t.Fatalf("越界页码应夹紧到第 3 页: %+v", out.Data)
+	}
+}
+
+// TestTaskDetailVisibility 详情/日志仅创建者、同团队成员或管理员可见。
+func TestTaskDetailVisibility(t *testing.T) {
+	db, _ := setupHostDB(t)
+	sfx := time.Now().UnixNano()
+	sc := &svc.ServiceContext{DB: db, Task: task.NewService(db, nil, nil, nil)}
+	sc.Task.SetTeamMateChecker(org.NewService(db).SharesTeam)
+
+	var taskID int64
+	if err := db.QueryRow(`
+		INSERT INTO upgrade_tasks (name, version, kind, status, created_by, updated_by, tenant_id)
+		VALUES ($1,'v1','upgrade','draft','alice','alice',1) RETURNING id`,
+		fmt.Sprintf("detail-vis-%d", sfx)).Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM upgrade_tasks WHERE id=$1`, taskID) })
+
+	get := func(u *auth.User) int {
+		req := httptest.NewRequest("GET", fmt.Sprintf("/api/tasks/%d", taskID), nil)
+		req.SetPathValue("id", fmt.Sprintf("%d", taskID))
+		req = req.WithContext(auth.WithUser(req.Context(), u))
+		rec := httptest.NewRecorder()
+		TaskDetail(sc)(rec, req)
+		return rec.Code
+	}
+
+	if code := get(&auth.User{Username: "bob", TenantID: 1}); code != http.StatusNotFound {
+		t.Fatalf("非团队成员应 404，实际 %d", code)
+	}
+	if code := get(&auth.User{Username: "alice", TenantID: 1}); code != http.StatusOK {
+		t.Fatalf("创建者应 200，实际 %d", code)
+	}
+	if code := get(hostTestUser(1)); code != http.StatusOK {
+		t.Fatalf("管理员应 200，实际 %d", code)
+	}
+
+	// 加入同一团队后可见
+	var teamID int64
+	if err := db.QueryRow(`INSERT INTO teams (name) VALUES ($1) RETURNING id`,
+		fmt.Sprintf("detail-team-%d", sfx)).Scan(&teamID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM teams WHERE id=$1`, teamID) })
+	if _, err := db.Exec(`INSERT INTO team_members (team_id, user_id) VALUES ($1,'alice'), ($1,'bob')`, teamID); err != nil {
+		t.Fatal(err)
+	}
+	if code := get(&auth.User{Username: "bob", TenantID: 1}); code != http.StatusOK {
+		t.Fatalf("同团队成员应 200，实际 %d", code)
 	}
 }

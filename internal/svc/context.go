@@ -95,6 +95,7 @@ func New(c *config.Config) *ServiceContext {
 	taskSvc.SetOwnerOnlyPolicy(func() bool { return c.Agent.TaskOwnerOnly })
 	taskSvc.SetOwnerPolicyResolver(orgSvc.TeamOwnerPolicy)
 	taskSvc.SetOwnerShareChecker(orgSvc.CanShareTasks)
+	taskSvc.SetTeamMateChecker(orgSvc.SharesTeam)
 	svc := &ServiceContext{
 		Config:     c,
 		DB:         db,

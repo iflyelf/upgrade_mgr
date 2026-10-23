@@ -864,6 +864,55 @@ func (s *Service) CanShareTasks(ctx context.Context, actor, creator string) (boo
 	return ok, err
 }
 
+// TeamMates 返回与该用户同属至少一个团队的其他用户名集合（不含自己）。
+func (s *Service) TeamMates(ctx context.Context, username string) (map[string]bool, error) {
+	out := map[string]bool{}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT b.user_id
+		  FROM team_members a
+		  JOIN team_members b ON b.team_id = a.team_id
+		 WHERE a.user_id = $1 AND b.user_id <> $1`, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		out[u] = true
+	}
+	return out, rows.Err()
+}
+
+// SharesTeam 判断两个用户是否同属至少一个团队。
+//
+// 与团队 owner 策略无关：只要在同一团队即可见任务详情/日志。
+func (s *Service) SharesTeam(ctx context.Context, a, b string) (bool, error) {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false, nil
+	}
+	if a == b {
+		return true, nil
+	}
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM team_members x
+			  JOIN team_members y ON y.team_id = x.team_id
+			 WHERE x.user_id = $1 AND y.user_id = $2
+		)`, a, b).Scan(&ok)
+	return ok, err
+}
+
 // ---- 辅助 ----
 
 func isUnique(err error) bool {

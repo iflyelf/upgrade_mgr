@@ -92,3 +92,41 @@ func TestNonAdminCannotCreateCommand(t *testing.T) {
 		t.Fatalf("管理员不应被权限拦截: %v", err)
 	}
 }
+
+// TestCanViewTaskDetail 详情/日志可见性：管理员、创建者、同团队成员。
+func TestCanViewTaskDetail(t *testing.T) {
+	ctx := context.Background()
+	s := &Service{}
+	s.SetTeamMateChecker(func(_ context.Context, a, b string) (bool, error) {
+		return a == "alice" && b == "bob", nil
+	})
+
+	cases := []struct {
+		name    string
+		actor   *auth.User
+		creator string
+		want    bool
+	}{
+		{"管理员", &auth.User{Username: "admin", IsAdmin: true}, "bob", true},
+		{"内部调用", nil, "bob", true},
+		{"创建者", &auth.User{Username: "bob"}, "bob", true},
+		{"历史任务无创建者", &auth.User{Username: "carol"}, "", true},
+		{"同团队成员", &auth.User{Username: "alice"}, "bob", true},
+		{"无关用户", &auth.User{Username: "carol"}, "bob", false},
+	}
+	for _, c := range cases {
+		got, err := s.CanViewTaskDetail(ctx, c.actor, c.creator)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got != c.want {
+			t.Fatalf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+
+	// 未注入同团队校验时，非创建者保守拒绝
+	s2 := &Service{}
+	if ok, _ := s2.CanViewTaskDetail(ctx, &auth.User{Username: "carol"}, "bob"); ok {
+		t.Fatal("未注入 teamMate 时应拒绝")
+	}
+}

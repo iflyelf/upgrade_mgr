@@ -178,3 +178,43 @@ func TestCanShareTasks(t *testing.T) {
 		t.Fatalf("on 团队不应共享: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestTeamMatesAndSharesTeam 同团队用户集合与判断。
+func TestTeamMatesAndSharesTeam(t *testing.T) {
+	db := setupDB(t)
+	s := NewService(db)
+	ctx := context.Background()
+	sfx := time.Now().UnixNano()
+	alice := fmt.Sprintf("mates-alice-%d", sfx)
+	bob := fmt.Sprintf("mates-bob-%d", sfx)
+	carol := fmt.Sprintf("mates-carol-%d", sfx)
+
+	mates, err := s.TeamMates(ctx, alice)
+	if err != nil || len(mates) != 0 {
+		t.Fatalf("未加入团队应为空: %v err=%v", mates, err)
+	}
+
+	teamID, err := s.CreateTeamWithPolicy(ctx, fmt.Sprintf("mates-team-%d", sfx), "", "",
+		[]string{alice, bob}, "tester", "inherit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.DeleteTeam(ctx, teamID) })
+
+	mates, err = s.TeamMates(ctx, alice)
+	if err != nil || !mates[bob] || mates[alice] || mates[carol] {
+		t.Fatalf("同团队集合不符: %v err=%v", mates, err)
+	}
+	if ok, err := s.SharesTeam(ctx, alice, bob); err != nil || !ok {
+		t.Fatalf("同团队应 true: %v err=%v", ok, err)
+	}
+	if ok, err := s.SharesTeam(ctx, alice, carol); err != nil || ok {
+		t.Fatalf("不同团队应 false: %v err=%v", ok, err)
+	}
+	if ok, _ := s.SharesTeam(ctx, alice, alice); !ok {
+		t.Fatal("本人应 true")
+	}
+	if ok, _ := s.SharesTeam(ctx, "", alice); ok {
+		t.Fatal("空用户名应 false")
+	}
+}

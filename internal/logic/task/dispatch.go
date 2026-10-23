@@ -47,10 +47,11 @@ func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error
 	}
 	// 置为 running，实际的批次下发由 Orchestrator 按灰度策略逐批推进。
 	// 带状态条件并检查影响行数：防止检查后任务被取消/删除，或被并发操作改状态。
+	args := append([]any{taskID}, tArgs...)
+	args, byExpr := updatedByArg(ctx, args)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE upgrade_tasks SET status='running', updated_at=NOW()
-		 WHERE id=$1 AND `+tCond+` AND status IN ('draft','paused')`,
-		append([]any{taskID}, tArgs...)...)
+		`UPDATE upgrade_tasks SET status='running', updated_at=NOW(), `+byExpr+`
+		 WHERE id=$1 AND `+tCond+` AND status IN ('draft','paused')`, args...)
 	if err != nil {
 		return err
 	}
@@ -82,9 +83,11 @@ func (s *Service) Promote(ctx context.Context, sc scope.Scope, taskID int64) err
 		 WHERE task_id=$1 AND status='failed'`, taskID); err != nil {
 		return err
 	}
+	args := append([]any{taskID}, tArgs...)
+	args, byExpr := updatedByArg(ctx, args)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE upgrade_tasks SET status='running', updated_at=NOW() WHERE id=$1 AND `+tCond+` AND status='paused'`,
-		append([]any{taskID}, tArgs...)...)
+		`UPDATE upgrade_tasks SET status='running', updated_at=NOW(), `+byExpr+`
+		 WHERE id=$1 AND `+tCond+` AND status='paused'`, args...)
 	if err != nil {
 		return err
 	}
@@ -100,9 +103,11 @@ func (s *Service) Pause(ctx context.Context, sc scope.Scope, taskID int64) error
 		return err
 	}
 	tCond, tArgs := sc.Where("", 2)
+	args := append([]any{taskID}, tArgs...)
+	args, byExpr := updatedByArg(ctx, args)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE upgrade_tasks SET status='paused', updated_at=NOW() WHERE id=$1 AND `+tCond+` AND status='running'`,
-		append([]any{taskID}, tArgs...)...)
+		`UPDATE upgrade_tasks SET status='paused', updated_at=NOW(), `+byExpr+`
+		 WHERE id=$1 AND `+tCond+` AND status='running'`, args...)
 	if err != nil {
 		return err
 	}
@@ -173,10 +178,11 @@ func (s *Service) Cancel(ctx context.Context, sc scope.Scope, taskID int64) erro
 
 	// 5. 更新任务状态为 canceled。带状态条件并检查影响行数：
 	// 若任务在检查后已完成或已被删除，回滚本次取消，避免覆盖终态。
+	args := append([]any{taskID}, tArgs...)
+	args, byExpr := updatedByArg(ctx, args)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE upgrade_tasks SET status='canceled', updated_at=NOW()
-		 WHERE id=$1 AND `+tCond+` AND status IN ('draft','running','paused')`,
-		append([]any{taskID}, tArgs...)...)
+		`UPDATE upgrade_tasks SET status='canceled', updated_at=NOW(), `+byExpr+`
+		 WHERE id=$1 AND `+tCond+` AND status IN ('draft','running','paused')`, args...)
 	if err != nil {
 		return err
 	}

@@ -3449,7 +3449,11 @@
       simpleTable(['ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '创建者', '操作'], state.tasks,
         function (x) {
           var c = compMap[x.component_id];
-          var acts = [detailBtn(x)].concat(x.can_operate === false ? [] : taskActions(x));
+          var canView = x.can_view !== false;
+          var acts = canView ? [detailBtn(x)] : [];
+          if (canView && x.can_operate !== false) acts = acts.concat(taskActions(x));
+          if (!acts.length) acts = [h('span', { class: 'muted' }, ['无权限'])];
+
           var pct = x.total ? Math.round(x.success * 100 / x.total) : 0;
           var isCmd = x.kind === 'command';
           return [x.id,

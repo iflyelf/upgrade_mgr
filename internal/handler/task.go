@@ -73,8 +73,12 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		// 租户隔离：只列出当前租户的任务（superadmin 跨租户）
 		actor, _ := auth.FromContext(r.Context())
 		mode := ""
+		var mates map[string]bool
 		if !actorIsPrivileged(actor) && actor != nil {
 			mode = s.Task.AccessMode(r.Context(), actor.Username)
+			if m, mErr := orgService(s).TeamMates(r.Context(), actor.Username); mErr == nil {
+				mates = m
+			}
 		}
 		tCond, tArgs := reqScope(r).Where("t", 1)
 		where := []string{tCond}
@@ -159,11 +163,13 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 			// off 模式下同团队校验由写接口完成（前端无法逐行判断团队关系）。
 			canOperate := mode != "on" || createdBy == "" ||
 				(actor != nil && createdBy == actor.Username)
+			canView := actorIsPrivileged(actor) || createdBy == "" ||
+				(actor != nil && createdBy == actor.Username) || mates[createdBy]
 			list = append(list, map[string]any{
 				"id": id, "kind": kind, "name": name, "component_id": cid, "version": version,
 				"status": status, "created_at": createdAt, "created_by": createdBy,
-				"can_operate": canOperate,
-				"total":       total, "success": success, "failed": failed,
+				"can_operate": canOperate, "can_view": canView,
+				"total": total, "success": success, "failed": failed,
 			})
 		}
 		httpx.OK(w, map[string]any{
@@ -266,6 +272,16 @@ func TaskDetail(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		// 命令任务（脚本/输出可能含敏感信息）仅管理员可见。
 		if kind == "command" && !actorIsPrivileged(actorOf(r)) {
+			httpx.Fail(w, http.StatusNotFound, "任务不存在")
+			return
+		}
+		// 详情与执行日志仅创建者、同团队成员或管理员可见。
+		allowed, viewErr := s.Task.CanViewTaskDetail(ctx, actorOf(r), createdBy)
+		if viewErr != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, viewErr)
+			return
+		}
+		if !allowed {
 			httpx.Fail(w, http.StatusNotFound, "任务不存在")
 			return
 		}
