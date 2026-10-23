@@ -104,6 +104,9 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
 			add("t.name ILIKE $%d", "%"+q+"%")
 		}
+		if creator := strings.TrimSpace(r.URL.Query().Get("created_by")); creator != "" {
+			add("COALESCE(t.created_by,'')=$%d", creator)
+		}
 
 		// 服务端分页：默认 50，最大 200；页码越界夹紧到最后一页。
 		page := atoiDefault(r.URL.Query().Get("page"), 1)
@@ -231,6 +234,43 @@ func nullableTime(t sql.NullTime) any {
 		return t.Time
 	}
 	return nil
+}
+
+// TaskCreators 返回当前可见任务的创建者列表（去重，最多 500 个），供列表筛选。
+//
+// 非管理员看不到命令任务，创建者列表同样排除仅创建过命令任务的用户。
+func TaskCreators(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, _ := auth.FromContext(r.Context())
+		tCond, tArgs := reqScope(r).Where("t", 1)
+		where := []string{tCond, "COALESCE(t.created_by,'') <> ''"}
+		if !actorIsPrivileged(actor) {
+			where = append(where, "COALESCE(t.kind,'upgrade') <> 'command'")
+		}
+		rows, err := s.DB.QueryContext(r.Context(), `
+			SELECT DISTINCT t.created_by FROM upgrade_tasks t
+			 WHERE `+strings.Join(where, " AND ")+`
+			 ORDER BY t.created_by LIMIT 500`, tArgs...)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		defer rows.Close()
+		out := make([]string, 0, 32)
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			out = append(out, v)
+		}
+		if err := rows.Err(); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		httpx.OK(w, out)
+	}
 }
 
 // TaskDetail 任务详情：批次进度、逐机状态、当前阶段与指令日志。
