@@ -90,8 +90,10 @@ func New(c *config.Config) *ServiceContext {
 	if fn := org.HostGroupResolver(orgSvc); fn != nil {
 		taskSvc.SetHostGroupResolver(fn)
 	}
-	// 任务仅创建者可操作（默认关闭，可在设置页开启）。
+	// 任务仅创建者可操作（默认关闭，可在设置页开启）；
+	// 团队级策略（teams.owner_only）优先于全局开关。
 	taskSvc.SetOwnerOnlyPolicy(func() bool { return c.Agent.TaskOwnerOnly })
+	taskSvc.SetOwnerPolicyResolver(orgSvc.TeamOwnerPolicy)
 	svc := &ServiceContext{
 		Config:     c,
 		DB:         db,

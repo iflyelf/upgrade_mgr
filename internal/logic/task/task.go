@@ -105,6 +105,13 @@ type Service struct {
 	// allowTaskOwnerOnly 为 true 时，非管理员只能操作自己创建的任务。
 	// 用函数读取设置，页面修改后无需重启。
 	allowTaskOwnerOnly func() bool
+	// ownerPolicy 返回用户所属团队的任务操作策略：
+	//   "on"      → 受限（不看全局开关）
+	//   "off"     → 放行（不看全局开关）
+	//   "inherit" → 回退全局设置
+	//   ""        → 未加入任何团队，回退全局设置
+	// 为 nil 时只使用全局开关。
+	ownerPolicy func(ctx context.Context, username string) (string, error)
 }
 
 // SetAuthorizer 注入组件级权限校验（由服务端启动时设置）。
@@ -120,19 +127,46 @@ func (s *Service) SetHostGroupResolver(fn func(context.Context, *auth.User, stri
 // SetOwnerOnlyPolicy 注入「仅本人可操作任务」开关（由服务端启动时设置）。
 func (s *Service) SetOwnerOnlyPolicy(fn func() bool) { s.allowTaskOwnerOnly = fn }
 
+// SetOwnerPolicyResolver 注入团队级 owner 策略解析（由服务端启动时设置）。
+func (s *Service) SetOwnerPolicyResolver(fn func(context.Context, string) (string, error)) {
+	s.ownerPolicy = fn
+}
+
+// ownerOnlyFor 综合团队策略与全局开关，判断该用户是否受限。
+func (s *Service) ownerOnlyFor(ctx context.Context, username string) bool {
+	global := s.allowTaskOwnerOnly != nil && s.allowTaskOwnerOnly()
+	if s.ownerPolicy == nil {
+		return global
+	}
+	policy, err := s.ownerPolicy(ctx, username)
+	if err != nil {
+		// 查询失败时保守处理：按全局设置（不因为权限查询故障而放宽）。
+		return global
+	}
+	switch policy {
+	case "on":
+		return true
+	case "off":
+		return false
+	default: // inherit / 未加入团队
+		return global
+	}
+}
+
 // checkTaskOwner 校验非管理员是否可操作指定任务。
 //
-// 仅在开启 agent.task_owner_only 时生效；管理员（admin/superadmin）始终放行。
+// 是否受限由「团队策略 teams.owner_only」与全局开关 agent.task_owner_only 共同决定
+// （见 ownerOnlyFor）；管理员（admin/superadmin）始终放行。
 // 用于「启动 / 暂停 / 推进 / 取消 / 重试 / 删除」等写操作。
 //
 // actor 从 ctx 取（handler 已通过 middleware 注入当前用户），
 // 这样所有既有方法签名无需改动。
 func (s *Service) checkTaskOwner(ctx context.Context, sc scope.Scope, taskID int64) error {
-	if s.allowTaskOwnerOnly == nil || !s.allowTaskOwnerOnly() {
-		return nil
-	}
 	actor, _ := auth.FromContext(ctx)
 	if actor == nil || actor.IsAdmin || actor.IsSuperAdmin() || actor.HasRole(auth.RoleAdmin) {
+		return nil
+	}
+	if !s.ownerOnlyFor(ctx, actor.Username) {
 		return nil
 	}
 	tCond, tArgs := sc.Where("", 2)

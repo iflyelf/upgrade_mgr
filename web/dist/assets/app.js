@@ -1910,7 +1910,7 @@
     if (!data && !state.flyiamErr) {
       return h('div', { class: 'card' }, [
         h('h3', {}, ['FlyIAM 人员']),
-        hint('只读展示 FlyIAM 中的用户，并与本系统已接入账号对照。用户增删改仍以 Casdoor / FlyIAM 为准。'),
+        hint('展示 FlyIAM 中的用户，并与本系统已接入账号对照；可为未接入用户一键创建本地账号。'),
         h('div', { class: 'toolbar' }, [
           h('button', { class: 'btn', onclick: reload }, ['加载 FlyIAM 用户'])
         ]),
@@ -1928,21 +1928,47 @@
         (u.email || '').toLowerCase().indexOf(q) >= 0;
     });
 
+    var provision = function (u) {
+      if (!confirm('为 ' + u.username + ' 创建本地账号？\n\n' +
+        '将生成一次性随机密码（仅显示一次），并把 FlyIAM 中同名的扩展字段写入本地。')) return;
+      api('/api/flyiam/users/' + encodeURIComponent(u.username) + '/provision', {
+        method: 'POST',
+        body: JSON.stringify({ sync_fields: true })
+      }).then(function (r) {
+        var msg = '已创建本地账号：' + r.username;
+        if (r.password) {
+          msg += '\n\n初始密码（仅显示一次）：' + r.password +
+            '\n请立即转告用户登录后修改密码。';
+        }
+        if (r.synced_fields) msg += '\n\n已同步扩展字段：' + r.synced_fields + ' 项';
+        alert(msg);
+        loadOrg();
+        reload();
+      }).catch(function (e) { alert('创建失败: ' + e.message); });
+    };
+
     var rows = filtered.slice(0, 200).map(function (u) {
       return [
         u.username || '-',
         u.displayName || '-',
         u.email || '-',
-        localSet[u.username] ? h('span', { class: 'tag status-success' }, ['已接入'])
-          : h('span', { class: 'muted' }, ['未接入']),
+        localSet[u.username]
+          ? h('span', { class: 'tag status-success' }, ['已接入'])
+          : h('div', { class: 'row-actions' }, [
+              h('span', { class: 'muted' }, ['未接入']),
+              h('button', {
+                class: 'btn small', onclick: function () { provision(u); }
+              }, ['创建本地账号'])
+            ]),
         (u.properties && u.properties.empCode) || '-'
       ];
     });
 
     return h('div', { class: 'card' }, [
-      h('h3', {}, ['FlyIAM 人员（只读）']),
+      h('h3', {}, ['FlyIAM 人员']),
       hint('数据来自 FlyIAM（/api/users/export）。「已接入」表示本平台已有同名账号；' +
-        '未接入的用户需先在 FlyIAM/Casdoor 授权后登录，或由管理员在「设置 → 用户」创建。'),
+        '未接入的用户可点「创建本地账号」一键开通（生成一次性随机密码，' +
+        '并同步 FlyIAM 中同名的扩展字段）。账号增删改仍以 Casdoor / FlyIAM 为准。'),
       state.flyiamErr ? h('div', { class: 'err field', role: 'alert' }, [state.flyiamErr]) : null,
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn ghost', onclick: reload }, ['刷新']),
@@ -1956,6 +1982,63 @@
       }),
       filtered.length > 200 ? h('div', { class: 'muted' }, ['仅显示前 200 条，请用搜索缩小范围']) : null
     ]);
+  }
+
+  // tagPicker 多选标签输入：从候选值选择或手填，回车/加号添加，点 × 移除。
+  // 当前用于团队授权的主机分组范围（替代只能提示、无法累加的 datalist）。
+  function tagPicker(candidates, placeholder, datalistID) {
+    var values = [];
+    var listID = datalistID || ('tag-options-' + (++fieldSeq));
+    var tagsEl = h('div', { class: 'tag-picker-values' }, []);
+    var inputEl = h('input', {
+      list: listID,
+      placeholder: placeholder || '选择或输入后回车添加',
+      onkeydown: function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); add(inputEl.value); }
+      }
+    }, []);
+    var addBtn = h('button', {
+      class: 'btn ghost small', type: 'button', title: '添加',
+      onclick: function () { add(inputEl.value); }
+    }, ['+ 添加']);
+
+    function add(raw) {
+      String(raw || '').split(/[,，\s]+/).forEach(function (v) {
+        v = v.trim();
+        if (v && values.indexOf(v) < 0) values.push(v);
+      });
+      inputEl.value = '';
+      renderTags();
+    }
+    function renderTags() {
+      tagsEl.textContent = '';
+      if (!values.length) {
+        tagsEl.appendChild(h('span', { class: 'muted' }, ['未选择（表示不限主机）']));
+      }
+      values.forEach(function (v, i) {
+        tagsEl.appendChild(h('span', { class: 'tag' }, [
+          v,
+          h('button', {
+            class: 'tag-x', type: 'button', title: '移除',
+            onclick: function () { values.splice(i, 1); renderTags(); }
+          }, ['×'])
+        ]));
+      });
+    }
+    renderTags();
+    return {
+      el: h('div', { class: 'tag-picker' }, [
+        tagsEl,
+        h('div', { class: 'toolbar' }, [
+          inputEl,
+          h('datalist', { id: listID }, (candidates || []).map(function (g) {
+            return h('option', { value: g }, []);
+          })),
+          addBtn
+        ])
+      ]),
+      getValues: function () { add(inputEl.value); return values.slice(); }
+    };
   }
 
   // 角色管理。
@@ -2001,10 +2084,27 @@
   }
 
   // 团队管理（成员 + 授权）。
+  // ownerPolicyText 团队任务操作策略的中文标签。
+  function ownerPolicyText(v) {
+    if (v === 'on') return '仅本人';
+    if (v === 'off') return '团队共享';
+    return '跟随全局';
+  }
+
   function orgTeams(o) {
+    var newName = h('input', { placeholder: '团队名称（必填）' }, []);
+    var newCode = h('input', { placeholder: '编码（可空）' }, []);
+    var newDesc = h('input', { placeholder: '说明（可空）' }, []);
+    var newPolicy = h('select', {}, [
+      h('option', { value: 'inherit' }, ['跟随全局设置']),
+      h('option', { value: 'on' }, ['仅本人可操作自己创建的任务']),
+      h('option', { value: 'off' }, ['团队成员可互相操作任务'])
+    ]);
     var rows = o.teams.map(function (t) {
       return [
-        t.name, t.description || '-', t.member_count || 0, t.group_count || 0,
+        t.name, t.description || '-',
+        h('span', { class: 'tag' }, [ownerPolicyText(t.owner_only)]),
+        t.member_count || 0, t.group_count || 0,
         h('div', { class: 'row-actions' }, [
           h('button', {
             class: 'btn ghost small', onclick: function () {
@@ -2025,18 +2125,35 @@
     return h('div', {}, [
       h('div', { class: 'card' }, [
         h('h3', {}, ['团队']),
-        hint('团队 = 成员集合 + 对服务组的授权。授权支持直接权限，也可引用角色（取并集）。'),
+        hint('团队 = 成员集合 + 对服务组的授权。授权支持直接权限，也可引用角色（取并集）。' +
+          '「任务操作策略」可按团队覆盖全局的「仅创建者可操作」：on 更严格，off 允许团队内协作。'),
+        h('div', { class: 'grid2' }, [
+          field('团队名称', newName, ''),
+          field('编码', newCode, '可空，便于与外部系统对应')
+        ]),
+        h('div', { class: 'grid2' }, [
+          field('说明', newDesc, ''),
+          field('任务操作策略', newPolicy, 'on = 仅本人；off = 团队共享；inherit = 跟随设置页全局开关')
+        ]),
         h('div', { class: 'toolbar' }, [
           h('button', {
             class: 'btn', onclick: function () {
-              var name = prompt('团队名称');
-              if (!name) return;
-              api('/api/teams', { method: 'POST', body: JSON.stringify({ name: name }) })
-                .then(loadOrg).catch(function (e) { alert('创建失败: ' + e.message); });
+              if (!newName.value.trim()) { alert('请填写团队名称'); return; }
+              api('/api/teams', {
+                method: 'POST',
+                body: JSON.stringify({
+                  name: newName.value.trim(),
+                  code: newCode.value.trim(),
+                  description: newDesc.value.trim(),
+                  owner_only: newPolicy.value
+                })
+              }).then(function () { loadOrg(); })
+                .catch(function (e) { alert('创建失败: ' + e.message); });
             }
           }, ['新增团队'])
         ]),
-        simpleTable(['名称', '说明', '成员数', '授权数', '操作'], o.teams, function (t, i) { return rows[i]; })
+        simpleTable(['名称', '说明', '任务操作策略', '成员数', '授权数', '操作'], o.teams,
+          function (t, i) { return rows[i]; })
       ]),
       state.orgSelTeam ? teamDetailCard(o, state.orgSelTeam) : null
     ]);
@@ -2085,8 +2202,36 @@
       ];
     });
 
+    var policyEl = h('select', {}, [
+      h('option', { value: 'inherit' }, ['跟随全局设置']),
+      h('option', { value: 'on' }, ['仅本人可操作自己创建的任务']),
+      h('option', { value: 'off' }, ['团队成员可互相操作任务'])
+    ]);
+    if (team && team.owner_only) policyEl.value = team.owner_only;
+
     return h('div', { class: 'card' }, [
       h('h3', {}, ['团队详情：' + (team ? team.name : teamID)]),
+      h('div', { class: 'grid2' }, [
+        field('任务操作策略', policyEl, '修改后立即对团队成员生效'),
+        h('div', { class: 'field' }, [
+          h('label', {}, ['\u00a0']),
+          h('button', {
+            class: 'btn', onclick: function () {
+              if (!team) { alert('团队信息未加载，请刷新'); return; }
+              api('/api/teams/' + teamID, {
+                method: 'PUT',
+                body: JSON.stringify({
+                  name: team.name,
+                  description: team.description || '',
+                  status: team.status || 0,
+                  owner_only: policyEl.value
+                })
+              }).then(function () { loadOrg(); })
+                .catch(function (e) { alert('保存失败: ' + e.message); });
+            }
+          }, ['保存策略'])
+        ])
+      ]),
       h('div', { class: 'toolbar' }, [
         h('button', {
           class: 'btn ghost', onclick: function () {
@@ -2120,12 +2265,7 @@
     var permEl = h('input', { value: 'read', placeholder: 'read,write,delete,deploy' }, []);
     var roleEl = h('input', { placeholder: '角色 ID，逗号分隔（可空）' }, []);
     var svcEl = h('input', { value: '*', placeholder: '* 表示组内全部组件' }, []);
-    var hgEl = h('input', {
-      value: '', list: 'host-group-options',
-      placeholder: '从下拉选择或手填 app_code / biz_group，逗号分隔；留空不限'
-    }, []);
-    var hgList = h('datalist', { id: 'host-group-options' },
-      (state.hostGroupOptions || []).map(function (g) { return h('option', { value: g }, []); }));
+    var hgPicker = tagPicker(state.hostGroupOptions || [], '选择或输入 app_code / biz_group 后回车');
     return h('div', { class: 'card' }, [
       h('h3', {}, ['设置授权']),
       h('div', { class: 'grid2' }, [
@@ -2136,8 +2276,7 @@
         field('引用角色', roleEl, '角色 ID，可空'),
         field('授权服务', svcEl, '* 或组件名，逗号分隔')
       ]),
-      field('主机分组范围', hgEl, '限定可操作的主机（按 app_code / biz_group 匹配，逗号分隔；留空表示不限）。超出范围的主机会拒绝创建任务。'),
-      hgList,
+      field('主机分组范围', hgPicker.el, '限定可操作的主机（按 app_code / biz_group 匹配；留空表示不限）。超出范围的主机会拒绝创建任务。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
           class: 'btn', onclick: function () {
@@ -2152,7 +2291,7 @@
                 role_ids: split(roleEl.value).map(function (x) { return parseInt(x, 10); })
                   .filter(function (x) { return !isNaN(x); }),
                 services: split(svcEl.value),
-                host_groups: split(hgEl.value)
+                host_groups: hgPicker.getValues()
               })
             }).then(function () { loadTeamMembers(teamID); })
               .catch(function (e) { alert('保存失败: ' + e.message); });

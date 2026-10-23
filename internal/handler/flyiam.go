@@ -2,7 +2,10 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"io"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -11,8 +14,30 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/flyiam"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
+	"github.com/iflyelf/upgrade_mgr/internal/rbac"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
+
+// 生成随机密码用的字符集：去掉 0/O、1/l/I 等易混淆字符。
+const provisionPasswordCharset = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789@#%"
+
+// generatePassword 生成 n 位随机密码（crypto/rand，无模偏差）。
+func generatePassword(n int) (string, error) {
+	if n <= 0 {
+		n = 16
+	}
+	max := big.NewInt(int64(len(provisionPasswordCharset)))
+	var b strings.Builder
+	b.Grow(n)
+	for i := 0; i < n; i++ {
+		idx, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", err
+		}
+		b.WriteByte(provisionPasswordCharset[idx.Int64()])
+	}
+	return b.String(), nil
+}
 
 // flyiamClient 按当前设置构造 FlyIAM 客户端（未配置返回 nil）。
 func flyiamClient(s *svc.ServiceContext) *flyiam.Client {
@@ -186,5 +211,128 @@ func FlyIAMUsers(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		httpx.OK(w, map[string]any{"users": users, "total": len(users), "readonly": true})
+	}
+}
+
+// FlyIAMProvisionLocalUser 为 FlyIAM 用户一键创建本地账号（管理员）。
+//
+// 语义：
+//   - 用户名必须存在于 FlyIAM（防止手填任意账号）；
+//   - 本地已存在同名账号时返回 409，绝不覆盖密码；
+//   - 未提供密码时生成一次性随机密码，仅在本次响应返回；
+//   - sync_fields 为 true 时，把 FlyIAM properties 中与本地用户字段定义同名的值写入扩展字段。
+func FlyIAMProvisionLocalUser(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := strings.TrimSpace(r.PathValue("username"))
+		if username == "" {
+			httpx.Fail(w, http.StatusBadRequest, "用户名为空")
+			return
+		}
+		var req struct {
+			Password   string   `json:"password"`
+			Roles      []string `json:"roles"`
+			SyncFields bool     `json:"sync_fields"`
+		}
+		if r.ContentLength != 0 {
+			if err := httpx.DecodeJSON(r, &req); err != nil && err != io.EOF {
+				httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+				return
+			}
+		}
+
+		client := flyiamClient(s)
+		if client == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable,
+				"未配置 FlyIAM 地址与服务令牌，请先到「设置 → FlyIAM」填写")
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		remoteUsers, err := client.FetchUsers(ctx)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "从 FlyIAM 拉取用户失败: "+err.Error())
+			return
+		}
+		var remote *flyiam.RemoteUser
+		for i := range remoteUsers {
+			if remoteUsers[i].Username == username {
+				remote = &remoteUsers[i]
+				break
+			}
+		}
+		if remote == nil {
+			httpx.Fail(w, http.StatusNotFound, "FlyIAM 中不存在用户 "+username)
+			return
+		}
+
+		var exists bool
+		if err := s.DB.QueryRowContext(r.Context(),
+			`SELECT EXISTS(SELECT 1 FROM local_users WHERE username=$1)`, username).Scan(&exists); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if exists {
+			httpx.Fail(w, http.StatusConflict, "本地已存在账号 "+username+"，无需重复创建")
+			return
+		}
+
+		password := req.Password
+		generated := false
+		if password == "" {
+			password, err = generatePassword(16)
+			if err != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			generated = true
+		}
+		roles := req.Roles
+		if len(roles) == 0 {
+			roles = []string{"user"}
+		}
+		id, err := s.RBAC.Create(r.Context(), actorOf(r), rbac.CreateRequest{
+			Username: username,
+			Password: password,
+			Display:  strings.TrimSpace(remote.DisplayName),
+			Roles:    roles,
+		})
+		auditOp(s, r, audit.ActionUserCreate, "user", username, username, err)
+		if err != nil {
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+
+		// 可选：把 FlyIAM 属性写入本地用户扩展字段（仅写已定义的键）。
+		synced := 0
+		if req.SyncFields && len(remote.Properties) > 0 {
+			if repo, repoErr := fielddef.NewRepo(s.DB, fielddef.KindUser); repoErr == nil {
+				defs, listErr := repo.List(r.Context())
+				if listErr == nil {
+					values := map[string]string{}
+					for _, d := range defs {
+						if v, ok := remote.Properties[d.FieldKey]; ok && strings.TrimSpace(v) != "" {
+							values[d.FieldKey] = strings.TrimSpace(v)
+						}
+					}
+					if len(values) > 0 {
+						if clean, vErr := fielddef.ValidateValues(defs, values); vErr == nil {
+							if saveErr := repo.SaveUserValues(r.Context(), username, clean); saveErr == nil {
+								synced = len(clean)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		resp := map[string]any{
+			"id": id, "username": username, "generated": generated, "synced_fields": synced,
+		}
+		if generated {
+			resp["password"] = password
+			resp["note"] = "随机密码仅本次显示，请立即转告用户登录后修改"
+		}
+		httpx.OK(w, resp)
 	}
 }

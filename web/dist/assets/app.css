@@ -232,3 +232,11 @@ td.tunnel-fail-cell { box-shadow: inset 3px 0 0 var(--err-color); }
   .modal { padding: 14px; }
   .detail-summary { font-size: 12px; }
 }
+
+/* 多选标签输入（如团队授权的主机分组范围） */
+.tag-picker-values { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+.tag-picker-values .tag { display: inline-flex; align-items: center; gap: 4px; }
+.tag-x { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
+.tag-x:hover { color: #d33; }
+.tag-picker .toolbar { margin: 0; }
+.tag-picker input { min-width: 260px; }
