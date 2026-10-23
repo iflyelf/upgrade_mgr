@@ -36,6 +36,13 @@
 .PARAMETER InstallDir
     安装目录，默认 C:\Program Files\windows_exporter。
 
+.PARAMETER BinaryPath
+    本地已存在的 exe 路径（跳过下载）。老系统（Server 2008 R2 + PowerShell 2.0/.NET 2.0）
+    不支持 TLS 1.2，无法直连 GitHub；推荐由平台先把 exe 下发到本机，再用本参数安装。
+
+.PARAMETER BinaryUrl
+    完整 exe 下载地址（可用 http）。也可把 exe 放到内网 HTTP 地址，用本参数直接下载。
+
 .PARAMETER ConfigPath
     自定义配置文件路径；指定后安装/更新时复制为安装目录下的 config.yaml。
 
@@ -71,12 +78,21 @@ param(
     [int]$ListenPort = 16666,
     [string]$TextfileDir = 'C:\monitor\windows_exporter\textfile_inputs',
     [string]$InstallDir = '',
+    [string]$BinaryPath = '',
+    [string]$BinaryUrl = '',
     [string]$ConfigPath = '',
     [switch]$NoConfig,
     [switch]$NoFirewall
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 输出编码：Windows 控制台默认 GBK(OEM)，平台按 UTF-8 读取会出现乱码。
+# 主动把 stdout 设为 UTF-8；失败不阻断（只影响日志可读性）。
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+# 脚本自身含中文：PS2 在部分系统上按 ANSI 解析无 BOM 文件会乱码。
+# 若检测到当前脚本不是 UTF-8 解码（$PSVersionTable 无 BOM 信息，这里做二次兜底），
+# 只需保证输出编码即可；Agent 会在执行前转成 UTF-8 BOM。
 
 # ---------- 常量 ----------
 $ServiceName = 'windows_exporter'
@@ -89,6 +105,9 @@ if ($env:WINDOWS_EXPORTER_LISTEN_PORT) { $ListenPort = [int]$env:WINDOWS_EXPORTE
 # 自定义下载基础地址（末尾不要带斜杠），默认 iflyelf release。
 $script:BaseUrl = ''
 if ($env:WINDOWS_EXPORTER_BASE) { $script:BaseUrl = $env:WINDOWS_EXPORTER_BASE.TrimEnd('/') }
+# 完整 exe 地址优先（支持 http，用于老系统无法 TLS 1.2 的场景）。
+if ($env:WINDOWS_EXPORTER_BINARY_URL) { $BinaryUrl = $env:WINDOWS_EXPORTER_BINARY_URL }
+if ($env:WINDOWS_EXPORTER_BINARY_PATH) { $BinaryPath = $env:WINDOWS_EXPORTER_BINARY_PATH }
 
 if (-not $InstallDir) {
     if ($env:ProgramFiles) {
@@ -101,14 +120,22 @@ $ExePath = Join-Path $InstallDir 'windows_exporter.exe'
 $ExeBak = "$ExePath.bak"
 $ConfigFile = Join-Path $InstallDir 'config.yaml'
 
-# 注意：平台执行脚本时 stdout 是管道。Windows PowerShell 的 Write-Host 写的是
-# host/information 流，不会进入被重定向的 stdout，导致任务日志里看不到任何脚本输出。
-# 因此这里统一用 Write-Output（交互执行时同样会打印到控制台）。
-function Write-Step([string]$Message) { Write-Output "==> $Message" }
-function Write-Warn([string]$Message) { Write-Output "WARN: $Message" }
+# 输出约定（重要）：
+#   - 不能用 Write-Host：它写 host/information 流，平台把 stdout 重定向到管道时收不到。
+#   - 不能用 Write-Output：函数返回值就是管道输出，调用方一旦用 `| Out-Null` 或 `$x = f`
+#     就会把日志一起吞掉（曾导致任务日志只剩几行、错误信息全丢）。
+#   - 统一用 [Console]::Out / [Console]::Error 直接写进程 stdout/stderr，
+#     所有 PowerShell 版本（含 2.0）都能被重定向捕获。
+function Write-Step([string]$Message) { [Console]::Out.WriteLine("==> $Message") }
+function Write-Warn([string]$Message) { [Console]::Out.WriteLine("WARN: $Message") }
 function Fail([string]$Message, [int]$Code = 1) {
-    Write-Output "ERROR: $Message"
-    exit $Code
+    # 用 [Environment]::Exit 而不是 exit：PowerShell 2.0 中 `exit` 在函数/管道里
+    # 可能被 Out-Null 等管道消费掉，导致脚本“静默结束且退出码为 0”，
+    # 平台因此误判安装成功（随后健康检查失败）。Environment::Exit 立即终止进程。
+    [Console]::Error.WriteLine("ERROR: $Message")
+    [Console]::Out.WriteLine("ERROR: $Message")
+    [Console]::Out.Flush()
+    [Environment]::Exit($Code)
 }
 
 function Test-Admin {
@@ -121,16 +148,20 @@ if (-not (Test-Admin)) {
     Fail '需要管理员权限：请以“管理员 PowerShell”重新执行。' 1
 }
 
-# 老系统默认未启用 TLS 1.2：尽力开启，失败不阻止（可能已在 .NET 中全局配置）。
+# TLS：GitHub / 代理要求 TLS 1.2。.NET 2.0/3.5 没有 Tls12 枚举名，
+# 直接按名字 Parse 会抛「未找到值 Tls12」，因此用数值位或（Tls12 = 3072）。
+# 若底层 Schannel/.NET 确实不支持，下载会失败，下面会给出针对性提示。
+$tls12Supported = $false
 try {
-    $sp = [Net.ServicePointManager]::SecurityProtocol
-    foreach ($name in @('Tls12', 'Tls11', 'Tls')) {
-        $val = [Enum]::Parse([Net.SecurityProtocolType], $name, $true)
-        if ($val) { $sp = $sp -bor $val }
-    }
-    [Net.ServicePointManager]::SecurityProtocol = $sp
+    $mask = [int][Net.ServicePointManager]::SecurityProtocol -bor 3072
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]$mask
+    $tls12Supported = $true
 } catch {
-    Write-Warn "启用 TLS 1.2 失败（可能影响下载）：$($_.Exception.Message)"
+    Write-Warn "无法启用 TLS 1.2（下载可能失败）：$($_.Exception.Message)"
+}
+Write-Step "TLS 1.2: $tls12Supported (PowerShell $($PSVersionTable.PSVersion), CLR $($PSVersionTable.CLRVersion))"
+if (-not $tls12Supported) {
+    Write-Warn '当前 .NET 不支持 TLS 1.2：无法从 GitHub/proxy 下载；请改用 -BinaryUrl 指向内网 HTTP 地址，或先安装 .NET Framework 4.5+'
 }
 
 function Resolve-Arch {
@@ -178,13 +209,33 @@ function Stop-ServiceIfRunning {
     }
 }
 
+# 平台地址：Agent 执行脚本时会注入 UPGRADE_AGENT_SERVER_URL。
+# 无法访问外网（或系统不支持 TLS 1.2）时，改从平台自身下载（平台代缓存，可用 HTTP）。
+$PlatformURL = $env:UPGRADE_AGENT_SERVER_URL
+if ($env:WINDOWS_EXPORTER_PLATFORM_URL) { $PlatformURL = $env:WINDOWS_EXPORTER_PLATFORM_URL }
+
 function Download-Exporter([string]$OutFile) {
-    if ($script:BaseUrl) {
-        $base = "$($script:BaseUrl)/windows_exporter-$($script:ResolvedArch).exe"
+    if ($BinaryPath) {
+        if (-not (Test-Path $BinaryPath)) {
+            Fail "指定的本地安装包不存在: $BinaryPath" 1
+        }
+        Write-Step "使用本地安装包 $BinaryPath"
+        Copy-Item -Force $BinaryPath $OutFile
+        $len0 = (Get-Item $OutFile).Length
+        if ($len0 -lt 1048576) {
+            Fail "本地安装包过小（$len0 字节），可能不是 windows_exporter.exe: $BinaryPath" 1
+        }
+        return $OutFile
+    }
+    if ($BinaryUrl) {
+        # 直接使用完整地址（内网 HTTP 镜像/制品地址），不再拼代理前缀。
+        $url = $BinaryUrl
+    } elseif ($script:BaseUrl) {
+        $url = "$($script:BaseUrl)/windows_exporter-$($script:ResolvedArch).exe"
     } else {
         $base = "https://github.com/iflyelf/windows_exporter/releases/download/$Version/windows_exporter-$($script:ResolvedArch).exe"
+        $url = "$ProxyPrefix$base"
     }
-    $url = "$ProxyPrefix$base"
     Write-Step "下载 $url"
     if (Test-Path $OutFile) { Remove-Item -Force $OutFile -ErrorAction SilentlyContinue }
     try {
@@ -192,7 +243,30 @@ function Download-Exporter([string]$OutFile) {
         $wc.Headers.Add('User-Agent', 'upgrade-agent/windows_exporter-installer')
         $wc.DownloadFile($url, $OutFile)
     } catch {
-        Fail "下载失败：$($_.Exception.Message)`n请确认目标机能访问 proxy.xiaonuo.live 或 GitHub，并检查网络/代理设置。" 1
+        $first = $_.Exception.Message
+        # 回退：从平台自身下载（平台代缓存 GitHub 文件，可用 http，绕开 TLS 1.2 限制）。
+        if ($PlatformURL -and -not $BinaryUrl) {
+            $fallback = $PlatformURL.TrimEnd('/') + "/api/external/binary/windows-exporter-" +
+                        $script:ResolvedArch
+            Write-Warn "直连下载失败（$first），改用平台地址 $fallback"
+            try {
+                $wc2 = New-Object System.Net.WebClient
+                $wc2.Headers.Add('User-Agent', 'upgrade-agent/windows_exporter-installer')
+                $wc2.DownloadFile($fallback, $OutFile)
+                return $OutFile
+            } catch {
+                $first = "$first；平台下载也失败：$($_.Exception.Message)"
+            }
+        }
+        $msg = "下载失败：$first"
+        if (-not $tls12Supported) {
+            $msg += "`n该系统的 .NET/PowerShell 不支持 TLS 1.2（Windows Server 2008 R2 常见），" +
+                    "且未能从平台地址获取安装包。" +
+                    "请确认平台可访问 GitHub，或由平台下发 exe 后用 -BinaryPath <本地路径> 安装。"
+        } else {
+            $msg += "`n请确认目标机能访问 platform / proxy.xiaonuo.live / GitHub，并检查网络与代理设置。"
+        }
+        Fail $msg 1
     }
     if (-not (Test-Path $OutFile)) { Fail '下载后未找到文件' 1 }
     $len = (Get-Item $OutFile).Length
@@ -230,8 +304,10 @@ collector:
     # examples/windows_exporter/config.yaml
     include: "windows_exporter|upgrade-agent"
 "@
-        # 配置里含中文注释：用 UTF8 写入（PowerShell 5 的 -Encoding ASCII 会丢失中文）。
-        Set-Content -Path $ConfigFile -Value $content -Encoding UTF8
+        # 配置里含中文注释：用无 BOM 的 UTF-8 写入。
+        # 不用 Set-Content -Encoding UTF8：PS 5 会写 BOM，YAML 解析器可能报错。
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($ConfigFile, $content, $utf8NoBom)
     } else {
         Write-Step "保留已有配置 $ConfigFile"
     }
@@ -332,7 +408,7 @@ function Do-Install {
     Stop-ServiceIfRunning
 
     $tmp = Join-Path $env:TEMP "windows_exporter-download-$PID.exe"
-    Download-Exporter $tmp | Out-Null
+    Download-Exporter $tmp
     if ((Get-ServiceState) -ne 'Missing' -and (Test-Path $ExePath)) {
         Copy-Item -Force $ExePath $ExeBak
     }
@@ -367,7 +443,7 @@ function Do-Update {
     if (Test-Path $ExePath) { Copy-Item -Force $ExePath $ExeBak }
 
     $tmp = Join-Path $env:TEMP "windows_exporter-download-$PID.exe"
-    Download-Exporter $tmp | Out-Null
+    Download-Exporter $tmp
     Stop-ServiceIfRunning
     Copy-Item -Force $tmp $ExePath
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
@@ -445,15 +521,22 @@ function Do-Status {
     }
 }
 
-Write-Output "==> windows_exporter install.ps1：动作=$Action，端口=$ListenPort，安装目录=$InstallDir"
-Write-Output "==> PowerShell $($PSVersionTable.PSVersion)；管理员=$((Test-Admin))"
+Write-Step "windows_exporter install.ps1: action=$Action port=$ListenPort dir=$InstallDir"
+Write-Step "PowerShell $($PSVersionTable.PSVersion), CLR $($PSVersionTable.CLRVersion), admin=$((Test-Admin))"
 
-switch ($Action) {
-    'install' { Do-Install }
-    'update' { Do-Update }
-    'uninstall' { Do-Uninstall }
-    'status' { Do-Status }
-    default { Fail "未知动作: $Action" 2 }
+try {
+    switch ($Action) {
+        'install' { Do-Install }
+        'update' { Do-Update }
+        'uninstall' { Do-Uninstall }
+        'status' { Do-Status }
+        default { Fail "未知动作: $Action" 2 }
+    }
+} catch {
+    # PowerShell 2.0 在函数/管道内抛错时退出码可能仍为 0，这里显式兜底，
+    # 保证平台能通过退出码判定失败。
+    Fail ("未捕获异常: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage) 1
 }
 
-exit 0
+[Console]::Out.Flush()
+[Environment]::Exit(0)

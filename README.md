@@ -1959,6 +1959,30 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 Server 2008 R2 支持：平台代缓存与 PS2 兼容修复
+
+日志证据（17:05）：`PowerShell 2.0`、`CLR` 为 .NET 2.0，`TLS 1.2 可用: False`，
+脚本执行到入口就结束、服务未注册。三条根因与修复：
+
+1. **PS2/.NET 2.0 不支持 TLS 1.2** → 无法访问 GitHub / proxy。
+   - 控制台新增 `GET /api/external/binary/{name}`：由服务端（Go，支持 TLS 1.2）
+     代为下载并缓存 `windows_exporter-amd64.exe` / `arm64` / `install.ps1`，
+     主机用 **HTTP** 从这个接口拉取即可，`<agent_binary_dir>/.external-cache` 缓存 24h，
+     带 MZ / 非 HTML 内容校验。
+   - Windows 组件示例的 `script_url` 改为平台相对路径
+     `/api/external/binary/windows-exporter-install.ps1`（Agent 自动补全服务端地址并带凭据）。
+   - `install.ps1` 新增 `-BinaryPath`（本地 exe）与 `-BinaryUrl`（内网地址），
+     并在直连失败时自动回退到 `UPGRADE_AGENT_SERVER_URL` 对应的平台地址。
+   - Agent 把当前服务端地址注入子进程环境变量 `UPGRADE_AGENT_SERVER_URL`
+     （切换连接地址时同步更新）。
+2. **`[Enum]::Parse(..., 'Tls12')` 在 .NET 2.0 抛「未找到值 Tls12」** →
+   改用数值位或（3072），并在不支持时明确提示改用平台地址/本地 exe。
+3. **PS2 中 `exit` 在函数/管道里可能被吞掉，退出码仍为 0** → `Fail` 改用
+   `[Environment]::Exit`；脚本外层加 try/catch 兜底；日志统一走
+   `[Console]::Out`（`Write-Output` 会被调用方 `| Out-Null` 吞掉），并把
+   stdout 设为 UTF-8（原日志出现中文乱码）。
+4. 执行器合并 stdout+stderr 输出（PowerShell 的异常信息走 stderr，原实现会丢）。
+
 ### 2026-10-23 修复 Windows 脚本「执行成功但实际没装」
 
 - 现象：日志显示「执行安装脚本」后立刻进入启动/健康检查，最终健康检查失败，

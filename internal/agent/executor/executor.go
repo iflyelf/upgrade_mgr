@@ -69,14 +69,27 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	downloadAuth := authHeader
 	if (comp.DeployMode == protocol.DeployScript || execScript) && comp.ScriptURL != "" {
 		scriptURL := strings.TrimSpace(comp.ScriptURL)
-		if err := validateScriptURL(scriptURL); err != nil {
-			logf(protocol.StageFailed, "script_url 非法: %v", err)
-			return res, fmt.Errorf("script_url 非法: %w", err)
+		if strings.HasPrefix(scriptURL, "/") {
+			// 平台相对路径（如 /api/external/binary/...）：Agent 在收到指令时已
+			// 解析成绝对地址并写入 Artifact.URL，这里直接使用，避免再解析一次。
+			// 典型用途：控制台代为缓存外部脚本，老系统（不支持 TLS 1.2）用 http 拉取。
+			if strings.TrimSpace(art.URL) == "" {
+				logf(protocol.StageFailed, "script_url 为相对路径但缺少已解析的下载地址")
+				return res, fmt.Errorf("script_url 相对路径未解析")
+			}
+			downloadURL = art.URL
+			// 平台地址，可以携带 Agent 凭据。
+			downloadAuth = authHeader
+		} else {
+			if err := validateScriptURL(scriptURL); err != nil {
+				logf(protocol.StageFailed, "script_url 非法: %v", err)
+				return res, fmt.Errorf("script_url 非法: %w", err)
+			}
+			// 以组件字段为准，避免同一指令里 Artifact.URL 与 ScriptURL 不一致。
+			downloadURL = scriptURL
+			// 自定义地址可能是第三方仓库，绝不携带平台 Agent 凭据。
+			downloadAuth = ""
 		}
-		// 以组件字段为准，避免同一指令里 Artifact.URL 与 ScriptURL 不一致。
-		downloadURL = scriptURL
-		// 自定义地址可能是第三方仓库，绝不携带平台 Agent 凭据。
-		downloadAuth = ""
 	}
 	dlPath := ""
 	if noArtifact {
@@ -380,17 +393,32 @@ func runScript(ctx context.Context, comp protocol.ComponentSpec, scriptPath stri
 	res, err := runner.Run(ctx, runner.Spec{
 		Argv: argv, Dir: comp.WorkDir, Env: comp.ExecEnv, Timeout: timeout,
 	})
-	var stdout string
+	var out string
 	if res != nil {
-		stdout = res.Stdout
+		out = combineOutput(res.Stdout, res.Stderr)
 	}
 	if err != nil {
-		return stdout, fmt.Errorf("安装脚本启动失败: %w", err)
+		return out, fmt.Errorf("安装脚本启动失败: %w", err)
 	}
 	if res.ExitCode != 0 {
-		return stdout, fmt.Errorf("安装脚本退出码 %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		return out, fmt.Errorf("安装脚本退出码 %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	return stdout, nil
+	return out, nil
+}
+
+// combineOutput 合并 stdout 与 stderr，供任务日志展示。
+//
+// 只返回 stdout 会丢掉关键信息：PowerShell 的部分错误（Write-Error/异常信息）
+// 走 stderr，脚本退出码仍为 0 时日志里就只剩半截输出，无法定位问题。
+func combineOutput(stdout, stderr string) string {
+	out := strings.TrimRight(strings.TrimSpace(stdout), "\n")
+	if errText := strings.TrimSpace(stderr); errText != "" {
+		if out != "" {
+			out += "\n"
+		}
+		out += errText
+	}
+	return out
 }
 
 // validateScriptContent 校验下载到的脚本内容是否可执行。
@@ -451,6 +479,15 @@ func runPostInstallScript(ctx context.Context, comp protocol.ComponentSpec) (str
 	}
 	_ = os.Chmod(scriptPath, 0700)
 
+	// 与安装脚本相同的平台预处理：Windows 需要 UTF-8 BOM + CRLF，
+	// 否则 PowerShell 2.0 会把含中文的 post_install 脚本按 ANSI 解析。
+	prepared, cleanup, prepErr := prepareScriptPath(scriptPath)
+	if prepErr != nil {
+		return "", prepErr
+	}
+	defer cleanup()
+	scriptPath = prepared
+
 	timeout, _ := time.ParseDuration(comp.ExecTimeout)
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
@@ -464,7 +501,7 @@ func runPostInstallScript(ctx context.Context, comp protocol.ComponentSpec) (str
 	})
 	var out string
 	if res != nil {
-		out = strings.TrimSpace(strings.TrimSpace(res.Stdout) + "\n" + strings.TrimSpace(res.Stderr))
+		out = combineOutput(res.Stdout, res.Stderr)
 	}
 	if err != nil {
 		return out, fmt.Errorf("post_install 脚本启动失败: %w", err)
