@@ -418,13 +418,20 @@
   // 与 Linux 的 install.sh 对齐：install / update / uninstall / status 四个动作。
   var WINDOWS_INSTALL_SCRIPT_URL = 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1';
 
+  // 平台代缓存的外部文件（控制台预先下载，主机用 http 拉取）：
+  // Windows Server 2008 R2 的 PowerShell 2.0 不支持 TLS 1.2，直连 GitHub 必然失败。
+  var WINDOWS_INSTALL_SCRIPT_PLATFORM_URL = '/api/external/binary/windows-exporter-install.ps1';
+
   // windowsInstallScript(action) 生成“先下载 install.ps1 再执行”的 PowerShell 命令脚本。
   // 兼容 PowerShell 2.0：用 System.Net.WebClient，不用 Invoke-WebRequest。
   function windowsInstallScript(action) {
     var args = action === 'uninstall' ? ' uninstall -Yes' : ' ' + action;
     return [
       "$ErrorActionPreference = 'Stop'",
-      "$url = '" + WINDOWS_INSTALL_SCRIPT_URL + "'",
+      "# 优先从平台下载（http 即可，兼容 Server 2008 R2 的 PowerShell 2.0）",
+      "$base = $env:UPGRADE_AGENT_SERVER_URL",
+      "$url = if ($base) { $base.TrimEnd('/') + '" + WINDOWS_INSTALL_SCRIPT_PLATFORM_URL + "' } " +
+        "else { '" + WINDOWS_INSTALL_SCRIPT_URL + "' }",
       "$f = Join-Path $env:TEMP 'windows_exporter-install.ps1'",
       '(New-Object System.Net.WebClient).DownloadFile($url, $f)',
       '& $f' + args,
@@ -577,7 +584,7 @@
         binary_name: 'windows_exporter',
         install_path: 'C:\\Program Files\\windows_exporter',
         service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
-        script_url: WINDOWS_INSTALL_SCRIPT_URL,
+        script_url: WINDOWS_INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['install'],
         exec_timeout: '15m',
         health_cmd: [['powershell.exe', '-NoProfile', '-Command', "if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]],
@@ -593,7 +600,7 @@
         binary_name: 'windows_exporter',
         install_path: 'C:\\Program Files\\windows_exporter',
         service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
-        script_url: WINDOWS_INSTALL_SCRIPT_URL,
+        script_url: WINDOWS_INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['update'],
         exec_timeout: '15m',
         health_cmd: [['powershell.exe', '-NoProfile', '-Command', "if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]],
@@ -609,7 +616,7 @@
         binary_name: 'windows_exporter',
         install_path: 'C:\\Program Files\\windows_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        script_url: WINDOWS_INSTALL_SCRIPT_URL,
+        script_url: WINDOWS_INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['uninstall', '-Yes'],
         exec_timeout: '15m'
       }

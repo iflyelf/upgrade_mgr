@@ -386,7 +386,15 @@ func defExecTimeout(s string) string {
 	return s
 }
 
-// ValidateScriptURL 限制 script 模式的自定义下载地址只能使用绝对 http/https URL。
+// ValidateScriptURL 限制 script 模式的自定义下载地址。
+//
+// 允许两种形式：
+//   - 绝对 http/https URL（第三方仓库，Agent 不会携带平台凭据）；
+//   - 以单个 / 开头的平台相对路径（如 /api/external/binary/xxx.ps1）。
+//     这类地址由 Agent 补全为当前服务端地址并携带凭据，用于「控制台代缓存」的外部文件
+//     —— 例如 Windows Server 2008 R2 的 PowerShell 2.0 不支持 TLS 1.2，
+//     无法直连 GitHub，只能通过平台 HTTP 地址获取安装脚本。
+//
 // 服务端与 Agent 各校验一次，避免 file:// 等本地协议被下发执行。
 func ValidateScriptURL(raw string) error {
 	raw = strings.TrimSpace(raw)
@@ -395,6 +403,20 @@ func ValidateScriptURL(raw string) error {
 	}
 	if len(raw) > 2048 {
 		return fmt.Errorf("script_url 过长（最多 2048 字符）")
+	}
+	if strings.HasPrefix(raw, "/") {
+		// 平台相对路径：只允许 /api/ 前缀，避免任意本地路径被当作平台接口。
+		// 拒绝 //host（协议相对 URL 会指向外部主机）与 ..（路径穿越）。
+		if !strings.HasPrefix(raw, "/api/") {
+			return fmt.Errorf("script_url 相对路径必须以 /api/ 开头")
+		}
+		if strings.Contains(raw, "..") {
+			return fmt.Errorf("script_url 不能包含 ..")
+		}
+		if strings.ContainsAny(raw, "\r\n") {
+			return fmt.Errorf("script_url 包含非法字符")
+		}
+		return nil
 	}
 	u, err := url.Parse(raw)
 	if err != nil {

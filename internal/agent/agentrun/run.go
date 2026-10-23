@@ -113,6 +113,9 @@ const tunnelRetryAfter = 5 * time.Minute
 const (
 	maxPendingReports      = 20
 	maxAgentReportLogBytes = 64 * 1024
+	// platformEnvServerURL 传给脚本的平台地址；安装脚本据此在无法访问外网时
+	// 从平台自身下载所需二进制（http 即可，兼容不支持 TLS 1.2 的老系统）。
+	platformEnvServerURL = "UPGRADE_AGENT_SERVER_URL"
 )
 
 // New 创建 Agent
@@ -125,6 +128,10 @@ func New(cfg Config) *Agent {
 		cfg.DefaultServerURL = cfg.ServerURL
 	}
 	cfg.DefaultServerURL = strings.TrimRight(cfg.DefaultServerURL, "/")
+	// 把当前服务端地址导出为环境变量，随子进程（安装脚本/命令任务）继承。
+	// 供脚本在无法访问外网时改用平台自身提供的下载地址，例如 Windows
+	// 2008 R2 的 PowerShell 不支持 TLS 1.2，可用 http://<平台>/api/external/binary/...
+	os.Setenv(platformEnvServerURL, cfg.ServerURL)
 	if cfg.Version == "" {
 		cfg.Version = "0.1.0"
 	}
@@ -898,6 +905,8 @@ func (a *Agent) applyServerURL(raw string) bool {
 		return false
 	}
 	log.Printf("🔗 切换服务端地址: %s -> %s", a.cfg.ServerURL, next)
+	// 同步给子进程环境变量，脚本里取到的始终是当前可用地址。
+	os.Setenv(platformEnvServerURL, next)
 	from := a.cfg.ServerURL
 	reason := "服务端下发连接地址覆盖"
 	if strings.TrimSpace(raw) == "" {
