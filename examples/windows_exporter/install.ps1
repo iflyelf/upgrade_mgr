@@ -224,6 +224,16 @@ function Stop-ServiceIfRunning {
 $PlatformURL = $env:UPGRADE_AGENT_SERVER_URL
 if ($env:WINDOWS_EXPORTER_PLATFORM_URL) { $PlatformURL = $env:WINDOWS_EXPORTER_PLATFORM_URL }
 
+function Test-DownloadedFile([string]$Path) {
+    if (-not (Test-Path $Path)) { return $false }
+    $len = (Get-Item $Path).Length
+    if ($len -lt 1048576) {
+        Remove-Item -Force $Path -ErrorAction SilentlyContinue
+        return $false
+    }
+    return $true
+}
+
 function Download-Exporter([string]$OutFile) {
     if ($BinaryPath) {
         if (-not (Test-Path $BinaryPath)) {
@@ -231,60 +241,65 @@ function Download-Exporter([string]$OutFile) {
         }
         Write-Step "使用本地安装包 $BinaryPath"
         Copy-Item -Force $BinaryPath $OutFile
-        $len0 = (Get-Item $OutFile).Length
-        if ($len0 -lt 1048576) {
-            Fail "本地安装包过小（$len0 字节），可能不是 windows_exporter.exe: $BinaryPath" 1
+        if (-not (Test-DownloadedFile $OutFile)) {
+            Fail "本地安装包过小或不可读，可能不是 windows_exporter.exe: $BinaryPath" 1
         }
         return $OutFile
     }
+
     if ($BinaryUrl) {
-        # 直接使用完整地址（内网 HTTP 镜像/制品地址），不再拼代理前缀。
-        $url = $BinaryUrl
+        $primary = $BinaryUrl
     } elseif ($script:BaseUrl) {
-        $url = "$($script:BaseUrl)/windows_exporter-$($script:ResolvedArch).exe"
+        $primary = "$($script:BaseUrl)/windows_exporter-$($script:ResolvedArch).exe"
     } else {
         $base = "https://github.com/iflyelf/windows_exporter/releases/download/$Version/windows_exporter-$($script:ResolvedArch).exe"
-        $url = "$ProxyPrefix$base"
+        $primary = "$ProxyPrefix$base"
     }
-    Write-Step "下载 $url"
-    if (Test-Path $OutFile) { Remove-Item -Force $OutFile -ErrorAction SilentlyContinue }
-    try {
-        $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add('User-Agent', 'upgrade-agent/windows_exporter-installer')
-        $wc.DownloadFile($url, $OutFile)
-    } catch {
-        $first = $_.Exception.Message
-        # 回退：从平台自身下载（平台代缓存 GitHub 文件，可用 http，绕开 TLS 1.2 限制）。
-        if ($PlatformURL -and -not $BinaryUrl) {
-            $fallback = $PlatformURL.TrimEnd('/') + "/api/external/binary/windows-exporter-" +
-                        $script:ResolvedArch
-            Write-Warn "直连下载失败（$first），改用平台地址 $fallback"
-            try {
-                $wc2 = New-Object System.Net.WebClient
-                $wc2.Headers.Add('User-Agent', 'upgrade-agent/windows_exporter-installer')
-                $wc2.DownloadFile($fallback, $OutFile)
-                return $OutFile
-            } catch {
-                $first = "$first；平台下载也失败：$($_.Exception.Message)"
+    $platform = ''
+    if ($PlatformURL -and -not $BinaryUrl) {
+        $platform = $PlatformURL.TrimEnd('/') + "/api/external/binary/windows-exporter-" + $script:ResolvedArch
+    }
+
+    # 组装候选地址：不支持 TLS 1.2 时优先平台（平台可预上传离线文件，且可用 HTTP）。
+    $attempts = @()
+    if ($BinaryUrl) {
+        $attempts += @{ Label = '指定地址'; Url = $primary }
+    } else {
+        if ($platform -and -not $tls12Supported) {
+            $attempts += @{ Label = '平台离线缓存'; Url = $platform }
+        }
+        $attempts += @{ Label = '直连/代理'; Url = $primary }
+        if ($platform) {
+            $hasPlatform = $false
+            foreach ($a in $attempts) { if ($a.Url -eq $platform) { $hasPlatform = $true } }
+            if (-not $hasPlatform) { $attempts += @{ Label = '平台离线缓存'; Url = $platform } }
+        }
+    }
+
+    $errors = @()
+    foreach ($a in $attempts) {
+        Write-Step "下载（$($a.Label)）$($a.Url)"
+        if (Test-Path $OutFile) { Remove-Item -Force $OutFile -ErrorAction SilentlyContinue }
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add('User-Agent', 'upgrade-agent/windows_exporter-installer')
+            $wc.DownloadFile($a.Url, $OutFile)
+            if (-not (Test-DownloadedFile $OutFile)) {
+                throw '下载文件不存在或过小（可能是错误页面）'
             }
+            return $OutFile
+        } catch {
+            $errors += ("{0}: {1}" -f $a.Label, $_.Exception.Message)
+            Write-Warn "$($a.Label) 失败：$($_.Exception.Message)"
         }
-        $msg = "下载失败：$first"
-        if (-not $tls12Supported) {
-            $msg += "`n该系统的 .NET/PowerShell 不支持 TLS 1.2（Windows Server 2008 R2 常见），" +
-                    "且未能从平台地址获取安装包。" +
-                    "请确认平台可访问 GitHub，或由平台下发 exe 后用 -BinaryPath <本地路径> 安装。"
-        } else {
-            $msg += "`n请确认目标机能访问 platform / proxy.xiaonuo.live / GitHub，并检查网络与代理设置。"
-        }
-        Fail $msg 1
     }
-    if (-not (Test-Path $OutFile)) { Fail '下载后未找到文件' 1 }
-    $len = (Get-Item $OutFile).Length
-    if ($len -lt 1048576) {
-        Remove-Item -Force $OutFile -ErrorAction SilentlyContinue
-        Fail "下载文件过小（$len 字节），可能是错误页面或代理拦截；请检查 $url" 1
-    }
-    return $OutFile
+
+    Remove-Item -Force $OutFile -ErrorAction SilentlyContinue
+    $msg = "下载失败：`n" + ($errors -join "`n")
+    $msg += "`n请在控制台「外部文件」为 windows-exporter-$($script:ResolvedArch) 上传离线 exe" +
+            "（上传后平台直接返回本地文件，无需平台出网），" +
+            "或改用 -BinaryPath 指定本地文件 / -BinaryUrl 指定内网 HTTP 地址。"
+    Fail $msg 1
 }
 
 function Write-DefaultConfig {

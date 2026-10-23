@@ -74,7 +74,8 @@ type ServerConfig struct {
 	//     windows-exporter-install.ps1: script:https://.../install.ps1
 	ExternalBinaries map[string]string `yaml:"external_binaries"`
 	// ExternalBinaryHosts 允许代下载的上游域名白名单（逗号分隔，可含端口）。
-	// 留空时使用内置默认（github.com / raw.githubusercontent.com / proxy.xiaonuo.live），
+	// 留空时使用内置默认（github.com / raw.githubusercontent.com / proxy.xiaonuo.live /
+	// release-assets.githubusercontent.com 等 GitHub 资产重定向域名），
 	// 防止配置被改成内网地址形成 SSRF。
 	ExternalBinaryHosts []string `yaml:"external_binary_hosts"`
 	// ExternalBinaryTTL 缓存有效期（如 24h）；<=0 使用默认 24h。

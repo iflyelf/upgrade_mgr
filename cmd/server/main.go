@@ -185,6 +185,11 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RefreshExternalBinary(sc))))
 	mux.HandleFunc("POST /api/external/binaries/refresh-all",
 		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RefreshAllExternalBinaries(sc))))
+	// 离线文件上传（平台无法出网时使用；优先于上游缓存）
+	mux.HandleFunc("POST /api/external/binaries/{name}/upload",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UploadExternalBinary(sc))))
+	mux.HandleFunc("DELETE /api/external/binaries/{name}/upload",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DeleteExternalBinaryUpload(sc))))
 
 	// 组件管理
 	mux.HandleFunc("GET /api/components", middleware.RequireAuth(auth, handler.ComponentList(sc)))

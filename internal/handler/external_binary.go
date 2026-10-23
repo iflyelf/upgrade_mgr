@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,11 +32,7 @@ var externalBinaryClient = &http.Client{Timeout: 10 * time.Minute}
 // 运行期以 server.external_binaries 配置（配置文件或设置页）为准，修改后立即生效，
 // 无需重启：Handler 每次请求都从 s.Settings 快照读取。
 func defaultExternalBinaries() map[string]string {
-	return map[string]string{
-		"windows-exporter-amd64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64.exe",
-		"windows-exporter-arm64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64.exe",
-		"windows-exporter-install.ps1": "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
-	}
+	return extbin.DefaultBinaries()
 }
 
 // effectiveExternalBinaries 返回当前生效的白名单。
@@ -138,15 +135,29 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		if !asset.Script {
 			fileName += ".exe"
 		}
-		target := filepath.Join(cacheDir, fileName)
-		if err := safepath.EnsureWithin(baseDir, target); err != nil {
+		cacheTarget := filepath.Join(cacheDir, fileName)
+		if err := safepath.EnsureWithin(baseDir, cacheTarget); err != nil {
 			http.NotFound(w, r)
 			return
 		}
+		// 管理员上传的离线文件优先：平台无需出网即可提供老系统所需的 exe/脚本。
+		localTarget := externalBinaryLocalPath(baseDir, *asset)
+		if err := safepath.EnsureWithin(baseDir, localTarget); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		target := cacheTarget
+		local := false
+		if info, statErr := os.Stat(localTarget); statErr == nil && !info.IsDir() && info.Size() > 0 {
+			target = localTarget
+			local = true
+		}
 
 		ttl := effectiveExternalTTL(cfg)
-		cached := freshFile(target, ttl)
-		if !cached {
+		cached := local || freshFile(target, ttl)
+		if local {
+			metrics.ExternalBinaryRequests.WithLabelValues(name, "local").Inc()
+		} else if !cached {
 			// 同一文件并发请求只下载一次：锁只覆盖下载阶段，拿到后立即释放，
 			// 后续 ServeContent 流式输出不持锁（否则大文件会阻塞同文件的其它请求）。
 			if fetchErr := downloadWithLock(r.Context(), target, *asset,
@@ -221,6 +232,36 @@ func downloadWithLock(ctx context.Context, target string, asset extbin.Entry,
 // hosts 是允许的上游域名白名单；下载前同时校验域名与目标 IP（拒绝内网），
 // 防止这项能力被当作 SSRF 跳板。
 func fetchExternalBinary(ctx context.Context, source, target string, script bool, hosts []string, rule extbin.AllowRule) error {
+	err := fetchExternalBinaryOnce(ctx, source, target, script, hosts, rule)
+	if err == nil {
+		return nil
+	}
+	// 国内网络兜底：GitHub/raw 直连失败时，自动经 proxy.xiaonuo.live 重试一次。
+	alt := proxyFallbackURL(source)
+	if alt == "" {
+		return err
+	}
+	if altErr := fetchExternalBinaryOnce(ctx, alt, target, script, hosts, rule); altErr != nil {
+		return fmt.Errorf("%v；经 proxy.xiaonuo.live 重试仍失败: %v", err, altErr)
+	}
+	return nil
+}
+
+// proxyFallbackURL 为 GitHub/raw 地址生成代理回退地址。
+func proxyFallbackURL(source string) string {
+	u, err := neturl.Parse(source)
+	if err != nil {
+		return ""
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "github.com", "raw.githubusercontent.com":
+		return "https://proxy.xiaonuo.live/?url=" + u.String()
+	default:
+		return ""
+	}
+}
+
+func fetchExternalBinaryOnce(ctx context.Context, source, target string, script bool, hosts []string, rule extbin.AllowRule) error {
 	// 域名白名单 + 内网策略：页面「测试下载」使用同一函数，保证测通即可下载。
 	if err := extbin.CheckHost(source, hosts, rule); err != nil {
 		return err
