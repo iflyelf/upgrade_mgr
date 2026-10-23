@@ -96,7 +96,7 @@ export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
 > - 控制台的主机/组件/制品/任务页顶部都有「📘 快速上手」，可在 Linux / Windows 之间切换；下列命令与页面一致。
 > - `<控制台>`：实际访问地址，如 http://10.0.88.88:8090 或 https://upgrade.example.com。
 > - `<令牌>`：在「主机 → 接入主机 → 生成接入命令」生成的一次性注册令牌（默认 15 分钟有效）。
-> - Windows 主机需先把 upgrade-agent-windows-{amd64,arm64}.zip 解压到控制台 dist（Docker 需挂载），否则下载会 404。
+> - Windows 主机需先把 upgrade-agent-windows-{amd64,arm64}.exe 放到控制台 dist（Release 同时提供 .zip；Docker 需挂载），否则下载会 404。
 
 ### Linux（systemd / SysV）
 
@@ -228,7 +228,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 > - The Hosts/Components/Artifacts/Tasks pages include a “Quick Start” card with Linux/Windows examples; the commands below match the UI.
 > - `<Console>`: reachable URL, e.g. http://10.0.88.88:8090 or https://upgrade.example.com.
 > - `<Token>`: one-time enrollment token from Hosts → Enroll host → Generate command (15-minute TTL).
-> - For Windows hosts, extract upgrade-agent-windows-{amd64,arm64}.zip into the console dist directory (mount it in Docker), otherwise downloads return 404.
+> - For Windows hosts, place upgrade-agent-windows-{amd64,arm64}.exe into the console dist directory (a .zip is also published; mount it in Docker), otherwise downloads return 404.
 
 ### Linux (systemd / SysV)
 
@@ -359,46 +359,51 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 ## 部署方式
 
-> 下载均通过 `https://down.xiaonuo.live?url=` 代理加速，`wget` 支持断点续传(`-c`)。
+> 下载均通过 `https://proxy.xiaonuo.live/?url=` 代理加速，`wget` 支持断点续传(`-c`)。
 > Linux 按需把 `amd64` 换成 `arm64` 或 `arm`；CentOS 6 请使用 `*-legacy` 版本。
-> 接入 **Windows 主机**（Server 2008 R2 ~ Windows 11）时，还要把
-> `upgrade-agent-windows-amd64.zip`（或 `arm64`）解压到控制台的 `dist` 目录，否则下载 404。
+> 接入 **Windows 主机**（Server 2008 R2 ~ Windows 11）时，把
+> `upgrade-agent-windows-amd64.exe`（或 `arm64`）放到控制台的 `dist` 目录，否则下载 404。
+> Release 目前同时提供原始 `.exe` 与 `.zip`（旧版本可能只有 zip）。
 >
 > **Windows Agent 是否包含在 Release 里？** 包含。CI 的 `agent-windows` 作业会构建
-> `upgrade-agent-windows-{amd64,arm64}.exe` 并打包为 `.zip`，随 `latest`/版本 Release 一起发布；
+> `upgrade-agent-windows-{amd64,arm64}.exe`，并同时发布 `.exe` 与 `.zip`；
 > 但 **Docker 镜像只内置 Linux 当前架构**，接 Windows 主机需按下文把 `dist` 挂进容器。
 
-### 方式一：systemd（推荐，直接跑在宿主机）
+### 方式一：systemd 直接部署（Linux 宿主机，推荐）
 
 > **本方式的下载、目录布局与 systemd 单元没有变化**；已有部署升级只需替换二进制并
 > `systemctl restart upgrade-mgr`。下面补充了新增能力的**可选配置**（不配置即使用默认值）。
-> 首次启动会自动应用迁移 020–027（组织/多租户/审计），旧库无需手工执行 SQL。
+> 首次启动会自动应用迁移 020–028（组织/多租户/审计），旧库无需手工执行 SQL。
 
 ```bash
 # 1. 下载控制台二进制到 /tmp 并解压
 wget -q -c --no-check-certificate -O /tmp/upgrade-mgr.tar.gz \
-  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-mgr-linux-amd64.tar.gz"
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-mgr-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-mgr.tar.gz -C /tmp
 
 # 1.1 下载 Linux Agent 二进制（供控制台生成一键安装命令时下载）
 wget -q -c --no-check-certificate -O /tmp/upgrade-agent.tar.gz \
-  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-agent.tar.gz -C /tmp
 
-# 1.2 下载 Windows Agent 二进制（Windows 主机接入必需，缺了会 404）
-wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.zip \
-  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
-unzip -o /tmp/upgrade-agent-windows-amd64.zip -d /tmp
+# 1.2 【可选】准备 Windows Agent（仅接 Windows 主机时需要）
+#     Release 直接提供 .exe，下载后放入 dist 即可，无需 unzip。
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.exe \
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.exe"
+
+# 旧 Release 只有 .zip 时，可改用：
+# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.zip \
+#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
+# unzip -o /tmp/upgrade-agent-windows-amd64.zip -d /tmp
 
 # 可选：按需补充其他平台/架构（Windows on ARM、Linux arm64、CentOS 6 legacy）
-# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-arm64.zip \
-#   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-arm64.zip"
-# unzip -o /tmp/upgrade-agent-windows-arm64.zip -d /tmp
+# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-arm64.exe \
+#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-arm64.exe"
 # wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-arm64.tar.gz \
-#   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-arm64.tar.gz"
+#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-arm64.tar.gz"
 # tar -xzf /tmp/upgrade-agent-linux-arm64.tar.gz -C /tmp
 # wget -q -c --no-check-certificate -O /tmp/upgrade-agent-legacy.tar.gz \
-#   "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64-legacy.tar.gz"
+#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64-legacy.tar.gz"
 # tar -xzf /tmp/upgrade-agent-legacy.tar.gz -C /tmp
 
 # 2. 替换二进制(mv -f 原子覆盖)
@@ -464,7 +469,7 @@ agent:
 #   service_token: "<FlyIAM 管理员 API 令牌或 SERVICE_TOKEN>"
 EOF
 
-> **迁移与多租户**：首次启动自动应用 001–027。组织/团队/角色/审计新增
+> **迁移与多租户**：首次启动自动应用 001–028。组织/团队/角色/审计新增
 > `tenant_id`，历史数据默认为租户 `1`，单租户部署无需额外操作。
 >
 > **FlyIAM 组织树同步前置条件**：FlyIAM 需包含
@@ -477,7 +482,7 @@ EOF
 
 # 5. 下载 systemd 单元到 /tmp 再替换
 wget -q -c --no-check-certificate -O /tmp/upgrade-mgr.service \
-  "https://down.xiaonuo.live?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/deploy/systemd/upgrade-mgr.service"
+  "https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/deploy/systemd/upgrade-mgr.service"
 mv -f /tmp/upgrade-mgr.service /etc/systemd/system/upgrade-mgr.service
 
 # 6. 启动服务
@@ -489,11 +494,11 @@ systemctl status upgrade-mgr
 # 访问 http://your-server-ip:8090
 ```
 
-> `unzip` 不可用时先安装：`yum install -y unzip` / `apt install -y unzip`。
+> 只有使用旧版 `.zip` 时才需要 `unzip`（`yum install -y unzip` / `apt install -y unzip`）；推荐直接用 `.exe`。
 > 也可以只下载当前要接入的平台：只接 Linux 主机就不必放 Windows 的 `.exe`，反之亦然。
 > Docker 镜像已内置 linux/amd64 的 Agent，Windows Agent 需按下文单独放入 `dist` 目录。
 
-#### Windows 目标机接入（同属 systemd 部署方式）
+#### Windows 目标机接入（Agent 以 Windows 服务运行）
 
 1. 控制台「主机」页 →「接入主机」→ 操作系统选 **Windows** → 选架构（绝大多数为 `amd64`）→
    生成接入命令；
@@ -571,7 +576,7 @@ mkdir -p upgrade-mgr && cd upgrade-mgr
 
 # 2. 下载 docker-compose.yml
 wget -q -c --no-check-certificate -O /tmp/docker-compose.yml \
-  "https://down.xiaonuo.live?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/deploy/docker/docker-compose.yml"
+  "https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/deploy/docker/docker-compose.yml"
 mv -f /tmp/docker-compose.yml ./docker-compose.yml
 
 # 3. 创建配置文件（参考上面 systemd 方式）
@@ -584,9 +589,12 @@ EOF
 #    镜像内置的只有 Linux 当前架构；要接 Windows 主机必须挂载 dist 目录，
 #    并把文件命名为 upgrade-agent-windows-amd64.exe。
 mkdir -p dist
-wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.zip \
-  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
-unzip -o /tmp/upgrade-agent-windows-amd64.zip -d dist
+wget -q -c --no-check-certificate -O dist/upgrade-agent-windows-amd64.exe \
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.exe"
+# 旧 Release 只有 .zip 时：
+# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.zip \
+#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
+# unzip -o /tmp/upgrade-agent-windows-amd64.zip -d dist
 
 # 5. 在 docker-compose.yml 中放开 dist 挂载（见下方说明）
 #      volumes:
@@ -759,11 +767,11 @@ powershell -ExecutionPolicy Bypass -File scripts\windows_runner_setup.ps1 `
 | 控制台二进制 | `upgrade-mgr-linux-{amd64,arm64,arm}.tar.gz` |
 | Agent 二进制 | `upgrade-agent-linux-{amd64,arm64,arm}.tar.gz` |
 | Agent Legacy（CentOS 6） | `upgrade-agent-linux-{amd64,386,arm64}-legacy.tar.gz` |
-| Agent Windows | `upgrade-agent-windows-{amd64,arm64}.zip` |
+| Agent Windows | `upgrade-agent-windows-{amd64,arm64}.exe`（同时提供 `.zip`） |
 | 华为云 SWR 镜像 | `swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest` |
 | DockerHub 镜像（可选） | `iflyelf/upgrade-mgr:latest` |
 
-二进制发布到 GitHub Release 的 `latest` 标签，下载统一走 `https://down.xiaonuo.live?url=` 加速。
+二进制发布到 GitHub Release 的 `latest` 标签，下载统一走 `https://proxy.xiaonuo.live/?url=` 加速。
 
 镜像凭据通过 GitHub Secrets 注入，**不要写入仓库**：
 
@@ -992,10 +1000,10 @@ server {
 # 方式1: 使用控制台生成的一键命令（推荐）
 # 登录控制台 → 设置页 → Agent 注册令牌 → 复制安装命令 → 目标机器执行
 
-# 方式2: 手动安装（下载均通过 down.xiaonuo.live 加速）
+# 方式2: 手动安装（下载均通过 proxy.xiaonuo.live 加速）
 # 按需把 amd64 换成 arm64 / arm；CentOS 6 等老内核请使用 *-legacy 包
 wget -q -c --no-check-certificate -O /tmp/upgrade-agent.tar.gz \
-  "https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-agent.tar.gz -C /tmp
 chmod +x /tmp/upgrade-agent-linux-amd64
 # 无 Nginx 直连时把 --server 换成 http://<服务器IP>:8090
@@ -1013,19 +1021,18 @@ status upgrade-agent            # upstart
 # 在管理员 PowerShell 中执行；Server 2008 R2 的 PowerShell 2.0 可用
 $dir = "$env:TEMP\upgrade-agent-install"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-(New-Object System.Net.WebClient).DownloadFile('https://down.xiaonuo.live?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip', "$dir\agent.zip")
+$exe = Join-Path $dir 'upgrade-agent-windows-amd64.exe'
+$url = 'https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.exe'
+(New-Object System.Net.WebClient).DownloadFile($url, $exe)
 
-# PowerShell 5+：Expand-Archive -Path "$dir\agent.zip" -DestinationPath $dir -Force
-# PowerShell 2.0（2008 R2）没有 Expand-Archive，用 Shell.Application 解压：
-$shell = New-Object -ComObject Shell.Application
-$shell.Namespace($dir).CopyHere($shell.Namespace("$dir\agent.zip").Items())
-
-& "$dir\upgrade-agent-windows-amd64.exe" install --server https://upgrade.example.com --enroll-token <token>
+& $exe install --server https://upgrade.example.com --enroll-token <token>
 Get-Service upgrade-agent
 ```
 
 > 更简单的方式是在控制台「接入主机」选择 Windows 后复制一键命令（走
 > `/api/agent/binary/windows-amd64`，无需手工解压）。
+> 若只有旧 Release 的 `.zip`：PowerShell 5+ 用 `Expand-Archive`；PowerShell 2.0
+> 用 `Shell.Application` 解压后再执行 `upgrade-agent-windows-amd64.exe`。
 > Windows 的默认安装路径、服务名、卸载方式见上文「Windows 目标机接入」。
 
 > **一键安装说明**：控制台生成的安装命令从 `server.agent_binary_dir`（默认 `./dist`）下载
@@ -1346,8 +1353,7 @@ https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrad
 可直接打开验证：
 <https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh>
 
-> `proxy.xiaonuo.live` 与上文的 `down.xiaonuo.live` 都是下载代理，两个地址均可
-> 代理 GitHub 文件；脚本示例统一使用 `proxy.xiaonuo.live`。
+> 下载统一使用 `proxy.xiaonuo.live`；如代理不可用，可换用内部镜像或直连 GitHub。
 
 点“填入脚本安装示例”后，高级配置 JSON 的完整内容如下，可直接参考修改：
 
@@ -2155,7 +2161,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - 自升级在 Windows 上改为「旧 exe 改名 `.old` → 新 exe 就位 → exit 75」，由 SCM 恢复动作重启，启动时清理 `.old`；备份目录改用 `agentpath.BackupDir()`，Windows 跳过 POSIX 权限位检查。
 - 服务端 `agentupdate.Target` 增加 `os`，新增 `ResolveOS`/`ChooseOS`/`parseBinaryName`；下发按 `hosts.os_family` 选择平台二进制；`/api/agent/binary/{name}` 支持 `windows-{amd64,arm64}`（`.exe`）。
 - 接入命令支持 `?os=windows&arch=amd64`，生成 PowerShell 2.0 兼容命令（`System.Net.WebClient`）；前端新增操作系统选择，切换时联动可用架构。
-- 新增 `build/agent-windows.mod`（Go 1.20 + `x/sys v0.18.0`）、Makefile `agent-windows` / `test-agent-windows`、CI Windows 作业与 `.zip` 发布产物。
+- 新增 `build/agent-windows.mod`（Go 1.20 + `x/sys v0.18.0`）、Makefile `agent-windows` / `test-agent-windows`、CI Windows 作业与 `.exe`/`.zip` 发布产物。
 
 ### 2026-10-22 执行命令/脚本任务
 
