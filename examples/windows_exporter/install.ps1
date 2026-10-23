@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     windows_exporter 单文件安装/更新/卸载脚本（可直接作为平台制品或 script_url）。
 

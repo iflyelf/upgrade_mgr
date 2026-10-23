@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -23,6 +24,9 @@ import (
 
 // externalBinaryMaxSize 单个文件上限，防止异常响应把磁盘写满。
 const externalBinaryMaxSize = 200 << 20
+
+// utf8BOM UTF-8 BOM：PowerShell 2.0（Server 2008 R2）据此按 UTF-8 解码 .ps1。
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // externalBinaryClient 下载外部文件使用的客户端。
 var externalBinaryClient = &http.Client{Timeout: 10 * time.Minute}
@@ -211,8 +215,48 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", "attachment; filename="+fileName)
+
+		// PowerShell 脚本必须带 UTF-8 BOM 再下发：
+		// Windows Server 2008 R2 的 PowerShell 2.0 对无 BOM 的 .ps1 按系统 ANSI(GBK) 解码，
+		// 中文注释/字符串会导致语法错误（UnexpectedToken）。这里在服务端统一补齐，
+		// 浏览器、cmd、任务示例直接 & 下载文件等所有路径都能受益。
+		// 只处理 .ps1/.psm1（BOM 会破坏 .sh/.py/.cmd）；大小在上传上限内，避免把大文件读进内存。
+		if asset.Script && needsPowerShellBOM(*asset) && info.Size() <= externalBinaryScriptMaxSize {
+			data, readErr := io.ReadAll(io.LimitReader(f, externalBinaryScriptMaxSize+1))
+			if readErr == nil {
+				data = bytes.TrimPrefix(data, utf8BOM)
+				body := make([]byte, 0, len(data)+len(utf8BOM))
+				body = append(body, utf8BOM...)
+				body = append(body, data...)
+				http.ServeContent(w, r, fileName, info.ModTime(), bytes.NewReader(body))
+				return
+			}
+			log.Printf("⚠️ 读取脚本失败，按原样下发 %s: %v", name, readErr)
+			if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
+				http.Error(w, "read script failed", http.StatusInternalServerError)
+				return
+			}
+		}
 		http.ServeContent(w, r, fileName, info.ModTime(), f)
 	}
+}
+
+// needsPowerShellBOM 判断脚本是否是 PowerShell（.ps1/.psm1）。
+//
+// 只给 PowerShell 脚本补 BOM：BOM 会破坏 Shell/Python 脚本和 .cmd/.bat。
+// 先看白名单名称（客户端访问名），再看上游 URL 路径，兼容 name 不含扩展名的配置。
+func needsPowerShellBOM(asset extbin.Entry) bool {
+	for _, candidate := range []string{asset.Name, asset.URL} {
+		path := candidate
+		if u, err := neturl.Parse(candidate); err == nil && u.Path != "" {
+			path = u.Path
+		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".ps1", ".psm1":
+			return true
+		}
+	}
+	return false
 }
 
 // fileExists 判断文件存在且非目录/非空。
@@ -360,7 +404,12 @@ func validateExternalContent(path string, script bool) error {
 	if n == 0 {
 		return fmt.Errorf("下载内容为空")
 	}
-	sample := strings.TrimSpace(strings.ToLower(string(head[:n])))
+	// 带 BOM 的脚本也要能识别 HTML 错误页（BOM 不是空白字符）。
+	head = bytes.TrimPrefix(head[:n], utf8BOM)
+	if len(head) == 0 {
+		return fmt.Errorf("下载内容为空")
+	}
+	sample := strings.TrimSpace(strings.ToLower(string(head)))
 	if script {
 		for _, prefix := range []string{"<!doctype", "<html", "<head", "<body", "<?xml"} {
 			if strings.HasPrefix(sample, prefix) {

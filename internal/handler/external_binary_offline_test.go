@@ -161,3 +161,98 @@ func TestProxyFallbackURL(t *testing.T) {
 		t.Fatalf("非 GitHub 不应回退: %s", got)
 	}
 }
+
+// TestExternalBinaryScriptServedWithBOM 脚本下载必须自带 UTF-8 BOM。
+//
+// Windows PowerShell 2.0 对无 BOM 的 .ps1 按系统 ANSI(GBK) 解码，含中文会报
+// UnexpectedToken；平台/浏览器/任务示例直接下载时都应拿到 BOM 版本。
+func TestExternalBinaryScriptServedWithBOM(t *testing.T) {
+	db, _ := setupHostDB(t)
+	dir := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Server.AgentBinaryDir = dir
+	cfg.Server.ExternalBinaries = map[string]string{
+		"install-test.ps1": "script:https://raw.githubusercontent.com/example/install.ps1",
+	}
+	sc := &svc.ServiceContext{DB: db, Config: cfg}
+
+	content := []byte("# 中文注释\nWrite-Output 'ok'\n")
+	if rec := uploadMultipart(t, UploadExternalBinary(sc), "install-test.ps1", "install.ps1", content); rec.Code != http.StatusOK {
+		t.Fatalf("上传失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, query := range []string{"", "?local=1"} {
+		req := httptest.NewRequest("GET", "/api/external/binary/install-test.ps1"+query, nil)
+		req.SetPathValue("name", "install-test.ps1")
+		rec := httptest.NewRecorder()
+		ExternalBinaryDownload(sc)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s 下载失败 %d: %s", query, rec.Code, rec.Body.String())
+		}
+		body := rec.Body.Bytes()
+		if !bytes.HasPrefix(body, []byte{0xEF, 0xBB, 0xBF}) {
+			n := len(body)
+			if n > 8 {
+				n = 8
+			}
+			t.Fatalf("%s 下载内容缺少 UTF-8 BOM: %x", query, body[:n])
+		}
+		if !bytes.Equal(body[3:], content) {
+			t.Fatalf("%s 下载内容不符: %q", query, body[3:])
+		}
+	}
+
+	// 已带 BOM 的脚本不能出现双 BOM。
+	withBOM := append([]byte{0xEF, 0xBB, 0xBF}, content...)
+	if rec := uploadMultipart(t, UploadExternalBinary(sc), "install-test.ps1", "install.ps1", withBOM); rec.Code != http.StatusOK {
+		t.Fatalf("上传带 BOM 脚本失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	req := httptest.NewRequest("GET", "/api/external/binary/install-test.ps1?local=1", nil)
+	req.SetPathValue("name", "install-test.ps1")
+	rec := httptest.NewRecorder()
+	ExternalBinaryDownload(sc)(rec, req)
+	body := rec.Body.Bytes()
+	if len(body) < 6 || !bytes.Equal(body[:3], []byte{0xEF, 0xBB, 0xBF}) ||
+		bytes.Equal(body[3:6], []byte{0xEF, 0xBB, 0xBF}) {
+		t.Fatalf("BOM 处理错误（应恰好一个 BOM）: %x", body[:minInt(9, len(body))])
+	}
+}
+
+// TestExternalBinaryNonPowerShellScriptNoBOM 非 PowerShell 脚本不能补 BOM。
+//
+// .sh / .py / .cmd 带 BOM 会被解释器当成内容（例如 bash 报 ": No such file"），
+// 只有 .ps1/.psm1 需要 BOM。
+func TestExternalBinaryNonPowerShellScriptNoBOM(t *testing.T) {
+	db, _ := setupHostDB(t)
+	dir := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Server.AgentBinaryDir = dir
+	cfg.Server.ExternalBinaries = map[string]string{
+		"install.sh":  "script:https://raw.githubusercontent.com/example/install.sh",
+		"install.bat": "script:https://raw.githubusercontent.com/example/install.bat",
+	}
+	sc := &svc.ServiceContext{DB: db, Config: cfg}
+
+	for _, name := range []string{"install.sh", "install.bat"} {
+		content := []byte("echo hi\n")
+		if rec := uploadMultipart(t, UploadExternalBinary(sc), name, name, content); rec.Code != http.StatusOK {
+			t.Fatalf("%s 上传失败 %d: %s", name, rec.Code, rec.Body.String())
+		}
+		req := httptest.NewRequest("GET", "/api/external/binary/"+name+"?local=1", nil)
+		req.SetPathValue("name", name)
+		rec := httptest.NewRecorder()
+		ExternalBinaryDownload(sc)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s 下载失败 %d", name, rec.Code)
+		}
+		if !bytes.Equal(rec.Body.Bytes(), content) {
+			t.Fatalf("%s 不应添加 BOM: %q", name, rec.Body.Bytes())
+		}
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

@@ -141,3 +141,14 @@ func TestFetchExternalBinaryRejectsInternalHost(t *testing.T) {
 		t.Fatalf("应拒绝内网地址，got %v", err)
 	}
 }
+
+// TestValidateExternalContentWithBOM 带 BOM 的 HTML 仍应被拒绝。
+func TestValidateExternalContentWithBOM(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bad.ps1")
+	if err := os.WriteFile(p, []byte("\xEF\xBB\xBF<!DOCTYPE html><html></html>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateExternalContent(p, true); err == nil {
+		t.Fatal("带 BOM 的 HTML 应被拒绝")
+	}
+}
