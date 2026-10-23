@@ -17,6 +17,7 @@
 - IP 段表达式解析：`10.1.255.24-26,10.1.255.38,10.1.255.0/24,10.1.26.5-10.1.26.7`（含排除、展开上限）
 - 直接 exec 命令执行器（无 shell，防注入）；HMAC 指令签名；sd_notify 僵死检测（供 Agent 保活）
 - 三主题（🌞暖沙米/🌊冷蓝/🌙暗黑）+ Mac 圆角 + H5 自适应，前端 `go:embed` 内嵌单二进制
+- **Linux / Windows 双示例快速上手**：页面内可切换系统，覆盖主机接入 → 组件 → 制品 → 任务
 
 **P2 任务与灰度**
 - 组件/制品完整 CRUD（含 md5/sha256/ELF 校验、Range 下载）、任务模型（IP 段展开+分组过滤+批次划分）、长轮询原子取件（FOR UPDATE SKIP LOCKED）+ HMAC 签名、维护租约、ack/stage/report 闭环、**端到端单机升级验证通过**、组件/制品/任务前端页
@@ -37,15 +38,16 @@
 - **主机管理**：服务端分页（几万台主机不一次性加载）、编辑业务字段、删除主机（未完成任务保护 + Agent 凭据撤销）
 
 **P5 企业级增强**
-- **Prometheus 指标**：`/metrics` 端点暴露关键指标（Agent 在线数/心跳延迟/任务进度/失败率/指令执行时间），支持 Grafana 监控大盘
-- **多租户 RBAC**：数据库增加 tenant_id 列（hosts/components/tasks），租户隔离查询，支持 admin/user/viewer 角色权限控制
+- **Prometheus 指标**：`/metrics` 端点暴露关键指标（Agent 在线数/版本分布/心跳延迟/任务进度/失败率/指令执行时间/外部文件可用性），支持 Grafana 监控大盘
+- **多租户 RBAC**：hosts/components/tasks/roles/teams/service groups/组织架构/审计日志均带 `tenant_id`，
+  租户隔离查询，支持 admin/user/viewer 角色权限控制
 - **分布式编排器**：基于 PostgreSQL advisory lock，多控制台实例安全并行（每轮仅一个副本推进批次，自动故障转移）；单机与多副本共用同一逻辑，不依赖 Consul
 - **制品外部存储**：抽象 Backend 接口，支持本地/S3(MinIO)/阿里云 OSS 可切换，预签名 URL 下载
 
 **P6 数据库自动化**
 - **自动创建**：首次启动自动创建所有表结构，无需手动执行 SQL
 - **版本化迁移**：使用 go:embed 内嵌迁移脚本（001_init, 002_multi_tenant, ...），自动检测并应用未执行的迁移
-- **自动维护**：每日凌晨 2 点自动清理过期数据（7 天过期指令/30 天旧指令/90 天旧任务）、VACUUM ANALYZE、索引重建
+- **自动维护**：每日凌晨 2 点自动清理过期数据（7 天过期指令/30 天旧指令/90 天旧任务/可配置审计保留期）、VACUUM ANALYZE、索引重建
 - **零停机更新**：迁移在事务内执行，失败自动回滚，支持幂等重试
 
 ---
@@ -73,11 +75,160 @@ make build
 # 访问 http://localhost:8090
 ```
 
+> 启动后打开页面，按顶部「📘 快速上手」完成 Linux / Windows 主机接入与首个任务；
+> 也可直接看下方《快速上手（Linux / Windows）》。
+
 启用 Consul 同步（可选，或在设置页配置；`datacenter` 留空自动探测）：
 ```bash
 export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
        CONSUL_TOKEN=xxx CONSUL_SYNC_INTERVAL=5m
 ```
+
+---
+
+## 快速上手（Linux / Windows）
+
+控制台的主机/组件/制品/任务页顶部都有「📘 快速上手」，可在 **Linux / Windows** 之间切换；
+下面是等价的命令行速查版。
+
+> 约定：
+> - `<控制台>`：实际访问地址，如 `http://10.0.88.88:8090` 或 `https://upgrade.example.com`；
+> - `<令牌>`：在「主机 → 接入主机 → 生成接入命令」生成的一次性注册令牌（默认 15 分钟有效）；
+> - Windows 主机需先把 `upgrade-agent-windows-{amd64,arm64}.zip` 解压到控制台 `dist`（Docker 需挂载），
+>   否则 `/api/agent/binary/windows-*` 会 404。
+
+### Linux（systemd / SysV）
+
+**1. 接入主机**
+
+```bash
+# 控制台会生成完整的一键命令；手工执行等价于：
+curl -fsSL -o /tmp/upgrade-agent 'http://<控制台>/api/agent/binary/linux-amd64'
+chmod +x /tmp/upgrade-agent
+sudo /tmp/upgrade-agent install \
+  --server 'http://<控制台>' \
+  --enroll-token '<令牌>'
+
+sudo /tmp/upgrade-agent status     # 查看注册/连接状态
+sudo /tmp/upgrade-agent diagnose   # 诊断到控制台的链路
+```
+
+- 架构按目标机选择：`linux-amd64` / `linux-arm64` / `linux-arm`；CentOS 6 使用 `*-legacy`。
+- 注册为 systemd 服务；无 systemd 自动回退 SysV；失败由 watchdog 兜底拉起。
+- 多入口/隧道场景可传多个地址：`--server 'https://a,http://10.8.0.1:8090'`，Agent 自动 fallback。
+- 「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。
+
+**2. 创建组件（推荐脚本示例）**
+
+组件页顶部「Linux 示例」提供三组：
+
+| 示例 | 用途 |
+|---|---|
+| `node_exporter_script` / `_update` / `_uninstall` | script 模式，`script_url` 指向 `examples/node_exporter/install.sh`，无需上传制品 |
+| `node_exporter_cmd` / `node_exporter_update` / `node_exporter_uninstall` | exec 模式，`script_url + exec_args`（install / update / uninstall -y） |
+| 二进制替换示例 | replace/replace_exec，平台备份旧二进制，服务注册放在 `post_install` 脚本 |
+
+- `install.sh` 支持 `install / update / uninstall / status`；update 会备份旧二进制并在启动失败时自动回滚。
+- 自动适配 systemd（CentOS/RHEL 7+、Rocky、openEuler、Ubuntu 16.04+、Debian 8+、SLES 12+/openSUSE 15+）
+  与 SysV（CentOS 6、Ubuntu 14.04、Debian 7、SLES 11）。
+- 高级 JSON 的 `exec_args / exec_env / exec_timeout / work_dir` 控制脚本执行，
+  例如 `exec_env` 指定 `NODE_EXPORTER_VERSION=1.8.2`。
+- `agent.allow_exec_mode` 默认开启；关闭后脚本/exec 模式与命令任务都会被禁用。
+
+**3. 制品（可选）**
+
+- 脚本示例已填真实 `script_url`，通常可跳过本页。
+- 不想依赖外链：删除 `script_url`，在制品页上传 `examples/node_exporter/install.sh`，
+  版本 `latest`，架构 `all`。
+- 平台不解压 tar.gz；请上传可执行脚本或解压后的二进制。
+- 上传二进制时架构必须与目标机一致（`amd64` / `arm64` / `arm`）。
+
+**4. 创建任务**
+
+- 任务页「Linux 示例」：安装 / 更新 / 卸载组件，点击后自动选中对应组件与版本 `latest`。
+- IP 段支持 `10.1.255.24-26`、`10.1.255.0/24`，多个用逗号分隔；先「预览」再创建。
+- 首次建议：金丝雀首批 1 台、关闭自动推进；确认首批成功后再「推进」。
+- 命令任务：任务类型切到「执行命令/脚本」，解释器留空自动 bash（缺失回退 sh），
+  支持 stdin 与伪终端；命令任务仅管理员可创建/查看。
+
+> 详细参数见下文《node_exporter 安装示例》《执行命令 / 脚本任务》。
+
+### Windows（Server 2008 R2 ~ Windows 11）
+
+**1. 接入主机**
+
+在「主机」页选择 **Windows** 与架构（绝大多数 `amd64`；Windows on ARM 选 `arm64`），
+生成接入命令后，在目标机以**管理员 PowerShell** 执行：
+
+```powershell
+$exe = Join-Path $env:TEMP 'upgrade-agent.exe'
+Remove-Item -Force -ErrorAction SilentlyContinue $exe
+(New-Object System.Net.WebClient).DownloadFile('http://<控制台>/api/agent/binary/windows-amd64', $exe)
+Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制台>','--enroll-token','<令牌>' -Wait -NoNewWindow
+
+& 'C:\Program Files\upgrade-agent\upgrade-agent.exe' status
+& 'C:\Program Files\upgrade-agent\upgrade-agent.exe' diagnose
+```
+
+- 覆盖 Server 2008 R2 / 2012 / 2012 R2 / 2016 / 2019 / 2022 与 Windows 7 / 8.1 / 10 / 11。
+- Server 2008 R2 + PowerShell 2.0 不支持 TLS 1.2 时：页面命令直接从控制台下载 Agent
+  （HTTP 即可），不依赖 GitHub；windows_exporter 安装脚本也可回退平台地址，无需在主机上启用 TLS 1.2。
+- 注册为 Windows 服务 `upgrade-agent`（LocalSystem，失败 5s/10s/30s 自动重启），
+  并安装每分钟运行的计划任务看门狗。
+- 可选 MSI：
+
+  ```powershell
+  msiexec /i upgrade-agent-<版本>-x64.msi SERVERURL=https://<控制台> ENROLLTOKEN=<令牌>
+  ```
+
+- 可选低权限服务账户（需先授予「作为服务登录」）：
+
+  ```powershell
+  upgrade-agent.exe install --server https://<控制台> --enroll-token <令牌> `
+    --service-account 'DOMAIN\svc_upgrade' --service-password '<密码>'
+  ```
+
+- 卸载：`& 'C:\Program Files\upgrade-agent\upgrade-agent.exe' uninstall`
+  或 `msiexec /x upgrade-agent-<版本>-x64.msi`。
+
+**2. 创建组件（Windows 示例）**
+
+组件页顶部「Windows 示例」：
+
+| 示例 | 用途 |
+|---|---|
+| `windows_exporter_script` | 安装 / 覆盖升级，script_url 指向 `examples/windows_exporter/install.ps1` |
+| `windows_exporter_script_update` | 更新：备份旧 exe，启动失败自动回滚 |
+| `windows_exporter_script_uninstall` | 卸载：`uninstall -Yes`，删除服务/防火墙规则/目录 |
+
+- 安装到 `C:\Program Files\windows_exporter`，服务名 `windows_exporter`，端口 `16666`，
+  自动创建防火墙入站规则。
+- textfile 采集目录：`C:\monitor\windows_exporter\textfile_inputs`。
+- `install.ps1` 兼容 PowerShell 2.0（Server 2008 R2 起），支持
+  `install / update / uninstall / status`，以及 `-ServiceAccount` / `-ServicePassword`。
+- Agent 会把 `.ps1` 统一转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。
+- 2008 R2 无法直连 GitHub 时：用控制台「外部文件」代缓存 exe/脚本，
+  或给 `install.ps1` 传 `-BinaryPath` / `-BinaryUrl`。
+- 卸载示例不填 health/version 检查，避免卸载后平台仍尝试启服导致任务必然失败。
+
+**3. 制品（可选）**
+
+- 脚本示例已填 `script_url`，通常可跳过。
+- 不想依赖外链：删除 `script_url`，上传 `examples/windows_exporter/install.ps1`（版本 `latest`，架构 `all`）。
+- 上传 `windows_exporter.exe` 时：OS 选 `windows`，架构选 `amd64` 或 `arm64`，必须与目标机一致。
+- 平台不解压 zip；Server 2008 R2 建议使用控制台代缓存（HTTP）避免 TLS 1.2 问题。
+
+**4. 创建任务**
+
+- 任务页「Windows 示例」：安装 / 更新 / 卸载脚本，自动选中对应组件与版本 `latest`。
+- 解释器保持 `powershell`（新系统也可填 `pwsh`）；`.ps1` 自动加 BOM/CRLF。
+- IP 段规则与 Linux 相同；先预览，首次建议金丝雀 1 台并关闭自动推进。
+- 命令任务（仅管理员）示例：解释器 `powershell`，脚本
+  `Get-Service windows_exporter | Select-Object Status,Name`。
+- Windows 不支持伪终端（TTY）；交互确认改用脚本参数（如 `uninstall -Yes`）或标准输入。
+- 自升级灰度：设置页「Agent → 自动升级灰度比例」按 `agent_id` 稳定哈希放量（5% → 25% → 100%）。
+
+> 详细参数见下文《Windows Agent（Server 2008 R2 ~ Windows 11）》《windows_exporter 安装示例》。
 
 ---
 
