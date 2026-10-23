@@ -414,6 +414,24 @@
   // INSTALL_SCRIPT_URL：node_exporter 安装脚本（经 proxy 代理），组件示例与任务示例共用。
   var INSTALL_SCRIPT_URL = 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh';
 
+  // WINDOWS_INSTALL_SCRIPT_URL：windows_exporter 安装脚本（PowerShell，经 proxy 代理）。
+  // 与 Linux 的 install.sh 对齐：install / update / uninstall / status 四个动作。
+  var WINDOWS_INSTALL_SCRIPT_URL = 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1';
+
+  // windowsInstallScript(action) 生成“先下载 install.ps1 再执行”的 PowerShell 命令脚本。
+  // 兼容 PowerShell 2.0：用 System.Net.WebClient，不用 Invoke-WebRequest。
+  function windowsInstallScript(action) {
+    var args = action === 'uninstall' ? ' uninstall -Yes' : ' ' + action;
+    return [
+      "$ErrorActionPreference = 'Stop'",
+      "$url = '" + WINDOWS_INSTALL_SCRIPT_URL + "'",
+      "$f = Join-Path $env:TEMP 'windows_exporter-install.ps1'",
+      '(New-Object System.Net.WebClient).DownloadFile($url, $f)',
+      '& $f' + args,
+      'exit $LASTEXITCODE'
+    ].join('\n');
+  }
+
   // installScript(action) 生成“先下载 install.sh 再执行指定动作”的脚本。
   // 不使用 `bash <(curl ...)`：某些环境把 -c 字符串交给 /bin/sh（dash）解析，
   // 进程替换 <(...) 是 bash 语法，会报 Syntax error: "(" unexpected。
@@ -548,6 +566,52 @@
         script_url: INSTALL_SCRIPT_URL,
         exec_args: ['uninstall', '-y'],
         exec_timeout: '10m'
+      }
+    },
+    {
+      key: 'windows_exporter_script',
+      label: 'windows_exporter_script（Windows 脚本安装）',
+      desc: 'Windows 专用示例：script_url 指向本仓库 examples/windows_exporter/install.ps1（经 proxy 代理）。Agent 在 Windows 主机上默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行，脚本会从 iflyelf/windows_exporter latest 下载 exe（amd64/arm64），注册 Windows 服务 windows_exporter、创建防火墙规则并写入默认配置。适合 Windows Server 2008 R2 ~ Windows 11；需要 PowerShell 2.0+（系统自带）。',
+      comp: {
+        name: 'windows_exporter_script', display_name: 'Windows Exporter（Win 脚本安装）', deploy_mode: 'script',
+        binary_name: 'windows_exporter',
+        install_path: 'C:\\Program Files\\windows_exporter',
+        service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
+        script_url: WINDOWS_INSTALL_SCRIPT_URL,
+        exec_args: ['install'],
+        exec_timeout: '15m',
+        health_cmd: [['powershell.exe', '-NoProfile', '-Command', "if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]],
+        version_cmd: [['powershell.exe', '-NoProfile', '-Command', "(Get-Item 'C:\\Program Files\\windows_exporter\\windows_exporter.exe').VersionInfo.FileVersion"]]
+      }
+    },
+    {
+      key: 'windows_exporter_script_update',
+      label: 'windows_exporter_script_update（Win 脚本更新，失败自动回滚）',
+      desc: '与 Windows 安装示例同源，只把 exec_args 改成 update：脚本先备份旧 exe 为 windows_exporter.exe.bak，替换后重启服务；启动失败自动回滚旧版本。组件名独立（windows_exporter_script_update），避免与安装组件互相覆盖。',
+      comp: {
+        name: 'windows_exporter_script_update', display_name: 'Windows Exporter（Win 脚本更新）', deploy_mode: 'script',
+        binary_name: 'windows_exporter',
+        install_path: 'C:\\Program Files\\windows_exporter',
+        service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
+        script_url: WINDOWS_INSTALL_SCRIPT_URL,
+        exec_args: ['update'],
+        exec_timeout: '15m',
+        health_cmd: [['powershell.exe', '-NoProfile', '-Command', "if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]],
+        version_cmd: [['powershell.exe', '-NoProfile', '-Command', "(Get-Item 'C:\\Program Files\\windows_exporter\\windows_exporter.exe').VersionInfo.FileVersion"]]
+      }
+    },
+    {
+      key: 'windows_exporter_script_uninstall',
+      label: 'windows_exporter_script_uninstall（Win 脚本卸载，非交互）',
+      desc: 'exec_args 为 uninstall -Yes（-Yes 跳过交互确认，非交互场景必需）。脚本停止并删除 Windows 服务 windows_exporter、防火墙规则与安装目录。卸载后服务已不存在，因此本示例不填 health_cmd / version_cmd，也不填服务名，避免平台在卸载后尝试启服并做健康检查导致任务必然失败。',
+      comp: {
+        name: 'windows_exporter_script_uninstall', display_name: 'Windows Exporter（Win 脚本卸载）', deploy_mode: 'script',
+        binary_name: 'windows_exporter',
+        install_path: 'C:\\Program Files\\windows_exporter',
+        service_name: '', service_mgr: 'auto', enabled: true,
+        script_url: WINDOWS_INSTALL_SCRIPT_URL,
+        exec_args: ['uninstall', '-Yes'],
+        exec_timeout: '15m'
       }
     },
     {
@@ -1338,13 +1402,18 @@
         h('div', { class: 'toolbar' }, [
           h('button', { class: 'btn', onclick: saveComp }, ['保存']),
           h('button', { class: 'btn ghost', onclick: function () { state.editingComp = null; state.err = ''; render(); } }, ['取消']),
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入只执行命令（安装）']) : null,
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_update'); } }, ['填入只执行命令（更新）']) : null,
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_uninstall'); } }, ['填入只执行命令（卸载）']) : null,
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入脚本安装示例']) : null,
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_update'); } }, ['填入脚本更新示例']) : null,
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_uninstall'); } }, ['填入脚本卸载示例']) : null,
-          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['填入二进制替换示例']) : null
+          !c.id ? h('span', { class: 'muted' }, ['Linux：']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['只执行命令（安装）']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_update'); } }, ['只执行命令（更新）']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_uninstall'); } }, ['只执行命令（卸载）']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['脚本安装']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_update'); } }, ['脚本更新']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_uninstall'); } }, ['脚本卸载']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['二进制替换']) : null,
+          !c.id ? h('span', { class: 'muted' }, ['Windows：']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script'); } }, ['脚本安装']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script_update'); } }, ['脚本更新']) : null,
+          !c.id ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script_uninstall'); } }, ['脚本卸载']) : null
         ])
       ]);
     }
@@ -1357,13 +1426,18 @@
           render();
         }
       }, ['新建组件']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['填入示例：只执行命令（安装）']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_update'); } }, ['填入示例：只执行命令（更新）']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_uninstall'); } }, ['填入示例：只执行命令（卸载）']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['填入示例：脚本安装']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_update'); } }, ['填入示例：脚本更新']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_uninstall'); } }, ['填入示例：脚本卸载']) : null,
-      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['填入示例：二进制替换']) : null,
+      isAdmin() ? h('span', { class: 'muted' }, ['Linux：']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec'); } }, ['只执行命令（安装）']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_update'); } }, ['只执行命令（更新）']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_exec_uninstall'); } }, ['只执行命令（卸载）']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script'); } }, ['脚本安装']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_update'); } }, ['脚本更新']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_script_uninstall'); } }, ['脚本卸载']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('node_exporter_binary'); } }, ['二进制替换']) : null,
+      isAdmin() ? h('span', { class: 'muted' }, ['Windows：']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script'); } }, ['脚本安装']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script_update'); } }, ['脚本更新']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script_uninstall'); } }, ['脚本卸载']) : null,
       h('span', { class: 'muted' }, ['共 ' + state.components.length + ' 个组件'])
     ]);
 
@@ -1930,25 +2004,33 @@
 
     // 任务页示例与组件示例对齐：安装 / 更新 / 卸载分别对应组件页的三个 exec 示例。
     // 只填任务名与组件，动作由组件自身的 script_url + exec_args 决定。
+    // 按操作系统区分示例：Linux 用 node_exporter_*，Windows 用 windows_exporter_*。
     var UPGRADE_SAMPLES = {
-      // 依次尝试新示例组件名，最后回退到旧版模板使用的 node_exporter / *_cmd。
-      install: { comps: ['node_exporter_cmd', 'node_exporter_script', 'node_exporter'], name: '安装 node_exporter（示例）' },
-      update: { comps: ['node_exporter_update', 'node_exporter_script_update'], name: '更新 node_exporter（示例）' },
-      uninstall: { comps: ['node_exporter_uninstall', 'node_exporter_script_uninstall'], name: '卸载 node_exporter（示例）' }
+      linux: {
+        // 依次尝试新示例组件名，最后回退到旧版模板使用的 node_exporter / *_cmd。
+        install: { comps: ['node_exporter_cmd', 'node_exporter_script', 'node_exporter'], name: '安装 node_exporter（Linux 示例）' },
+        update: { comps: ['node_exporter_update', 'node_exporter_script_update'], name: '更新 node_exporter（Linux 示例）' },
+        uninstall: { comps: ['node_exporter_uninstall', 'node_exporter_script_uninstall'], name: '卸载 node_exporter（Linux 示例）' }
+      },
+      windows: {
+        install: { comps: ['windows_exporter_script'], name: '安装 windows_exporter（Windows 示例）' },
+        update: { comps: ['windows_exporter_script_update'], name: '更新 windows_exporter（Windows 示例）' },
+        uninstall: { comps: ['windows_exporter_script_uninstall'], name: '卸载 windows_exporter（Windows 示例）' }
+      }
     };
 
-    function fillUpgradeSample(action) {
-      var s = UPGRADE_SAMPLES[action];
+    function fillUpgradeSample(action, osName) {
+      var osKey = osName === 'windows' ? 'windows' : 'linux';
+      var s = UPGRADE_SAMPLES[osKey][action];
       var comp = null;
       for (var i = 0; i < s.comps.length; i++) {
         comp = state.components.filter(function (x) { return x.name === s.comps[i]; })[0];
         if (comp) break;
       }
       if (!comp) {
-        alert('请先到“组件”页点“填入示例：' +
-          (action === 'install' ? '只执行命令（安装）或脚本安装'
-            : action === 'update' ? '只执行命令（更新）或脚本更新' : '只执行命令（卸载）或脚本卸载') +
-          '”并保存');
+        alert(osKey === 'windows'
+          ? '请先到“组件”页点 Windows 的“脚本安装 / 脚本更新 / 脚本卸载”示例并保存（组件名 windows_exporter_script*）'
+          : '请先到“组件”页点 Linux 的“只执行命令”或“脚本安装/更新/卸载”示例并保存（组件名 node_exporter_*）');
         return;
       }
       f.kind = 'upgrade';
@@ -1956,7 +2038,8 @@
       f.component_id = String(comp.id);
       f.version = comp.script_url ? 'latest' : (vers[0] || 'latest');
       f.name = s.name;
-      f.ip_expr = '10.1.255.24-26';
+      // Windows 示例不预填 Linux 风格的 IP 段，避免误选主机网段。
+      f.ip_expr = osKey === 'windows' ? '' : '10.1.255.24-26';
       f.mode = 'canary';
       f.batch_size = '10';
       f.canary_count = '1';
@@ -1973,7 +2056,7 @@
     // install.sh 的 install 动作幂等，已安装时会覆盖升级，首次执行即安装。
     function fillCommandInstallSample() {
       f.kind = 'command';
-      f.name = '安装/更新 node_exporter（示例）';
+      f.name = '安装/更新 node_exporter（Linux 示例）';
       f.ip_expr = '10.1.255.24-26';
       f.script = installScript('install');
       f.interpreter = '/bin/bash';
@@ -1992,7 +2075,7 @@
     // update 会备份旧二进制，启动失败自动回滚。
     function fillCommandUpdateSample() {
       f.kind = 'command';
-      f.name = '更新 node_exporter（示例）';
+      f.name = '更新 node_exporter（Linux 示例）';
       f.ip_expr = '10.1.255.24-26';
       f.script = installScript('update');
       f.interpreter = '/bin/bash';
@@ -2007,13 +2090,33 @@
       render();
     }
 
+    // fillCommandWindowsSample 预填 Windows 安装/更新/卸载示例：
+    // 脚本会下载 examples/windows_exporter/install.ps1 并以参数指定动作。
+    function fillCommandWindowsSample(action) {
+      f.kind = 'command';
+      f.name = (action === 'uninstall' ? '卸载' : action === 'update' ? '更新' : '安装') +
+        ' windows_exporter（Windows 示例）';
+      f.ip_expr = '';
+      f.script = windowsInstallScript(action);
+      f.interpreter = 'powershell.exe';
+      f.stdin = '';
+      f.tty = false;
+      f.timeout = '30m';
+      f.mode = 'count';
+      f.batch_size = '10';
+      f.auto_promote = action === 'uninstall';
+      state.preview = null;
+      state.err = '';
+      render();
+    }
+
     // fillCommandSample 预填“卸载旧监控”示例：
     // 先把 install.sh 下载到临时文件再执行，避免 script(1) 的 -c 字符串
     // 被 /bin/sh 解析而报 `Syntax error: "(" unexpected`（进程替换是 bash 语法）。
     // 卸载确认由平台“标准输入”提供（Y\n），脚本内部用 read 读取，无需 PTY。
     function fillCommandSample() {
       f.kind = 'command';
-      f.name = '卸载旧监控（示例）';
+      f.name = '卸载 node_exporter（Linux 示例）';
       f.ip_expr = '10.1.255.24-26';
       f.script = installScript('uninstall');
       f.interpreter = '/bin/bash';
@@ -2083,15 +2186,26 @@
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn ghost', onclick: doPreview }, ['预览']),
         h('button', { class: 'btn', onclick: doCreate }, ['创建任务']),
+        h('span', { class: 'muted' }, ['Linux：']),
         f.kind === 'command'
-          ? h('button', { class: 'btn ghost', onclick: fillCommandInstallSample }, ['填入示例：安装脚本'])
-          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('install'); } }, ['填入示例：安装组件']),
+          ? h('button', { class: 'btn ghost', onclick: fillCommandInstallSample }, ['安装脚本'])
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('install', 'linux'); } }, ['安装组件']),
         f.kind === 'command'
-          ? h('button', { class: 'btn ghost', onclick: fillCommandUpdateSample }, ['填入示例：更新脚本'])
-          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('update'); } }, ['填入示例：更新组件']),
+          ? h('button', { class: 'btn ghost', onclick: fillCommandUpdateSample }, ['更新脚本'])
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('update', 'linux'); } }, ['更新组件']),
         f.kind === 'command'
-          ? h('button', { class: 'btn ghost', onclick: fillCommandSample }, ['填入示例：卸载旧监控'])
-          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('uninstall'); } }, ['填入示例：卸载组件'])
+          ? h('button', { class: 'btn ghost', onclick: fillCommandSample }, ['卸载脚本'])
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('uninstall', 'linux'); } }, ['卸载组件']),
+        h('span', { class: 'muted' }, ['Windows：']),
+        f.kind === 'command'
+          ? h('button', { class: 'btn ghost', onclick: function () { fillCommandWindowsSample('install'); } }, ['安装脚本'])
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('install', 'windows'); } }, ['安装组件']),
+        f.kind === 'command'
+          ? h('button', { class: 'btn ghost', onclick: function () { fillCommandWindowsSample('update'); } }, ['更新脚本'])
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('update', 'windows'); } }, ['更新组件']),
+        f.kind === 'command'
+          ? h('button', { class: 'btn ghost', onclick: function () { fillCommandWindowsSample('uninstall'); } }, ['卸载脚本'])
+          : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('uninstall', 'windows'); } }, ['卸载组件'])
       ]),
       hint('创建后任务处于 draft 状态，需要在下方列表点“启动”才会开始下发。')
     ]);

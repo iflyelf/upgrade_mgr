@@ -37,23 +37,25 @@ func TestBuildStatusWithOverrideAndSwitch(t *testing.T) {
 	// 注意：state 由 agentrun.saveState 用 Go 默认字段名序列化（ServerURL/AgentID…），
 	// 只有少数字段带 json tag。这里按真实格式构造，避免测试与线上不一致。
 	extra := map[string]any{
-		"ServerURL":          "http://10.8.0.5:8090",
-		"default_server_url": "http://10.0.0.5:8090",
-		"server_urls":        []string{"http://10.0.0.5:8090", "http://10.8.0.5:8090"},
-		"applied_override":   "http://10.8.0.5:8090",
-		"AgentID":            "agent-1",
-		"Token":              "token-1",
-		"Secret":             "secret-1",
-		"StatePath":          path,
-		"exit_ip":            "192.0.2.10",
-		"last_heartbeat":     hb,
-		"crash_count":        2,
-		"pending_reports":    map[string]any{"cmd-1": map[string]any{"status": "failed"}},
-		"last_switch_from":   "http://10.0.0.5:8090",
-		"last_switch_reason": "服务端下发连接地址覆盖",
-		"last_switch_at":     sw,
-		"tls_cert":           "/etc/agent.crt",
-		"tls_key":            "/etc/agent.key",
+		"ServerURL":             "http://10.8.0.5:8090",
+		"default_server_url":    "http://10.0.0.5:8090",
+		"server_urls":           []string{"http://10.0.0.5:8090", "http://10.8.0.5:8090"},
+		"applied_override":      "http://10.8.0.5:8090",
+		"requested_override":    "http://10.8.0.5:8090",
+		"requested_override_at": sw,
+		"AgentID":               "agent-1",
+		"Token":                 "token-1",
+		"Secret":                "secret-1",
+		"StatePath":             path,
+		"exit_ip":               "192.0.2.10",
+		"last_heartbeat":        hb,
+		"crash_count":           2,
+		"pending_reports":       map[string]any{"cmd-1": map[string]any{"status": "failed"}},
+		"last_switch_from":      "http://10.0.0.5:8090",
+		"last_switch_reason":    "服务端下发连接地址覆盖",
+		"last_switch_at":        sw,
+		"tls_cert":              "/etc/agent.crt",
+		"tls_key":               "/etc/agent.key",
 	}
 	data, _ := json.Marshal(extra)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -79,9 +81,15 @@ func TestBuildStatusWithOverrideAndSwitch(t *testing.T) {
 	if !st.TLSEnabled || !st.TLSClientCert {
 		t.Fatalf("TLS 状态错误: %+v", st)
 	}
+	if st.RequestedOverride != "http://10.8.0.5:8090" || !st.OverrideApplied {
+		t.Fatalf("覆盖对比错误: requested=%q applied=%v", st.RequestedOverride, st.OverrideApplied)
+	}
+	if st.RequestedAt == nil {
+		t.Fatal("应记录服务端下发时间")
+	}
 
 	txt := st.FormatText()
-	for _, want := range []string{"当前地址", "默认地址", "备用地址", "最近切换", "原因", "legacy"} {
+	for _, want := range []string{"当前地址", "默认地址", "备用地址", "最近切换", "原因", "legacy", "服务端覆盖", "已生效"} {
 		if !strings.Contains(txt, want) {
 			t.Fatalf("文本缺少 %q:\n%s", want, txt)
 		}
@@ -112,5 +120,25 @@ func TestAddressSourceDefaultAndOverride(t *testing.T) {
 	}
 	if got := addressSource("", "http://a", nil, ""); got != "" {
 		t.Fatalf("空地址应返回空: %q", got)
+	}
+}
+
+// TestOverrideApplied 覆盖对比：一致、仅 IP、不一致、未下发。
+func TestOverrideApplied(t *testing.T) {
+	cases := []struct {
+		cur, req string
+		want     bool
+	}{
+		{"http://10.8.0.5:8090", "http://10.8.0.5:8090", true},
+		{"http://10.8.0.5:8090", "http://10.8.0.5:8090/", true},
+		{"http://10.8.0.5:8090", "10.8.0.5", false},
+		{"http://10.8.0.5:8090", "http://10.9.0.5:8090", false},
+		{"http://10.0.0.5:8090", "", true},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		if got := overrideApplied(c.cur, c.req); got != c.want {
+			t.Errorf("overrideApplied(%q,%q)=%v want %v", c.cur, c.req, got, c.want)
+		}
 	}
 }
