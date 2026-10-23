@@ -18,6 +18,7 @@ import (
 
 // Target 描述一个可下发的 Agent 二进制。
 type Target struct {
+	OS      string `json:"os"` // linux / windows
 	Arch    string `json:"arch"`
 	Variant string `json:"variant,omitempty"` // "" 普通 / legacy
 	Version string `json:"version"`
@@ -27,12 +28,78 @@ type Target struct {
 }
 
 // Filename 返回二进制在 AGENT_BINARY_DIR 下的文件名。
+//
+// 命名：upgrade-agent-<os>-<arch>[-legacy][.exe]
 func (t Target) Filename() string {
-	name := "upgrade-agent-linux-" + t.Arch
+	name := "upgrade-agent-" + t.DisplayOS() + "-" + t.Arch
 	if t.Variant == "legacy" {
 		name += "-legacy"
 	}
+	if t.DisplayOS() == OSWindows {
+		name += ".exe"
+	}
 	return name
+}
+
+// DisplayOS 返回规范化的操作系统标识，空值按 linux 处理（兼容旧数据）。
+func (t Target) DisplayOS() string {
+	if t.OS == OSWindows {
+		return OSWindows
+	}
+	return OSLinux
+}
+
+const (
+	OSLinux   = "linux"
+	OSWindows = "windows"
+)
+
+var validOS = map[string]bool{
+	OSLinux:   true,
+	OSWindows: true,
+}
+
+// NormalizeOS 校验并规范化目标操作系统标识。
+func NormalizeOS(os string) (string, error) {
+	os = strings.TrimSpace(strings.ToLower(os))
+	if os == "" {
+		return OSLinux, nil
+	}
+	if !validOS[os] {
+		return "", fmt.Errorf("不支持的 Agent 操作系统 %q", os)
+	}
+	return os, nil
+}
+
+// NormalizeArchVariantForOS 在指定 OS 上校验架构/变体。
+//
+// Windows 只有 amd64 / arm64（且没有 legacy 构建：Go 1.20 同时覆盖
+// Server 2008 R2 到 Windows 11）；Linux 保留原有 amd64/arm64/arm/386。
+func NormalizeArchVariantForOS(os, arch, variant string) (string, string, error) {
+	arch, variant, err := NormalizeArchVariant(arch, variant)
+	if err != nil {
+		return "", "", err
+	}
+	if os == OSWindows {
+		if variant == "legacy" {
+			return "", "", fmt.Errorf("Windows 不支持 legacy 构建")
+		}
+		if arch != "amd64" && arch != "arm64" {
+			return "", "", fmt.Errorf("Windows 仅支持 amd64/arm64，收到 %q", arch)
+		}
+	}
+	return arch, variant, nil
+}
+
+// ChooseOS 根据主机上报的 os_family 判断需要下发哪种 Agent。
+//
+// Agent 上报的 os_family 在 Windows 上固定为 windows；Linux 为
+// rhel/debian/suse/alpine/linux 等。历史主机没有该字段时按 Linux 处理。
+func ChooseOS(osFamily string) string {
+	if strings.EqualFold(strings.TrimSpace(osFamily), OSWindows) {
+		return OSWindows
+	}
+	return OSLinux
 }
 
 type hashEntry struct {
@@ -104,13 +171,22 @@ func ChooseVariant(reported, kernel string) string {
 	return ""
 }
 
-// Resolve 定位二进制并计算 SHA256。
+// Resolve 定位 Linux Agent 二进制并计算 SHA256（兼容旧调用方）。
 func (r *Resolver) Resolve(arch, variant, baseURL string) (Target, error) {
-	arch, variant, err := NormalizeArchVariant(arch, variant)
+	return r.ResolveOS(OSLinux, arch, variant, baseURL)
+}
+
+// ResolveOS 定位指定操作系统的 Agent 二进制并计算 SHA256。
+func (r *Resolver) ResolveOS(osName, arch, variant, baseURL string) (Target, error) {
+	osName, err := NormalizeOS(osName)
 	if err != nil {
 		return Target{}, err
 	}
-	t := Target{Arch: arch, Variant: variant, Version: r.Version}
+	arch, variant, err = NormalizeArchVariantForOS(osName, arch, variant)
+	if err != nil {
+		return Target{}, err
+	}
+	t := Target{OS: osName, Arch: arch, Variant: variant, Version: r.Version}
 	path := filepath.Join(r.Dir, t.Filename())
 	if err := safepath.EnsureWithin(r.Dir, path); err != nil {
 		return Target{}, err
@@ -128,7 +204,7 @@ func (r *Resolver) Resolve(arch, variant, baseURL string) (Target, error) {
 	}
 	t.SHA256 = sum
 	t.Size = fi.Size()
-	t.URL = strings.TrimRight(baseURL, "/") + "/api/agent/binary/linux-" + arch
+	t.URL = strings.TrimRight(baseURL, "/") + "/api/agent/binary/" + osName + "-" + arch
 	if variant == "legacy" {
 		t.URL += "-legacy"
 	}
@@ -144,28 +220,55 @@ func (r *Resolver) Available(baseURL string) []Target {
 	out := make([]Target, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "upgrade-agent-linux-") {
+		if e.IsDir() {
 			continue
 		}
-		arch := strings.TrimPrefix(name, "upgrade-agent-linux-")
-		variant := ""
-		if strings.HasSuffix(arch, "-legacy") {
-			arch = strings.TrimSuffix(arch, "-legacy")
-			variant = "legacy"
+		osName, arch, variant, ok := parseBinaryName(name)
+		if !ok {
+			continue
 		}
-		t, err := r.Resolve(arch, variant, baseURL)
+		t, err := r.ResolveOS(osName, arch, variant, baseURL)
 		if err != nil {
 			continue
 		}
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Arch == out[j].Arch {
-			return out[i].Variant < out[j].Variant
+		if out[i].OS != out[j].OS {
+			return out[i].OS < out[j].OS
 		}
-		return out[i].Arch < out[j].Arch
+		if out[i].Arch != out[j].Arch {
+			return out[i].Arch < out[j].Arch
+		}
+		return out[i].Variant < out[j].Variant
 	})
 	return out
+}
+
+// parseBinaryName 解析 upgrade-agent-<os>-<arch>[-legacy][.exe]。
+func parseBinaryName(name string) (osName, arch, variant string, ok bool) {
+	const prefix = "upgrade-agent-"
+	if !strings.HasPrefix(name, prefix) {
+		return "", "", "", false
+	}
+	rest := strings.TrimPrefix(name, prefix)
+	rest = strings.TrimSuffix(rest, ".exe")
+	for _, cand := range []string{OSWindows, OSLinux} {
+		if !strings.HasPrefix(rest, cand+"-") {
+			continue
+		}
+		osName = cand
+		arch = strings.TrimPrefix(rest, cand+"-")
+		break
+	}
+	if osName == "" {
+		return "", "", "", false
+	}
+	if strings.HasSuffix(arch, "-legacy") {
+		arch = strings.TrimSuffix(arch, "-legacy")
+		variant = "legacy"
+	}
+	return osName, arch, variant, true
 }
 
 func fileSHA256(path string, fi os.FileInfo) (string, error) {

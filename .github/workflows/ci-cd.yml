@@ -152,13 +152,42 @@ jobs:
           path: dist/*
 
   #-------------------------------------------------
+  # Windows Agent（Go 1.20，覆盖 Server 2008 R2 ~ Windows 11）
+  #-------------------------------------------------
+  agent-windows:
+    name: 编译 Agent Windows (Go 1.20)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Go 1.20
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.20.14'
+
+      - name: 交叉编译校验（amd64/arm64）
+        env:
+          GOTOOLCHAIN: local
+        run: make agent-windows WINDOWS_GO=local
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: binaries-agent-windows
+          path: dist/upgrade-agent-windows-*
+
+  #-------------------------------------------------
   # 打包并发布：main -> latest Release；tag v* -> 版本 Release
   # 复用 build/agent-legacy 的产物，不重复编译。
   #-------------------------------------------------
   release:
     name: 打包并发布 Release
     if: github.event_name != 'pull_request'
-    needs: [build, agent-legacy]
+    needs: [build, agent-legacy, agent-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -174,13 +203,15 @@ jobs:
           mkdir -p dist
           find artifacts -maxdepth 3 -type f -exec cp {} dist/ \;
           cd dist
-          for f in upgrade-mgr-linux-* upgrade-agent-linux-*; do
+          for f in upgrade-mgr-linux-* upgrade-agent-linux-* upgrade-agent-windows-*; do
             [ -f "$f" ] || continue
             case "$f" in
               *.tar.gz) continue ;;
             esac
-            tar -czf "${f}.tar.gz" "$f"
-            sha256sum "${f}.tar.gz" >> checksums.txt
+            case "$f" in
+              *.exe) zip -q "${f%.exe}.zip" "$f"; sha256sum "${f%.exe}.zip" >> checksums.txt ;;
+              *) tar -czf "${f}.tar.gz" "$f"; sha256sum "${f}.tar.gz" >> checksums.txt ;;
+            esac
           done
           ls -lh
 
@@ -194,6 +225,7 @@ jobs:
           generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/checksums.txt
 
   #-------------------------------------------------

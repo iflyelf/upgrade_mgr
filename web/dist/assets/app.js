@@ -953,43 +953,74 @@
       .catch(function (e) { state.hostErr = '删除失败: ' + e.message; render(); });
   }
 
-  var AGENT_ARCHES = [
-    ['amd64', 'amd64（x86_64）'],
-    ['arm64', 'arm64（aarch64，鲲鹏/飞腾等）'],
-    ['arm', 'arm（32 位）'],
-    ['386', '386（32 位 x86）'],
-    ['amd64-legacy', 'amd64-legacy（CentOS 6 等老内核）'],
-    ['386-legacy', '386-legacy（老内核 32 位）'],
-    ['arm64-legacy', 'arm64-legacy（老内核 arm64）']
+  var AGENT_OS = [
+    ['linux', 'Linux（CentOS / Ubuntu / 麒麟 / 统信等）'],
+    ['windows', 'Windows（Server 2008 R2 ~ Windows 11）']
   ];
+
+  var AGENT_ARCHES = {
+    linux: [
+      ['amd64', 'amd64（x86_64）'],
+      ['arm64', 'arm64（aarch64，鲲鹏/飞腾等）'],
+      ['arm', 'arm（32 位）'],
+      ['386', '386（32 位 x86）'],
+      ['amd64-legacy', 'amd64-legacy（CentOS 6 等老内核）'],
+      ['386-legacy', '386-legacy（老内核 32 位）'],
+      ['arm64-legacy', 'arm64-legacy（老内核 arm64）']
+    ],
+    windows: [
+      ['amd64', 'amd64（x64，绝大多数 Windows）'],
+      ['arm64', 'arm64（Windows on ARM）']
+    ]
+  };
+
+  function archOptions(osName) {
+    return (AGENT_ARCHES[osName] || AGENT_ARCHES.linux).map(function (a) {
+      return h('option', { value: a[0] }, [a[1]]);
+    });
+  }
 
   // enrollCard 生成一次性接入命令，主机执行后自动注册到列表。
   function enrollCard() {
     var e = state.enroll;
-    var archEl = h('select', { value: (e && e.arch) || 'amd64' },
-      AGENT_ARCHES.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
+    var osEl = h('select', { value: (e && e.os) || 'linux' },
+      AGENT_OS.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
+    var curOS = (e && e.os) || 'linux';
+    var archEl = h('select', { value: (e && e.arch) || 'amd64' }, archOptions(curOS));
+    // 切换操作系统时同步刷新可选架构：Windows 只有 amd64/arm64，且无 legacy。
+    osEl.onchange = function () {
+      var next = osEl.value;
+      var keep = archEl.value;
+      var allowed = (AGENT_ARCHES[next] || []).map(function (a) { return a[0]; });
+      var arch = allowed.indexOf(keep) >= 0 ? keep : 'amd64';
+      state.enroll = { os: next, arch: arch, force: forceEl.checked, err: '' };
+      render();
+    };
     var forceEl = h('input', { type: 'checkbox', checked: !!(e && e.force) }, []);
     return h('div', { class: 'card' }, [
       h('h3', {}, ['接入主机（安装 Agent）']),
       hint('主机信息来自 Agent 注册：IP 取服务端看到的来源地址，主机名、OS、架构、init 系统由 Agent 上报。所以装好客户端，主机就会带着 IP 出现在列表里。'),
-      field('目标机器架构', archEl, '在目标机器执行 uname -m：x86_64 选 amd64，aarch64 选 arm64。镜像里默认只带构建架构的 Agent，选其他架构下载可能 404。'),
+      field('目标操作系统', osEl, 'Windows 支持 Server 2008 R2 ~ Windows 11（amd64/arm64）；Windows 安装命令需在“管理员 PowerShell”中执行。'),
+      field('目标机器架构', archEl, 'Linux 上执行 uname -m：x86_64 选 amd64，aarch64 选 arm64。Windows 绝大多数为 amd64；arm64 仅用于 Windows on ARM。镜像里默认只带构建架构的 Agent，选其他架构下载可能 404。'),
       field('强制重新注册', forceEl, '勾选后命令会带 --force，覆盖目标机已有 state.json 并重新注册。仅在换服务端、数据库重置或重新接入同一台机器时使用；普通重装请勿勾选。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
           type: 'button', class: 'btn', onclick: function () {
+            var osName = osEl.value;
             var arch = archEl.value;
             var force = forceEl.checked;
-            api('/api/agent/enroll-token?arch=' + encodeURIComponent(arch) + (force ? '&force=1' : ''))
-              .then(function (d) { state.enroll = { arch: arch, force: force, base: d.base_url, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
-              .catch(function (err) { state.enroll = { arch: arch, force: force, err: err.message }; render(); });
+            api('/api/agent/enroll-token?os=' + encodeURIComponent(osName) + '&arch=' + encodeURIComponent(arch) + (force ? '&force=1' : ''))
+              .then(function (d) { state.enroll = { os: osName, arch: arch, force: force, base: d.base_url, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
+              .catch(function (err) { state.enroll = { os: osName, arch: arch, force: force, err: err.message }; render(); });
           }
         }, ['生成接入命令'])
       ]),
       e && e.err ? h('div', { class: 'err field', role: 'alert' }, [e.err]) : null,
       e && e.cmd ? h('div', {}, [
         e.base ? hint('安装命令使用地址：' + e.base + '。可在“设置”页修改 server.external_url，保存后立即生效；Nginx 域名场景填 https://your-domain。') : null,
-        hint('在目标机器用 root 执行（令牌一次性使用，' + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）：'),
+        hint(((e.os === 'windows') ? '在目标机器用“管理员 PowerShell”执行（令牌一次性使用，' : '在目标机器用 root 执行（令牌一次性使用，') + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）：'),
         codeBlock(e.cmd),
+        e.os === 'windows' ? hint('Windows 安装使用 PowerShell + System.Net.WebClient，兼容 Server 2008 R2 自带的 PowerShell 2.0。cmd 可先执行 powershell -NoProfile -ExecutionPolicy Bypass 再粘贴命令。服务以 LocalSystem 运行，重启后自动恢复。') : null,
         e.force ? hint('当前为强制重新注册命令（含 --force）：会覆盖目标机现有 Agent 身份，旧 Agent 记录将不再被该主机使用。') : null,
         hint('执行完成后点上方“搜索”刷新列表。如果 IP 显示成了代理地址，检查服务端 server.trust_proxy 配置。'),
         hint('目标机已注册时，普通命令会保留原身份（本次令牌不会被使用）；需要覆盖重注册请勾选“强制重新注册”后重新生成。')
@@ -1322,7 +1353,8 @@
         h('option', { value: 'debian' }, ['debian（Debian/Ubuntu 等）']),
         h('option', { value: 'suse' }, ['suse（SLES/openSUSE）']),
         h('option', { value: 'alpine' }, ['alpine']),
-        h('option', { value: 'linux' }, ['linux（未识别发行版）'])
+        h('option', { value: 'linux' }, ['linux（未识别发行版）']),
+        h('option', { value: 'windows' }, ['windows（Windows Server 2008 R2 ~ Windows 11）'])
       ]);
       var fileEl = h('input', { type: 'file' }, []);
       var innerEl = h('input', { placeholder: '一般留空' }, []);
@@ -1373,7 +1405,7 @@
         ]),
         h('div', { class: 'grid2' }, [
           field('架构 (arch)', archEl, '二进制必须和目标主机完全一致；Shell 脚本等与架构无关的制品选 all，可匹配所有主机。'),
-          field('操作系统 (os_family)', osEl, '留空表示通用；填了以后只匹配同族主机。')
+          field('操作系统 (os_family)', osEl, '留空表示通用；填了以后只匹配同族主机。Windows 主机上报 os_family=windows，二进制制品请选 windows；与平台无关的脚本仍可留空。')
         ]),
         field('文件', fileEl, '脚本安装上传 examples/node_exporter/install.sh；二进制安装上传解压后的可执行文件。平台不解压 tar.gz。'),
         h('div', { class: 'grid2' }, [
@@ -1647,12 +1679,12 @@
     ]);
     var scriptEl = h('textarea', {
       rows: '8',
-      placeholder: '#!/bin/bash\n# 例如卸载旧监控（install.sh 支持 install/update/uninstall/status）：\nset -e\nurl="https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh"\nf=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)\ncurl -fsSL "$url" -o "$f"\nbash "$f" uninstall\nrm -f "$f"\n',
+      placeholder: '#!/bin/bash\n# Linux 示例：\nset -e\nurl="https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh"\nf=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)\ncurl -fsSL "$url" -o "$f"\nbash "$f" uninstall\nrm -f "$f"\n\n# Windows 示例（解释器填 powershell）：\n# Stop-Service node_exporter -ErrorAction SilentlyContinue\n# exit 0\n',
       value: f.script || '',
       oninput: function () { f.script = scriptEl.value; }
     }, []);
     var interpEl = h('input', {
-      value: f.interpreter || '', placeholder: '留空自动 bash/sh',
+      value: f.interpreter || '', placeholder: '留空自动 bash/sh；Windows 主机填 powershell 或 cmd',
       oninput: function () { f.interpreter = interpEl.value; }
     }, []);
     var argsEl = h('input', {

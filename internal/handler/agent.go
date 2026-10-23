@@ -276,9 +276,14 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		if arch == "" {
 			arch = "amd64"
 		}
-		// 校验架构参数
-		if !isValidArch(arch) {
-			httpx.Fail(w, http.StatusBadRequest, "不支持的架构")
+		osName := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("os")))
+		if osName == "" {
+			osName = "linux"
+		}
+		arch = strings.TrimSpace(strings.ToLower(arch))
+		// 校验 OS + 架构组合（防注入与无效组合）
+		if !isValidTarget(osName, arch) {
+			httpx.Fail(w, http.StatusBadRequest, "不支持的操作系统或架构")
 			return
 		}
 		// 持久化：存哈希，15 分钟有效期
@@ -306,17 +311,24 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		// 使用设置页热更新后的快照，避免直接读共享 Config 产生数据竞争。
 		snap := s.Settings.Snapshot()
 		serverURL := installBaseURL(snap.Server.ExternalURL, r, snap.Server.TrustProxy)
-		// 校验与转义 serverURL（防注入）
-		safeURL, err := validateAndEscapeURL(serverURL)
+		// 校验 serverURL（防注入）。Linux 命令走 shell，需要额外转义单引号；
+		// Windows 命令用 PowerShell 单引号字符串，转义规则不同，故取原始值。
+		rawURL, err := validateURL(serverURL)
 		if err != nil {
 			httpx.Fail(w, http.StatusInternalServerError, "服务器 URL 配置错误")
 			return
 		}
+		safeURL := shellEscape(rawURL)
 		force := r.URL.Query().Get("force") == "1"
 		installCmd := buildInstallCommand(safeURL, arch, token, force)
+		if osName == "windows" {
+			installCmd = buildWindowsInstallCommand(rawURL, arch, token, force)
+		}
 		httpx.OK(w, map[string]any{
 			"enroll_token":    token,
 			"expires_in":      int(ttl.Seconds()),
+			"os":              osName,
+			"arch":            arch,
 			"install_command": installCmd,
 			"base_url":        serverURL,
 		})
@@ -360,10 +372,46 @@ func buildInstallCommand(safeURL, arch, token string, force bool) string {
 	return cmd
 }
 
+// buildWindowsInstallCommand 生成 Windows 一键安装命令（PowerShell）。
+//
+// 兼容要求：
+//   - Windows Server 2008 R2 自带 PowerShell 2.0：不能用 Invoke-WebRequest
+//     （PS3+）与 DownloadFile 之外的新 API，故使用 System.Net.WebClient；
+//   - 单引号字符串内的字面单引号需写成两个单引号（PowerShell 转义规则）；
+//   - 先删除上次残留的 exe，避免重复接入时执行旧版本（与 Linux 命令同理）；
+//   - 需在「管理员 PowerShell」中执行：注册 SCM 服务、写 Program Files 需要提权。
+//   - cmd 用户可先执行 powershell -NoProfile -ExecutionPolicy Bypass 进入 PS。
+func buildWindowsInstallCommand(safeURL, arch, token string, force bool) string {
+	binURL := safeURL + "/api/agent/binary/windows-" + arch
+	args := []string{"'install'", "'--server'", psQuote(safeURL), "'--enroll-token'", psQuote(token)}
+	if force {
+		args = append(args, "'--force'")
+	}
+	return "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP 'upgrade-agent.exe');\n" +
+		"(New-Object System.Net.WebClient).DownloadFile('" + psQuote(binURL) + "', (Join-Path $env:TEMP 'upgrade-agent.exe'));\n" +
+		"Start-Process -FilePath (Join-Path $env:TEMP 'upgrade-agent.exe') -ArgumentList " +
+		strings.Join(args, ",") + " -Wait -NoNewWindow"
+}
+
+// psQuote 把值包成 PowerShell 单引号字符串（内部 ' 写成 ”）。
+func psQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// splitBinaryName 拆分 {os}-{arch}[-legacy] 形式的下载名。
+func splitBinaryName(name string) (osName, arch string, ok bool) {
+	for _, cand := range []string{"windows", "linux"} {
+		if strings.HasPrefix(name, cand+"-") {
+			return cand, strings.TrimPrefix(name, cand+"-"), true
+		}
+	}
+	return "", "", false
 }
 
 // consumeEnrollToken 校验并一次性消费 enroll token（防滥用注册）。
@@ -404,8 +452,23 @@ func isValidArch(arch string) bool {
 	return false
 }
 
-// validateAndEscapeURL 校验 URL 合法性（http/https）并转义单引号（防 shell 注入）。
-func validateAndEscapeURL(rawURL string) (string, error) {
+// isValidTarget 校验 OS + 架构组合。
+//
+// Windows 仅支持 amd64/arm64，且没有 legacy 变体
+// （Go 1.20 单套构建同时兼容 Server 2008 R2 ~ Windows 11）。
+func isValidTarget(osName, arch string) bool {
+	switch strings.TrimSpace(strings.ToLower(osName)) {
+	case "", "linux":
+		return isValidArch(arch)
+	case "windows":
+		return arch == "amd64" || arch == "arm64"
+	default:
+		return false
+	}
+}
+
+// validateURL 校验 URL 合法性（http/https 绝对地址）。
+func validateURL(rawURL string) (string, error) {
 	if strings.ContainsAny(rawURL, "\r\n") {
 		return "", fmt.Errorf("地址包含非法字符")
 	}
@@ -419,21 +482,21 @@ func validateAndEscapeURL(rawURL string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("缺少主机名")
 	}
-	// 转义单引号为 '\''（shell 单引号内的转义方式）
-	return strings.ReplaceAll(rawURL, "'", "'\\''"), nil
+	return rawURL, nil
+}
+
+// shellEscape 按 POSIX 单引号规则转义（把 ' 替换为 '\”）。
+func shellEscape(rawURL string) string {
+	return strings.ReplaceAll(rawURL, "'", "'\\''")
 }
 
 // AgentBinaryDownload 提供 Agent 二进制下载（无鉴权，白名单文件）。
 func AgentBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
-		// 文件名白名单：linux-{arch}[{-legacy}]
-		if !strings.HasPrefix(name, "linux-") {
-			http.NotFound(w, r)
-			return
-		}
-		arch := strings.TrimPrefix(name, "linux-")
-		if !isValidArch(arch) {
+		// 文件名白名单：{linux|windows}-{arch}[{-legacy}]
+		osName, arch, ok := splitBinaryName(name)
+		if !ok || !isValidTarget(osName, arch) {
 			http.NotFound(w, r)
 			return
 		}
@@ -441,8 +504,11 @@ func AgentBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		if dir == "" {
 			dir = "./dist"
 		}
-		// 实际文件名：upgrade-agent-{name}
+		// 实际文件名：upgrade-agent-{name}[.exe]
 		filename := "upgrade-agent-" + name
+		if osName == "windows" {
+			filename += ".exe"
+		}
 		fullPath := filepath.Join(dir, filename)
 		// 防路径穿越：确保解析后仍在 dir 内
 		if err := safepath.EnsureWithin(dir, fullPath); err != nil {

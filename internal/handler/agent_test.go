@@ -35,6 +35,52 @@ func TestBuildInstallCommandRemovesStaleBinary(t *testing.T) {
 	}
 }
 
+func TestBuildWindowsInstallCommand(t *testing.T) {
+	cmd := buildWindowsInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", false)
+	for _, want := range []string{
+		"System.Net.WebClient",
+		"/api/agent/binary/windows-amd64",
+		"Join-Path $env:TEMP 'upgrade-agent.exe'",
+		"'install'",
+		"'--enroll-token'",
+		"'tok-123'",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("Windows 安装命令缺少 %q:\n%s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "Invoke-WebRequest") {
+		t.Fatalf("不能使用 PowerShell 3.0+ 的 Invoke-WebRequest（2008 R2 只有 PS 2.0）:\n%s", cmd)
+	}
+	if strings.Contains(cmd, "--force") {
+		t.Fatalf("普通安装不应带 --force:\n%s", cmd)
+	}
+	if !strings.Contains(buildWindowsInstallCommand("http://x", "amd64", "t", true), "'--force'") {
+		t.Fatal("强制注册命令应带 --force")
+	}
+}
+
+func TestIsValidTarget(t *testing.T) {
+	ok := [][2]string{
+		{"linux", "amd64"}, {"", "386"}, {"windows", "amd64"}, {"windows", "arm64"},
+		{"Linux", "arm64-legacy"},
+	}
+	for _, c := range ok {
+		if !isValidTarget(c[0], c[1]) {
+			t.Errorf("应允许 %v", c)
+		}
+	}
+	bad := [][2]string{
+		{"windows", "386"}, {"windows", "arm"}, {"windows", "amd64-legacy"},
+		{"darwin", "amd64"}, {"linux", "mips"},
+	}
+	for _, c := range bad {
+		if isValidTarget(c[0], c[1]) {
+			t.Errorf("应拒绝 %v", c)
+		}
+	}
+}
+
 func TestInstallBaseURLPrefersExternalURL(t *testing.T) {
 	r := httptest.NewRequest("GET", "http://internal:8090/api/agent/enroll-token", nil)
 	r.Host = "10.1.230.50:8090"
