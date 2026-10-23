@@ -803,7 +803,11 @@
     ]);
     qEl.onkeydown = function (ev) { if (ev.key === 'Enter') doSearch(); };
 
-    var cols = ['IP', '主机名', 'OS', 'ARCH', '业务组', 'app_code', 'Agent', '来源'];
+    var listHostDefs = (state.hostFieldDefs || [])
+      .filter(function (d) { return d.showInList; })
+      .sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
+    var cols = ['IP', '主机名', 'OS', 'ARCH', '业务组', 'app_code', 'Agent', '来源']
+      .concat(listHostDefs.map(function (d) { return d.label; }));
     if (isAdmin()) cols.push('操作');
     var head = h('tr', {}, cols.map(function (t) { return h('th', {}, [t]); }));
     var rows = state.hosts.map(function (x) {
@@ -826,6 +830,9 @@
         ]),
         h('td', {}, [x.source])
       ];
+      listHostDefs.forEach(function (d) {
+        cells.push(h('td', {}, [(x.custom_fields && x.custom_fields[d.fieldKey]) || '-']));
+      });
       if (isAdmin()) {
         cells.push(h('td', {}, [h('div', { class: 'row-actions' }, [
           x.agent_id ? h('button', {
@@ -1059,6 +1066,35 @@
       placeholder: '如 10.8.0.5、10.8.0.5:8090 或 https://mgr.example.com'
     }, []);
 
+    // 主机自定义字段：定义来自 /api/field-defs/host（在 loadHosts 中加载一次）。
+    // 值来自 host.custom_fields；保存时整体提交，服务端按键合并。
+    var hostFieldInputs = {};
+    var hostFieldNodes = (state.hostFieldDefs || [])
+      .filter(function (d) { return d.showInForm && d.editable; })
+      .sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); })
+      .map(function (d) {
+        var cur = (host.custom_fields && host.custom_fields[d.fieldKey]) || '';
+        var el;
+        if (d.fieldType === 'select') {
+          var opts = [];
+          try { opts = JSON.parse(d.options || '[]'); } catch (e) { opts = []; }
+          el = h('select', {}, [h('option', { value: '' }, ['（未设置）'])].concat(opts.map(function (x) {
+            return h('option', { value: x }, [x]);
+          })));
+          el.value = cur;
+        } else if (d.fieldType === 'textarea') {
+          el = h('textarea', { rows: '2' }, []);
+          el.value = cur;
+        } else {
+          el = h('input', {
+            type: d.fieldType === 'number' ? 'number' : (d.fieldType === 'date' ? 'date' : 'text'),
+            value: cur
+          }, []);
+        }
+        hostFieldInputs[d.fieldKey] = el;
+        return field(d.label, el, '');
+      });
+
     // testTunnel 从平台侧拨测候选连接地址；结果保留在 state.tunnelTest，
     // 便于在保存前确认端口/证书是否正常。
     var testTunnel = function () {
@@ -1091,6 +1127,12 @@
         tunnel_ip: hostTunnelEl.value,
         server_url_override: serverOverrideEl.value
       };
+      if (Object.keys(hostFieldInputs).length) {
+        payload.custom_fields = {};
+        Object.keys(hostFieldInputs).forEach(function (k) {
+          payload.custom_fields[k] = hostFieldInputs[k].value;
+        });
+      }
       api('/api/hosts/' + host.id, { method: 'PUT', body: JSON.stringify(payload) })
         .then(function () {
           state.editingHost = null;
@@ -1136,6 +1178,10 @@
           '保存后 Agent 在下一次心跳（约 30 秒内）自动切换并持久化；清空后回退默认地址。' +
           '连续 3 次心跳失败会自动回退并在 5 分钟内不再重试，避免失联。')
       ]),
+      hostFieldNodes.length ? h('div', {}, [
+        h('h3', {}, ['自定义字段']),
+        h('div', { class: 'grid2' }, hostFieldNodes)
+      ]) : null,
       (host.exit_ip ? hint('Agent 上报的出口 IP：' + host.exit_ip + '（多网卡时用于确认实际出口网卡）') : null),
       (host.agent_server_url ? hint('Agent 当前连接地址：' + host.agent_server_url) : null),
       (host.server_url_override && host.tunnel_check_ok === false
@@ -1681,8 +1727,7 @@
       h('div', { class: 'card' }, [
         h('div', { class: 'toolbar' }, [
           h('span', { class: 'muted' }, ['共 ' + o.users.length + ' 个用户']),
-          hint ? h('span', { class: 'muted' }, ['人员数据来自 Casdoor / 内置账号，账号增删请在「设置 → 用户」或 FlyIAM 中操作'])
-            : null
+          h('span', { class: 'muted' }, ['账号增删请到「设置 → 用户」或 FlyIAM；此处维护人事扩展字段'])
         ]),
         simpleTable(cols, o.users, function (u, i) { return rows[i]; })
       ]),
@@ -3312,6 +3357,13 @@
   var autoBusy = false;
   function loadHosts(page, quiet) {
     if (!quiet) state.view = 'hosts';
+    // 主机自定义字段定义：列表列与编辑表单共用；只加载一次，失败后置空数组。
+    if (state.hostFieldDefs === undefined) {
+      state.hostFieldDefs = null;
+      api('/api/field-defs/host')
+        .then(function (d) { state.hostFieldDefs = d || []; render(); })
+        .catch(function () { state.hostFieldDefs = []; render(); });
+    }
     if (page != null) {
       var p = parseInt(page, 10);
       if (p > 0) state.hostPage = p;
