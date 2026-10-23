@@ -94,6 +94,7 @@ func New(c *config.Config) *ServiceContext {
 	// 团队级策略（teams.owner_only）优先于全局开关。
 	taskSvc.SetOwnerOnlyPolicy(func() bool { return c.Agent.TaskOwnerOnly })
 	taskSvc.SetOwnerPolicyResolver(orgSvc.TeamOwnerPolicy)
+	taskSvc.SetOwnerShareChecker(orgSvc.CanShareTasks)
 	svc := &ServiceContext{
 		Config:     c,
 		DB:         db,

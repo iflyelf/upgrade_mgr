@@ -26,6 +26,9 @@ func TaskPreview(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
+		if u, ok := auth.FromContext(r.Context()); ok {
+			req.SetActor(u)
+		}
 		res, err := s.Task.Preview(r.Context(), reqScope(r), req)
 		if err != nil {
 			httpx.FailErr(w, http.StatusBadRequest, err)
@@ -56,6 +59,11 @@ func TaskCreate(s *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
+// actorIsPrivileged 判断当前用户是否管理员；nil（内部调用）视为特权。
+func actorIsPrivileged(u *auth.User) bool {
+	return u == nil || u.IsAdmin || u.IsSuperAdmin() || u.HasRole(auth.RoleAdmin)
+}
+
 // TaskList 任务列表。
 //
 // 可选查询参数：kind（upgrade/command）、component_id（只看引用该组件的任务）、
@@ -63,6 +71,11 @@ func TaskCreate(s *svc.ServiceContext) http.HandlerFunc {
 func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 租户隔离：只列出当前租户的任务（superadmin 跨租户）
+		actor, _ := auth.FromContext(r.Context())
+		mode := ""
+		if !actorIsPrivileged(actor) && actor != nil {
+			mode = s.Task.AccessMode(r.Context(), actor.Username)
+		}
 		tCond, tArgs := reqScope(r).Where("t", 1)
 		where := []string{tCond}
 		args := append([]any{}, tArgs...)
@@ -80,6 +93,9 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		if status := r.URL.Query().Get("status"); status != "" {
 			add("t.status=$%d", status)
+		}
+		if !actorIsPrivileged(actor) {
+			where = append(where, "COALESCE(t.kind,'upgrade') <> 'command'")
 		}
 		rows, err := s.DB.QueryContext(r.Context(), `
 			SELECT t.id, COALESCE(t.kind,'upgrade'), t.name, COALESCE(t.component_id,0), t.version, t.status, t.created_at,
@@ -106,10 +122,15 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
 			}
+			// 仅当策略为「仅本人」且非创建者时隐藏操作按钮；
+			// off 模式下同团队校验由写接口完成（前端无法逐行判断团队关系）。
+			canOperate := mode != "on" || createdBy == "" ||
+				(actor != nil && createdBy == actor.Username)
 			list = append(list, map[string]any{
 				"id": id, "kind": kind, "name": name, "component_id": cid, "version": version,
 				"status": status, "created_at": createdAt, "created_by": createdBy,
-				"total": total, "success": success, "failed": failed,
+				"can_operate": canOperate,
+				"total":       total, "success": success, "failed": failed,
 			})
 		}
 		httpx.OK(w, list)
@@ -206,6 +227,11 @@ func TaskDetail(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		if err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		// 命令任务（脚本/输出可能含敏感信息）仅管理员可见。
+		if kind == "command" && !actorIsPrivileged(actorOf(r)) {
+			httpx.Fail(w, http.StatusNotFound, "任务不存在")
 			return
 		}
 
@@ -357,11 +383,20 @@ func TaskDetail(s *svc.ServiceContext) http.HandlerFunc {
 		if len(commandRaw) == 0 {
 			commandRaw = []byte("{}")
 		}
+		actor, _ := auth.FromContext(ctx)
+		canOperate := true
+		if !actorIsPrivileged(actor) && actor != nil {
+			if s.Task.AccessMode(ctx, actor.Username) == "on" &&
+				createdBy != "" && createdBy != actor.Username {
+				canOperate = false
+			}
+		}
 		httpx.OK(w, map[string]any{
 			"id": id, "kind": kind, "name": name, "component_id": componentID,
 			"component_name": compName, "component_display_name": compDisplay,
 			"version": version, "status": status, "created_by": createdBy,
-			"created_at": nullableTime(createdAt), "updated_at": nullableTime(updatedAt),
+			"can_operate": canOperate,
+			"created_at":  nullableTime(createdAt), "updated_at": nullableTime(updatedAt),
 			"selector": json.RawMessage(selectorRaw), "strategy": json.RawMessage(strategyRaw),
 			"command": json.RawMessage(commandRaw),
 			"total":   total, "success": success, "failed": failed, "done": done, "active": active,

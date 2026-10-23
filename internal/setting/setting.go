@@ -105,7 +105,7 @@ var Registry = []Item{
 		Get: func(c *config.Config) string { return b2s(c.Agent.AutoUpdate) },
 		Set: func(c *config.Config, v string) { c.Agent.AutoUpdate = v == "true" }},
 	{Key: "agent.task_owner_only", Group: "Agent",
-		Label: "任务仅创建者可操作（非管理员不能启动/暂停/取消/重试/删除他人任务）", Type: "bool",
+		Label: "任务仅创建者可操作（默认开启；团队 owner_only 可为团队成员放开）", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.TaskOwnerOnly) },
 		Set: func(c *config.Config, v string) { c.Agent.TaskOwnerOnly = v == "true" }},
 

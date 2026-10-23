@@ -315,11 +315,21 @@ func FlyIAMProvisionLocalUser(s *svc.ServiceContext) http.HandlerFunc {
 							values[d.FieldKey] = strings.TrimSpace(v)
 						}
 					}
-					if len(values) > 0 {
-						if clean, vErr := fielddef.ValidateValues(defs, values); vErr == nil {
-							if saveErr := repo.SaveUserValues(r.Context(), username, clean); saveErr == nil {
-								synced = len(clean)
-							}
+					// 逐字段校验：FlyIAM 的某个值不合本地定义时只跳过该字段，
+					// 不能让整批同步静默失败。
+					clean := map[string]string{}
+					for k, v := range values {
+						one, vErr := fielddef.ValidateValues(defs, map[string]string{k: v})
+						if vErr != nil {
+							continue
+						}
+						for kk, vv := range one {
+							clean[kk] = vv
+						}
+					}
+					if len(clean) > 0 {
+						if saveErr := repo.SaveUserValues(r.Context(), username, clean); saveErr == nil {
+							synced = len(clean)
 						}
 					}
 				}
