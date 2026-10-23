@@ -57,6 +57,8 @@ type ServerConfig struct {
 	TrustedProxies []string `yaml:"trusted_proxies"`
 	// MetricsToken /metrics 的 Bearer 令牌；为空时 /metrics 回退为登录会话认证。
 	MetricsToken string `yaml:"metrics_token"`
+	// AuditRetentionDays 审计日志保留天数（默认 180，最小 7）。
+	AuditRetentionDays int `yaml:"audit_retention_days"`
 	// AgentBinaryDir Agent 二进制目录，供 GET /api/agent/binary/{name} 下载（默认 ./dist）。
 	AgentBinaryDir string `yaml:"agent_binary_dir"`
 	// ExternalBinaries 允许控制台代为下载并缓存的外部文件白名单。
@@ -196,6 +198,9 @@ type AgentConfig struct {
 	// AutoUpdate 是否在 Agent 心跳发现旧版本时自动下发自升级（默认 false）。
 	// 开启后 Agent 会下载新二进制并重启，建议确认 dist 目录已放置目标版本再开启。
 	AutoUpdate bool `yaml:"auto_update"`
+	// AutoUpdatePercent 自升级灰度比例（0-100，默认 100）。
+	// 按 agent_id 的稳定哈希选择，同一 Agent 多次心跳结果一致。
+	AutoUpdatePercent int `yaml:"auto_update_percent"`
 	// TaskOwnerOnly 为 true 时，非管理员只能操作自己创建的任务（启动/暂停/推进/
 	// 取消/重试/删除）。默认 false（保持既有协作行为）。
 	TaskOwnerOnly bool `yaml:"task_owner_only"`
@@ -217,7 +222,10 @@ type LogConfig struct {
 // Default 返回内置默认配置（纯环境变量/无配置文件部署时的基线）。
 func Default() *Config {
 	return &Config{
-		Server: ServerConfig{Host: "0.0.0.0", Port: 8090, WebEmbedded: true, AgentBinaryDir: "./dist"},
+		Server: ServerConfig{
+			Host: "0.0.0.0", Port: 8090, WebEmbedded: true, AgentBinaryDir: "./dist",
+			AuditRetentionDays: 180,
+		},
 		Database: DatabaseConfig{
 			Host: "localhost", Port: 5432, User: "postgres", DBName: "upgrade_mgr",
 			SSLMode: "disable", MaxOpenConns: 50, MaxIdleConns: 10, ConnMaxLifetime: 3600,
@@ -232,6 +240,8 @@ func Default() *Config {
 			// 默认开启任务 owner 校验：非管理员只能操作自己创建的任务。
 			// 管理员不受影响；团队可用 owner_only=off 在团队内放开。
 			TaskOwnerOnly: true,
+			// 默认全量，保持既有行为；做灰度时改为 5/10/50 等。
+			AutoUpdatePercent: 100,
 		},
 		Log: LogConfig{Level: "info"},
 	}
@@ -269,6 +279,7 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyEnv() {
 	setStr(&c.Server.Host, "SERVER_HOST")
 	setInt(&c.Server.Port, "SERVER_PORT")
+	setInt(&c.Server.AuditRetentionDays, "SERVER_AUDIT_RETENTION_DAYS")
 	setStr(&c.Server.SessionSecret, "SESSION_SECRET")
 	setStr(&c.Server.ExternalURL, "SERVER_EXTERNAL_URL")
 	setBool(&c.Server.TrustProxy, "TRUST_PROXY")
@@ -351,6 +362,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.Artifact.OSSSecretKey, "ARTIFACT_OSS_SECRET_KEY")
 	setBool(&c.Agent.AutoUpdate, "AGENT_AUTO_UPDATE")
 	setBool(&c.Agent.TaskOwnerOnly, "AGENT_TASK_OWNER_ONLY")
+	setInt(&c.Agent.AutoUpdatePercent, "AGENT_AUTO_UPDATE_PERCENT")
 	setStr(&c.FlyIAM.Endpoint, "FLYIAM_ENDPOINT")
 	setStr(&c.FlyIAM.ServiceToken, "FLYIAM_SERVICE_TOKEN")
 	setStr(&c.Log.Level, "LOG_LEVEL")

@@ -96,3 +96,37 @@ func ArtifactDownload(s *svc.ServiceContext) http.HandlerFunc {
 		http.ServeContent(w, r, a.Filename, time.Time{}, f) // 自动处理 Range
 	}
 }
+
+// ArtifactListPaged 制品分页列表（组件过滤 + 关键字搜索）。
+func ArtifactListPaged(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cid, _ := strconv.ParseInt(r.URL.Query().Get("component_id"), 10, 64)
+		page := atoiDefault(r.URL.Query().Get("page"), 1)
+		size := atoiDefault(r.URL.Query().Get("size"), 50)
+		list, total, err := s.Artifact.ListPaged(r.Context(), reqScope(r), cid,
+			r.URL.Query().Get("q"), page, size)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if page < 1 {
+			page = 1
+		}
+		if size < 1 {
+			size = 50
+		}
+		if size > 200 {
+			size = 200
+		}
+		pages := (total + size - 1) / size
+		if pages < 1 {
+			pages = 1
+		}
+		if page > pages {
+			page = pages
+		}
+		httpx.OK(w, map[string]any{
+			"list": list, "total": total, "page": page, "size": size, "pages": pages,
+		})
+	}
+}

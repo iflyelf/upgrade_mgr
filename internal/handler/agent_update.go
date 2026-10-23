@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net/http"
@@ -86,6 +88,22 @@ func markSelfUpdateSuccess(ctx context.Context, db *sql.DB, agentID, buildHash s
 // 目标二进制缺失时每次心跳都会检查失败；若不限频，上万台主机可能刷爆日志。
 var autoUpdateErrLog sync.Map // agentID -> time.Time
 
+// autoUpdateSelected 按 agentID 的稳定哈希判断是否命中自升级灰度比例。
+//
+// percent <=0 表示不升级；>=100 表示全量。同一 agent 的结果稳定，
+// 不会因多次心跳在「升级/不升级」之间抖动。
+func autoUpdateSelected(agentID string, percent int) bool {
+	if percent >= 100 {
+		return true
+	}
+	if percent <= 0 || agentID == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(agentID))
+	n := binary.BigEndian.Uint32(sum[:4]) % 100
+	return int(n) < percent
+}
+
 func logAutoUpdateErr(agentID string, err error) {
 	now := time.Now()
 	if v, ok := autoUpdateErrLog.Load(agentID); ok {
@@ -106,6 +124,9 @@ func maybeAutoUpdateAgent(s *svc.ServiceContext, r *http.Request, agentID string
 	}
 	snap := s.Settings.Snapshot()
 	if !snap.Agent.AutoUpdate {
+		return
+	}
+	if !autoUpdateSelected(agentID, snap.Agent.AutoUpdatePercent) {
 		return
 	}
 	baseURL := installBaseURL(snap.Server.ExternalURL, r, snap.Server.TrustProxy)

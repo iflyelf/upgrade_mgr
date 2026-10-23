@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,5 +95,28 @@ func TestCheck(t *testing.T) {
 	}
 	if Check(context.Background(), Spec{Argv: []string{"false"}, Timeout: time.Second}) {
 		t.Fatal("false should fail")
+	}
+}
+
+// TestCappedBuffer 输出缓冲截断：最多保留 max 字节并追加提示。
+func TestCappedBuffer(t *testing.T) {
+	c := &cappedBuffer{max: 5}
+	n, err := c.Write([]byte("abcdefghij"))
+	if err != nil || n != 10 {
+		t.Fatalf("Write 应返回原始长度 n=%d err=%v", n, err)
+	}
+	out := c.String()
+	if !strings.Contains(out, "abcde") || !strings.Contains(out, "已截断") {
+		t.Fatalf("截断内容不符: %q", out)
+	}
+	if !c.truncated {
+		t.Fatal("应标记 truncated")
+	}
+
+	// 未超限不追加提示
+	c2 := &cappedBuffer{max: 10}
+	c2.Write([]byte("12345"))
+	if strings.Contains(c2.String(), "已截断") {
+		t.Fatal("未超限不应提示截断")
 	}
 }

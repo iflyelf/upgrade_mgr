@@ -42,6 +42,11 @@ func installPlatform(opts Options, info osinfo.Info) error {
 		StartType:   mgr.StartAutomatic,
 		ServiceType: windows.SERVICE_WIN32_OWN_PROCESS,
 	}
+	// 可选低权限服务账户；留空时 SCM 默认 LocalSystem。
+	if acct := strings.TrimSpace(opts.ServiceAccount); acct != "" {
+		cfg.ServiceStartName = acct
+		cfg.Password = opts.ServicePassword
+	}
 	// 服务刚删除时句柄可能仍标记为待删除，CreateService 会返回
 	// ERROR_SERVICE_MARKED_FOR_DELETE；短暂重试即可。
 	var s *mgr.Service

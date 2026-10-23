@@ -39,6 +39,18 @@ var Registry = []Item{
 		Validate: validateExternalURL},
 
 	// Consul（可选数据源）
+	{Key: "server.audit_retention_days", Group: "服务器",
+		Label: "审计日志保留天数（默认 180，最小 7）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Server.AuditRetentionDays) },
+		Set: func(c *config.Config, v string) { setInt(&c.Server.AuditRetentionDays, v) },
+		Validate: func(v string) error {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 7 || n > 3650 {
+				return fmt.Errorf("审计保留天数应为 7-3650 的整数")
+			}
+			return nil
+		}},
+
 	{Key: "consul.enabled", Group: "Consul", Label: "启用 Consul 同步", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Consul.Enabled) },
 		Set: func(c *config.Config, v string) { c.Consul.Enabled = v == "true" }},
@@ -104,6 +116,17 @@ var Registry = []Item{
 	{Key: "agent.auto_update", Group: "Agent", Label: "自动升级旧 Agent（下载新二进制并重启 Agent）", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.AutoUpdate) },
 		Set: func(c *config.Config, v string) { c.Agent.AutoUpdate = v == "true" }},
+	{Key: "agent.auto_update_percent", Group: "Agent",
+		Label: "自动升级灰度比例（0-100，按 agent_id 稳定哈希选择）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Agent.AutoUpdatePercent) },
+		Set: func(c *config.Config, v string) { setInt(&c.Agent.AutoUpdatePercent, v) },
+		Validate: func(v string) error {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 0 || n > 100 {
+				return fmt.Errorf("灰度比例应为 0-100 的整数")
+			}
+			return nil
+		}},
 	{Key: "agent.task_owner_only", Group: "Agent",
 		Label: "任务仅创建者可操作（默认开启；团队 owner_only 可为团队成员放开）", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.TaskOwnerOnly) },

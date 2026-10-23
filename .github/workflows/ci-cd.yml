@@ -27,6 +27,8 @@ permissions:
 # 镜像推送目标（华为云 SWR: 国内可访问, 替代 docker.io）
 # 组织名称可直接修改, 凭据通过 Secrets: SWR_USERNAME / SWR_PASSWORD
 env:
+  # 国内网络：Go 模块走 goproxy.cn；如需官方源可改为 https://proxy.golang.org,direct
+  GOPROXY: https://goproxy.cn,direct
   SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
   SWR_ORGANIZATION: iflyelf
   IMAGE_NAME: upgrade-mgr

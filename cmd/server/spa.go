@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,7 +29,9 @@ func spaHandler() http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
-		if strings.HasPrefix(p, "api/") || p == "health" {
+		switch {
+		case strings.HasPrefix(p, "api/"), p == "health", p == "ready",
+			p == "healthz", p == "readyz":
 			http.NotFound(w, r)
 			return
 		}
@@ -37,6 +40,13 @@ func spaHandler() http.Handler {
 		}
 		f, err := distFS.Open(p)
 		if err != nil {
+			// 只有浏览器页面导航才回退 index.html；健康探针、接口和缺失的
+			// 静态资源必须返回 404，避免 200 HTML 被误判为「服务健康」。
+			if !strings.Contains(r.Header.Get("Accept"), "text/html") ||
+				strings.Contains(filepath.Base(p), ".") {
+				http.NotFound(w, r)
+				return
+			}
 			p = "index.html"
 			f, err = distFS.Open(p)
 			if err != nil {

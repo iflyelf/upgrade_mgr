@@ -38,6 +38,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GOPROXY: https://goproxy.cn,direct
+
 concurrency:
   group: windows-e2e-${{ github.ref }}
   cancel-in-progress: true
@@ -65,6 +68,9 @@ jobs:
         # 输出、退出码、stdin、中文脚本 BOM 预处理、cmd 退出码透传。
         run: go test -count=1 -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
 
+      - name: PowerShell 7 兼容性（pwsh）
+        run: go test -count=1 -v -modfile=build/agent-windows.mod ./internal/agent/executor -run TestWindowsPowerShell7E2E
+
       - name: 构建 Agent（amd64）
         run: go build -modfile=build/agent-windows.mod -o dist/upgrade-agent.exe ./cmd/agent
 
@@ -77,11 +83,21 @@ jobs:
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/windows_agent_smoke.ps1 -AgentExe dist\upgrade-agent.exe
 
+      - name: 安装 WiX Toolset v3
+        shell: powershell
+        run: choco install wixtoolset --no-progress -y --execution-timeout=900
+
+      - name: 构建 MSI
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/build_windows_msi.ps1 -AgentExe dist\upgrade-agent.exe -Version 0.1.0
+
       - name: 上传 Agent 产物
         uses: actions/upload-artifact@v7.0.2
         with:
           name: upgrade-agent-windows-e2e
-          path: dist/upgrade-agent*.exe
+          path: |
+            dist/upgrade-agent*.exe
+            dist/upgrade-agent-*-x64.msi
 
   windows-2008r2:
     name: Windows Server 2008 R2（自托管）
@@ -90,6 +106,7 @@ jobs:
     runs-on: [self-hosted, windows, server2008r2]
     env:
       GOTOOLCHAIN: local
+      GOPROXY: https://goproxy.cn,direct
     steps:
       - name: 检出代码
         uses: actions/checkout@v7.0.1
@@ -123,3 +140,45 @@ jobs:
       - name: CLI 冒烟（PowerShell 2.0）
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts\windows_agent_smoke.ps1 -AgentExe dist\upgrade-agent.exe
+
+  windows-arm64:
+    name: Windows arm64（自托管）
+    # 默认关闭：需在 Windows arm64 机器安装 runner，设置仓库变量后启用。
+    if: ${{ vars.ENABLE_WINARM64_RUNNER == 'true' }}
+    runs-on: [self-hosted, windows, arm64]
+    env:
+      GOTOOLCHAIN: local
+      GOPROXY: https://goproxy.cn,direct
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 校验 Go 1.20
+        shell: powershell
+        run: |
+          $v = (go version) 2>&1
+          Write-Host $v
+          if ($v -notmatch "go1\.20\.") {
+            Write-Host "[FAIL] 需要预装 Go 1.20.x"
+            exit 1
+          }
+
+      - name: Windows 单元测试与真实执行 E2E
+        shell: powershell
+        run: |
+          go vet -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -count=1 -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
+          exit $LASTEXITCODE
+
+      - name: 构建 Agent（arm64）
+        shell: powershell
+        run: |
+          $env:CGO_ENABLED = "0"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -modfile=build/agent-windows.mod -o dist\upgrade-agent-arm64.exe ./cmd/agent
+          exit $LASTEXITCODE
+
+      - name: CLI 冒烟（arm64）
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts\windows_agent_smoke.ps1 -AgentExe dist\upgrade-agent-arm64.exe

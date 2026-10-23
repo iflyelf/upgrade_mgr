@@ -58,6 +58,13 @@ type ServiceContext struct {
 	consulRef atomic.Pointer[consul.Client]
 }
 
+// newMaintainer 构造数据库维护器，并注入可通过设置页热更新的审计保留天数。
+func newMaintainer(c *config.Config, db *sql.DB) *maintenance.Maintainer {
+	m := maintenance.New(db)
+	m.SetAuditRetention(func() int { return c.Server.AuditRetentionDays })
+	return m
+}
+
 // New 创建上下文。数据库连接失败会 log.Fatal。
 func New(c *config.Config) *ServiceContext {
 	db := mustOpenDB(c)
@@ -106,7 +113,7 @@ func New(c *config.Config) *ServiceContext {
 		Task:       taskSvc,
 		AgentGW:    gw,
 		Metrics:    metrics.NewCollector(db),
-		Maintainer: maintenance.New(db),
+		Maintainer: newMaintainer(c, db),
 		RBAC:       rbac.NewService(db),
 		Audit:      audit.NewLogger(db), // 审计日志
 	}

@@ -34,6 +34,8 @@ type Spec struct {
 	Stream io.Writer
 	// LangC 为 true 时强制 LANG=C/LC_ALL=C，稳定命令输出（CentOS6 中文环境解析）。
 	LangC bool
+	// MaxOutputBytes 单路输出保留上限（默认 4MB，<=0 使用默认值）。
+	MaxOutputBytes int
 }
 
 // Result 执行结果。
@@ -47,6 +49,45 @@ type Result struct {
 
 // ErrEmptyArgv 空命令。
 var ErrEmptyArgv = errors.New("runner: 空命令")
+
+// DefaultMaxOutputBytes 单次命令保留的最大输出（stdout+stderr 各 4MB）。
+// 防止脚本异常刷日志导致 Agent 内存暴涨；实时 Stream 仍会收到全部输出，
+// 仅最终回传/落库的缓冲被截断。
+const DefaultMaxOutputBytes = 4 << 20
+
+// cappedBuffer 限制缓冲大小的 Writer：超出部分丢弃并记录截断。
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	max       int
+	truncated bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.max <= 0 {
+		return c.buf.Write(p)
+	}
+	remain := c.max - c.buf.Len()
+	if remain > 0 {
+		if len(p) <= remain {
+			_, _ = c.buf.Write(p)
+		} else {
+			_, _ = c.buf.Write(p[:remain])
+			c.truncated = true
+		}
+	} else {
+		c.truncated = true
+	}
+	// 必须返回 len(p)：MultiWriter 会把短写当成错误。
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string {
+	s := c.buf.String()
+	if c.truncated {
+		s += fmt.Sprintf("\n[输出超过 %d 字节，已截断]", c.max)
+	}
+	return s
+}
 
 // Run 执行命令并返回结果。
 //
@@ -75,14 +116,19 @@ func Run(ctx context.Context, spec Spec) (*Result, error) {
 	env = append(env, spec.Env...)
 	cmd.Env = env
 
-	var stdout, stderr bytes.Buffer
+	maxOut := spec.MaxOutputBytes
+	if maxOut <= 0 {
+		maxOut = DefaultMaxOutputBytes
+	}
+	stdout := &cappedBuffer{max: maxOut}
+	stderr := &cappedBuffer{max: maxOut}
 	if spec.Stream != nil {
-		// 实时流式输出：同时保留完整缓冲，供调用方拼装最终日志。
-		cmd.Stdout = io.MultiWriter(&stdout, spec.Stream)
-		cmd.Stderr = io.MultiWriter(&stderr, spec.Stream)
+		// 实时流式输出：同时保留有上限的缓冲，供调用方拼装最终日志。
+		cmd.Stdout = io.MultiWriter(stdout, spec.Stream)
+		cmd.Stderr = io.MultiWriter(stderr, spec.Stream)
 	} else {
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
 	}
 	if spec.Stdin != "" {
 		cmd.Stdin = strings.NewReader(spec.Stdin)

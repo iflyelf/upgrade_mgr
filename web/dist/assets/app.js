@@ -29,9 +29,14 @@
     });
   }
 
-  var state = { user: null, view: 'hosts', hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
+  var state = { user: null, view: 'hosts', lang: (function () {
+    try { return localStorage.getItem('lang') === 'en' ? 'en' : 'zh'; } catch (e) { return 'zh'; }
+  })(), hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
     hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
-    agentTargetVersion: '', agentAutoUpdate: false,
+    agentTargetVersion: '', agentAutoUpdate: false, agentStats: null,
+    compQ: '', compPage: 1, compSize: 50,
+    artifactQ: '', artifactFilterComp: '', artifactPage: 1, artifactSize: 50,
+    artifactPages: 1, artifactTotal: 0,
     guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
@@ -39,8 +44,10 @@
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
     // 任务页按组件/类型/名称筛选与服务端分页。
-    taskFilterComp: '', taskFilterKind: '', taskFilterCreator: '', taskQ: '',
+    taskFilterComp: '', taskFilterKind: '', taskFilterStatus: '', taskFilterCreator: '', taskQ: '',
     taskPage: 1, taskSize: 50, taskPages: 1, taskTotal: 0, taskCreators: null,
+    audit: null, auditTotal: 0, auditPage: 1, auditPages: 1, auditErr: '', auditLoading: false,
+    auditFilters: { q: '', username: '', action: '', status: '', from: '', to: '' },
     // 外部文件白名单表格（页面增删行）
     extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
     orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
@@ -61,7 +68,10 @@
       else if (k === 'checked') el.checked = !!v;
       else el.setAttribute(k, v);
     }
-    (children || []).forEach(function (c) {
+    // 容忍调用方把单个字符串/节点直接作为 children 传入，避免整页渲染崩溃。
+    if (children == null) children = [];
+    else if (!Array.isArray(children)) children = [children];
+    children.forEach(function (c) {
       if (c == null) return;
       el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
     });
@@ -178,6 +188,10 @@
       h('div', { class: 'brand' }, ['🚀 升级控制平台']),
       h('div', { class: 'spacer' }, []),
       themeSwitcher(),
+      state.user ? h('button', {
+        class: 'btn', title: 'Switch language / 切换语言',
+        onclick: function () { toggleLang(); }
+      }, [state.lang === 'en' ? '中文' : 'EN']) : null,
       state.user ? h('button', { class: 'btn', onclick: function() { switchView('password'); } }, ['修改密码']) : null,
       state.user ? h('button', { class: 'btn', onclick: logout }, ['退出']) : null
     ]);
@@ -186,15 +200,21 @@
   function tabs() {
     var items = [['hosts', '主机'], ['components', '组件'], ['artifacts', '制品'], ['tasks', '任务']];
     if (isAdmin() || isSuperAdmin()) {
-      items.push(['org', '人员组织'], ['extbin', '外部文件']);
+      items.push(['org', '人员组织'], ['extbin', '外部文件'], ['audit', '审计日志']);
     }
     if (isSuperAdmin()) {
       items.push(['settings', '设置']);
     }
-    return h('div', { class: 'tabs' }, items.map(function (it) {
+    return h('div', { class: 'tabs', role: 'tablist' }, items.map(function (it) {
       return h('div', {
         class: 'tab' + (state.view === it[0] ? ' active' : ''),
-        onclick: function () { switchView(it[0]); }
+        role: 'tab',
+        'aria-selected': state.view === it[0] ? 'true' : 'false',
+        tabindex: '0',
+        onclick: function () { switchView(it[0]); },
+        onkeydown: function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchView(it[0]); }
+        }
       }, [it[1]]);
     }));
   }
@@ -737,11 +757,100 @@
     else if (v === 'tasks') loadTasks();
     else if (v === 'extbin') loadExternalBinaries();
     else if (v === 'org') loadOrg();
+    else if (v === 'audit') loadAudit();
     else if (v === 'password') render();
     else loadHosts();
   }
 
-  function loginView() {
+  // ---------- URL 路由（hash） ----------
+  //
+  // 刷新/前进后退时恢复页面与主要筛选；使用 replaceState 避免每次渲染都堆历史。
+  // 只持久化列表页的关键状态，弹窗/编辑中的表单不写入 URL。
+  var KNOWN_VIEWS = {
+    hosts: 1, components: 1, artifacts: 1, tasks: 1, org: 1,
+    extbin: 1, audit: 1, settings: 1, password: 1
+  };
+
+  function parseHash() {
+    var raw = (location.hash || '').replace(/^#\/?/, '');
+    if (!raw) return null;
+    var idx = raw.indexOf('?');
+    var view = idx >= 0 ? raw.slice(0, idx) : raw;
+    if (!KNOWN_VIEWS[view]) return null;
+    var params = {};
+    if (idx >= 0) {
+      raw.slice(idx + 1).split('&').forEach(function (kv) {
+        if (!kv) return;
+        var p = kv.split('=');
+        try { params[decodeURIComponent(p[0])] = decodeURIComponent((p[1] || '').replace(/\+/g, ' ')); } catch (e) {}
+      });
+    }
+    return { view: view, params: params };
+  }
+
+  function applyHashToState(r) {
+    var p = r.params || {};
+    var n = function (k, d) { var v = parseInt(p[k], 10); return isNaN(v) ? d : v; };
+    if (r.view === 'hosts') {
+      state.q = p.q || '';
+      state.hostPage = n('page', 1);
+    } else if (r.view === 'components') {
+      state.compQ = p.q || '';
+      state.compPage = n('page', 1);
+    } else if (r.view === 'artifacts') {
+      state.artifactQ = p.q || '';
+      state.artifactFilterComp = p.comp || '';
+      state.artifactPage = n('page', 1);
+    } else if (r.view === 'tasks') {
+      state.taskFilterKind = p.kind || '';
+      state.taskFilterStatus = p.status || '';
+      state.taskFilterComp = p.component_id || '';
+      state.taskFilterCreator = p.created_by || '';
+      state.taskQ = p.q || '';
+      state.taskPage = n('page', 1);
+    } else if (r.view === 'org') {
+      state.orgTab = p.tab || 'users';
+    } else if (r.view === 'audit') {
+      state.auditFilters = {
+        q: p.q || '', username: p.username || '', action: p.action || '',
+        status: p.status || '', from: p.from || '', to: p.to || ''
+      };
+      state.auditPage = n('page', 1);
+    }
+  }
+
+  function syncHash() {
+    if (!state.user) return;
+    var qs = [];
+    var add = function (k, v) { if (v !== '' && v != null) qs.push(k + '=' + encodeURIComponent(v)); };
+    if (state.view === 'hosts') {
+      add('q', state.q); add('page', state.hostPage > 1 ? state.hostPage : '');
+    } else if (state.view === 'components') {
+      add('q', state.compQ); add('page', state.compPage > 1 ? state.compPage : '');
+    } else if (state.view === 'artifacts') {
+      add('q', state.artifactQ); add('comp', state.artifactFilterComp);
+      add('page', state.artifactPage > 1 ? state.artifactPage : '');
+    } else if (state.view === 'tasks') {
+      add('kind', state.taskFilterKind); add('status', state.taskFilterStatus);
+      add('component_id', state.taskFilterComp); add('created_by', state.taskFilterCreator);
+      add('q', state.taskQ); add('page', state.taskPage > 1 ? state.taskPage : '');
+    } else if (state.view === 'org') {
+      if (state.orgTab && state.orgTab !== 'users') add('tab', state.orgTab);
+    } else if (state.view === 'audit') {
+      var f = state.auditFilters || {};
+      add('q', f.q); add('username', f.username); add('action', f.action);
+      add('status', f.status); add('from', f.from); add('to', f.to);
+      add('page', state.auditPage > 1 ? state.auditPage : '');
+    }
+    var h = '#/' + state.view + (qs.length ? '?' + qs.join('&') : '');
+    try {
+      if (location.hash === h) return;
+      if (history.replaceState) history.replaceState(null, '', h);
+      else location.hash = h;
+    } catch (e) {}
+  }
+
+    function loginView() {
     var uEl, pEl;
     var doLogin = function () {
       if (state.loginBusy) return;
@@ -758,7 +867,13 @@
           state.loginBusy = false;
           state.loginName = '';
           state.err = '';
-          loadHosts();
+          var route = parseHash();
+          if (route) {
+            applyHashToState(route);
+            switchView(route.view);
+          } else {
+            loadHosts();
+          }
         })
         .catch(function (e) {
           state.loginBusy = false;
@@ -780,10 +895,16 @@
         (uEl = h('input', { value: state.loginName || '', autocomplete: 'username' }, []))]),
       h('div', { class: 'field' }, [h('label', {}, ['密码']),
         (pEl = h('input', { type: 'password', autocomplete: 'current-password' }, []))]),
-      h('button', {
-        class: 'btn', disabled: state.loginBusy ? 'disabled' : null,
-        onclick: doLogin
-      }, [state.loginBusy ? '登录中…' : '登录'])
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn', disabled: state.loginBusy ? 'disabled' : null,
+          onclick: doLogin
+        }, [state.loginBusy ? '登录中…' : '登录']),
+        h('button', {
+          class: 'btn ghost', title: 'Switch language',
+          onclick: function () { toggleLang(); }
+        }, [state.lang === 'en' ? '中文' : 'EN'])
+      ])
     ]);
     uEl.onkeydown = onKey;
     pEl.onkeydown = onKey;
@@ -820,7 +941,7 @@
     var cols = ['IP', '主机名', 'OS', 'ARCH', '业务组', 'app_code', 'Agent', '来源']
       .concat(listHostDefs.map(function (d) { return d.label; }));
     if (isAdmin()) cols.push('操作');
-    var head = h('tr', {}, cols.map(function (t) { return h('th', {}, [t]); }));
+    var head = h('tr', {}, cols.map(function (t) { return h('th', { scope: 'col' }, [t]); }));
     var rows = state.hosts.map(function (x) {
       var cells = [
         h('td', {}, [ipCell(x)]), h('td', {}, [x.hostname || '-']),
@@ -870,16 +991,54 @@
       ])
       : null;
     return h('div', {}, [
+      agentStatsCard(),
       isAdmin() ? enrollCard() : null,
       state.hostErr ? h('div', { class: 'card' }, [h('div', { class: 'err', role: 'alert' }, [state.hostErr])]) : null,
       isAdmin() ? agentUpdateCard() : null,
       isAdmin() ? hostForm() : null,
       h('div', { class: 'card' }, [
         toolbar,
-        h('div', { class: 'table-wrap' }, [h('table', {}, [h('thead', {}, [head]), h('tbody', {}, rows)])]),
+        (function () {
+          var hostTable = h('table', {}, [h('thead', {}, [head]), h('tbody', {}, rows)]);
+          var hostWrap = h('div', { class: 'table-wrap' }, [hostTable]);
+          var hostBlock = h('div', { class: 'table-block' }, [hostWrap]);
+          attachTableTools(hostTable, 'hosts', false, hostBlock);
+          return hostBlock;
+        })(),
         empty,
         state.total > 0 ? hostsPager() : null
       ])
+    ]);
+  }
+
+  function loadAgentStats() {
+    api('/api/agents/stats')
+      .then(function (d) { state.agentStats = d; render(); })
+      .catch(function () { state.agentStats = null; });
+  }
+
+  function agentStatsCard() {
+    var st = state.agentStats;
+    if (!st || !st.total) return null;
+    var rows = (st.list || []).map(function (x) {
+      return [
+        x.version || '未知',
+        x.os || '-',
+        x.arch || '-',
+        x.count || 0,
+        x.offline || 0,
+        x.outdated
+          ? h('span', { class: 'tag status-failed' }, ['旧版本'])
+          : h('span', { class: 'tag status-success' }, ['最新'])
+      ];
+    });
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['Agent 版本分布']),
+      hint('目标版本：' + (st.target_version || '-') +
+        '；离线 ' + (st.offline || 0) + ' 台；旧版本 ' + (st.outdated || 0) +
+        ' 台（离线按 agent 状态或心跳超过 5 分钟统计）。'),
+      simpleTable(['版本', 'OS', '架构', '数量', '离线', '状态'], st.list || [],
+        function (x, i) { return rows[i]; })
     ]);
   }
 
@@ -1690,10 +1849,16 @@
   function orgTabs() {
     var tabs = [['users', '人员信息'], ['depts', '组织架构'], ['fields', '用户字段'],
       ['roles', '角色'], ['teams', '团队'], ['groups', '服务组'], ['flyiam', 'FlyIAM 人员']];
-    return h('div', { class: 'tabs', style: 'margin-bottom:12px' }, tabs.map(function (t) {
+    return h('div', { class: 'tabs', role: 'tablist', style: 'margin-bottom:12px' }, tabs.map(function (t) {
       return h('div', {
         class: 'tab' + (state.orgTab === t[0] ? ' active' : ''),
-        onclick: function () { state.orgTab = t[0]; render(); }
+        role: 'tab',
+        'aria-selected': state.orgTab === t[0] ? 'true' : 'false',
+        tabindex: '0',
+        onclick: function () { state.orgTab = t[0]; render(); },
+        onkeydown: function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); state.orgTab = t[0]; render(); }
+        }
       }, [t[1]]);
     }));
   }
@@ -2040,7 +2205,7 @@
         tagsEl.appendChild(h('span', { class: 'tag' }, [
           v,
           h('button', {
-            class: 'tag-x', type: 'button', title: '移除',
+            class: 'tag-x', type: 'button', title: '移除', 'aria-label': '移除 ' + v,
             onclick: function () { values.splice(i, 1); renderTags(); }
           }, ['×'])
         ]));
@@ -2427,6 +2592,156 @@
     ]);
   }
 
+  // ---------- 审计日志 ----------
+  //
+  // 服务端按租户过滤（superadmin 可跨租户），保留天数在「设置 → 服务器」调整。
+  function auditFilterQS() {
+    var f = state.auditFilters || {};
+    var qs = [];
+    ['q', 'username', 'action', 'status', 'from', 'to'].forEach(function (k) {
+      if (f[k]) qs.push(k + '=' + encodeURIComponent(f[k]));
+    });
+    return qs.join('&');
+  }
+
+  function auditQuery() {
+    var qs = auditFilterQS();
+    return 'page=' + (state.auditPage || 1) + '&size=50' + (qs ? '&' + qs : '');
+  }
+
+  function loadAudit(page) {
+    if (page) state.auditPage = page;
+    state.view = 'audit';
+    state.auditLoading = true;
+    state.auditErr = '';
+    api('/api/audit-logs?' + auditQuery())
+      .then(function (d) {
+        state.audit = d.list || [];
+        state.auditTotal = d.total || 0;
+        state.auditPage = d.page || 1;
+        state.auditPages = d.pages || 1;
+        state.auditLoading = false;
+        render();
+      })
+      .catch(function (e) {
+        state.auditLoading = false;
+        state.auditErr = e.message;
+        render();
+      });
+  }
+
+  function auditView() {
+    var f = state.auditFilters;
+    var qEl = h('input', {
+      value: f.q || '', placeholder: '用户 / 资源 / 操作 / ID',
+      oninput: function () { f.q = qEl.value; }
+    }, []);
+    var userEl = h('input', {
+      value: f.username || '', placeholder: '精确用户名',
+      oninput: function () { f.username = userEl.value; }
+    }, []);
+    var actionEl = h('input', {
+      value: f.action || '', placeholder: '如 task.start',
+      oninput: function () { f.action = actionEl.value; }
+    }, []);
+    var statusEl = h('select', {
+      value: f.status || '',
+      onchange: function () { f.status = statusEl.value; }
+    }, [
+      h('option', { value: '' }, ['全部结果']),
+      h('option', { value: 'success' }, ['成功']),
+      h('option', { value: 'failed' }, ['失败'])
+    ]);
+    var fromEl = h('input', {
+      type: 'date', value: f.from || '',
+      onchange: function () { f.from = fromEl.value; }
+    }, []);
+    var toEl = h('input', {
+      type: 'date', value: f.to || '',
+      onchange: function () { f.to = toEl.value; }
+    }, []);
+
+    var search = function () { state.auditPage = 1; loadAudit(); };
+    var onEnter = function (e) { if (e.key === 'Enter') search(); };
+    [qEl, userEl, actionEl].forEach(function (el) { el.onkeydown = onEnter; });
+
+    var exportURL = '/api/audit-logs/export' + (auditFilterQS() ? '?' + auditFilterQS() : '');
+
+    var rows = (state.audit || []).map(function (x) {
+      var details = '';
+      try { details = JSON.stringify(x.details || {}); } catch (e) { details = ''; }
+      if (details === '{}') details = '';
+      var shortDetails = details.length > 120 ? details.slice(0, 120) + '…' : details;
+      return [
+        fmtTime(x.created_at),
+        x.username || '-',
+        x.action || '-',
+        (x.resource_type || '-') + (x.resource_id ? ' #' + x.resource_id : ''),
+        x.resource_name || '-',
+        h('span', {
+          class: 'tag ' + (x.status === 'success' ? 'status-success' : 'status-failed')
+        }, [x.status === 'success' ? '成功' : '失败']),
+        x.ip_address || '-',
+        x.error_message || '-',
+        shortDetails
+          ? h('span', { class: 'muted', title: details }, [shortDetails])
+          : '-'
+      ];
+    });
+
+    var pager = state.auditPages > 1 ? h('div', { class: 'pager' }, [
+      h('span', { class: 'muted' }, ['第 ' + state.auditPage + ' / ' + state.auditPages +
+        ' 页 · 共 ' + state.auditTotal + ' 条']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.auditPage <= 1 ? '' : null,
+        onclick: function () { loadAudit(state.auditPage - 1); }
+      }, ['上一页']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.auditPage >= state.auditPages ? '' : null,
+        onclick: function () { loadAudit(state.auditPage + 1); }
+      }, ['下一页'])
+    ]) : null;
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['审计日志']),
+      hint('记录登录、任务、组件、组织与设置等敏感操作。仅管理员可见；普通管理员按租户隔离，' +
+        'superadmin 可查看全部。保留天数在「设置 → 服务器」调整。'),
+      state.auditErr ? h('div', { class: 'err field', role: 'alert' }, [state.auditErr]) : null,
+      h('div', { class: 'grid2' }, [
+        field('搜索', qEl, '匹配用户、资源名/ID、操作'),
+        field('用户名', userEl, '精确匹配')
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('操作', actionEl, '如 task.start / component.update'),
+        field('结果', statusEl, '')
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('开始日期', fromEl, '含当天'),
+        field('结束日期', toEl, '含当天')
+      ]),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', onclick: search }, ['查询']),
+        h('button', {
+          class: 'btn ghost', onclick: function () {
+            state.auditFilters = { q: '', username: '', action: '', status: '', from: '', to: '' };
+            state.auditPage = 1;
+            loadAudit();
+          }
+        }, ['重置']),
+        h('a', { class: 'btn ghost', href: exportURL, download: '' }, ['导出 CSV']),
+        h('span', { class: 'muted' }, [state.auditLoading ? '加载中…'
+          : ('共 ' + state.auditTotal + ' 条' + (state.auditTotal > 20000 ? '（导出最多 2 万条）' : ''))])
+      ]),
+      simpleTable(['时间', '用户', '操作', '资源', '名称', '结果', 'IP', '错误', '详情'],
+        state.audit || [], function (x, i) { return rows[i]; },
+        { key: 'audit' }),
+      (state.audit || []).length === 0 && !state.auditLoading
+        ? h('div', { class: 'muted empty' }, ['没有匹配的审计记录。'])
+        : null,
+      pager
+    ]);
+  }
+
   function settingsView() {
     var inputs = {};
     var groups = {};
@@ -2460,15 +2775,282 @@
     return h('div', {}, sections.concat([h('div', { class: 'card' }, [saveBtn])]));
   }
 
-  function simpleTable(cols, rows, cells) {
-    var head = h('tr', {}, cols.map(function (t) { return h('th', {}, [t]); }));
-    var body = rows.map(function (x) {
-      return h('tr', {}, cells(x).map(function (c) { 
+  // ---------- 轻量 i18n ----------
+  //
+  // 英文模式通过「精确文本节点替换」实现，避免把上千条中文文案改成 t() 调用。
+  // 覆盖范围：导航、按钮、表头、状态、常用表单标签；长段帮助说明保留中文。
+  var I18N_EN = {
+    '主机': 'Hosts', '组件': 'Components', '制品': 'Artifacts', '任务': 'Tasks',
+    '人员组织': 'Organization', '外部文件': 'External binaries', '审计日志': 'Audit logs',
+    '设置': 'Settings', '修改密码': 'Change password', '退出': 'Sign out',
+    '登录': 'Sign in', '用户名': 'Username', '密码': 'Password', '正在登录…': 'Signing in…',
+    '创建任务': 'Create task', '上传制品': 'Upload artifact', '新建组件': 'New component',
+    '新增团队': 'Add team', '新增角色': 'Add role', '新增服务组': 'Add service group',
+    '新增字段': 'Add field', '保存': 'Save', '取消': 'Cancel', '删除': 'Delete',
+    '编辑': 'Edit', '关闭': 'Close', '刷新': 'Refresh', '上传': 'Upload',
+    '查询': 'Search', '重置': 'Reset', '上一页': 'Previous', '下一页': 'Next',
+    '清除筛选': 'Clear filters', '导出 CSV': 'Export CSV', '详情日志': 'Details',
+    '启动': 'Start', '暂停': 'Pause', '推进': 'Promote', '重试': 'Retry',
+    '升级 Agent': 'Upgrade Agent', '测试连接': 'Test connection',
+    '保存设置': 'Save settings', '保存策略': 'Save policy', '添加所选成员': 'Add selected',
+    '从 FlyIAM 同步组织': 'Sync org from FlyIAM', '从 FlyIAM 同步字段': 'Sync fields from FlyIAM',
+    '创建本地账号': 'Create local account', '加载 FlyIAM 用户': 'Load FlyIAM users',
+    '安装组件': 'Install component', '更新组件': 'Update component', '卸载组件': 'Uninstall component',
+    '安装脚本': 'Install script', '更新脚本': 'Update script', '卸载脚本': 'Uninstall script',
+    '预览': 'Preview', '复制': 'Copy', '批量刷新': 'Refresh all', '新增一行': 'Add row',
+    '安全设置': 'Security settings', '设置授权': 'Set permission', '团队详情': 'Team details',
+    '组织架构': 'Org structure', '角色': 'Roles', '团队': 'Teams', '服务组': 'Service groups',
+    '用户字段': 'User fields', '人员信息': 'People', 'FlyIAM 人员': 'FlyIAM users',
+    'Agent 版本分布': 'Agent version distribution', '编辑主机': 'Edit host',
+    '任务名': 'Task name', '任务类型': 'Task type', 'IP 段': 'IP range',
+    '目标版本': 'Target version', '命令脚本': 'Command script', '解释器': 'Interpreter',
+    '脚本参数': 'Script arguments', '标准输入 (stdin)': 'Stdin', '超时': 'Timeout',
+    '灰度策略': 'Rollout strategy', '每批台数 / 百分比': 'Batch size / percent',
+    '金丝雀首批台数': 'Canary first batch', '自动推进': 'Auto promote',
+    '创建者': 'Creator', '状态': 'Status', '类型': 'Type', '版本': 'Version',
+    '进度': 'Progress', '总数': 'Total', '成功': 'Success', '失败': 'Failed',
+    '时间': 'Time', '用户': 'User', '操作': 'Actions', '资源': 'Resource',
+    '名称': 'Name', '显示名称': 'Display name', '模式': 'Mode', '安装路径': 'Install path',
+    '服务': 'Service', '主机名': 'Hostname', '业务组': 'Business group', '来源': 'Source',
+    '组件/命令': 'Component/Command', '创建者': 'Creator', '错误': 'Error', '详情': 'Details',
+    '部门': 'Department', '层级': 'Level', '人数': 'Users', '完整路径': 'Full path',
+    '部门 ID': 'Dept ID', '任务名 / 组件名': 'Task / component name',
+    '待启动': 'Draft', '运行中': 'Running', '已暂停': 'Paused', '成功': 'Success',
+    '失败': 'Failed', '已取消': 'Canceled', '已回滚': 'Rolled back',
+    '在线': 'Online', '离线': 'Offline', '未知': 'Unknown', '待下发': 'Pending',
+    '执行中': 'Running', '已下发': 'Dispatched', '已接收': 'Accepted', '超时': 'Timeout',
+    '已过期': 'Expired', '已跳过': 'Skipped', '待执行': 'Pending',
+    '全部状态': 'All statuses', '全部类型': 'All types', '全部组件': 'All components',
+    '全部创建者': 'All creators', '全部结果': 'All results', '全部组件': 'All components',
+    '按组件筛选：': 'Component: ', '类型：': 'Type: ', '状态：': 'Status: ',
+    '创建者：': 'Creator: ', '搜索：': 'Search: ', '按组件：': 'Component: ',
+    '共': 'Total', '个组件': 'components', '个任务': 'tasks', '个制品': 'artifacts',
+    '个部门': 'departments', '条': 'entries', '台': 'hosts'
+  };
+  var I18N_RULES = [
+    [/^共 (\d+) 个任务.*$/, 'Total $1 task(s)'],
+    [/^筛选结果 (\d+) 个任务.*$/, 'Filtered: $1 task(s)'],
+    [/^第 (\d+) \/ (\d+) 页.*$/, 'Page $1 / $2'],
+    [/^共 (\d+) 个组件.*$/, 'Total $1 component(s)'],
+    [/^共 (\d+) 个制品.*$/, 'Total $1 artifact(s)'],
+    [/^共 (\d+) 个部门.*$/, 'Total $1 department(s)'],
+    [/^共 (\d+) 条.*$/, 'Total $1 entry/entries'],
+    [/^目标版本：(.*)$/, 'Target version: $1'],
+    [/^上次同步 (.*)$/, 'Last sync: $1'],
+    [/^加载失败[:：]\s*(.*)$/, 'Load failed: $1'],
+    [/^保存失败[:：]\s*(.*)$/, 'Save failed: $1'],
+    [/^删除失败[:：]\s*(.*)$/, 'Delete failed: $1']
+  ];
+
+  function toggleLang() {
+    state.lang = state.lang === 'en' ? 'zh' : 'en';
+    try { localStorage.setItem('lang', state.lang); } catch (e) {}
+    document.documentElement.lang = state.lang === 'en' ? 'en' : 'zh-CN';
+    render();
+  }
+
+  function translateText(t) {
+    if (!t) return null;
+    if (I18N_EN[t]) return I18N_EN[t];
+    for (var i = 0; i < I18N_RULES.length; i++) {
+      if (I18N_RULES[i][0].test(t)) return t.replace(I18N_RULES[i][0], I18N_RULES[i][1]);
+    }
+    return null;
+  }
+
+  function applyI18n(root) {
+    if (state.lang !== 'en') return;
+    document.documentElement.lang = 'en';
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+    var nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(function (n) {
+      var raw = n.nodeValue || '';
+      var t = raw.trim();
+      if (!t) return;
+      var tr = translateText(t);
+      if (tr) n.nodeValue = raw.replace(t, tr);
+    });
+    var attrs = ['placeholder', 'title'];
+    attrs.forEach(function (attr) {
+      var els = root.querySelectorAll('[' + attr + ']');
+      for (var i = 0; i < els.length; i++) {
+        var v = els[i].getAttribute(attr);
+        var tr = translateText((v || '').trim());
+        if (tr) els[i].setAttribute(attr, tr);
+      }
+    });
+  }
+
+  function simpleTable(cols, rows, cells, opts) {
+    if (!Array.isArray(rows)) rows = [];
+    var head = h('tr', {}, cols.map(function (t) { return h('th', { scope: 'col' }, [t]); }));
+    var body = rows.map(function (x, i) {
+      // 注意：必须把行号传给 cells；很多页面使用 `(x, i) => rows[i]` 预渲染行。
+      return h('tr', {}, (cells(x, i) || []).map(function (c) {
         // 支持 DOM 节点或字符串
-        return h('td', {}, [typeof c === 'string' ? c : c]); 
+        return h('td', {}, [typeof c === 'string' ? c : c]);
       }));
     });
-    return h('div', { class: 'table-wrap' }, [h('table', {}, [h('thead', {}, [head]), h('tbody', {}, body)])]);
+    var table = h('table', {}, [h('thead', {}, [head]), h('tbody', {}, body)]);
+    var wrap = h('div', { class: 'table-wrap' }, [table]);
+    if (!opts || !opts.key) return wrap;
+    var block = h('div', { class: 'table-block' }, [wrap]);
+    attachTableTools(table, opts.key, !!opts.sortable, block);
+    return block;
+  }
+
+  // attachTableTools 为表格增加「列显隐 / 排序 / 列宽记忆」。
+  //
+  // - 列显隐与列宽按表 key 存在 localStorage；
+  // - sortable 仅用于客户端已全量加载的表（组件/制品/审计），
+  //   分页表（主机/任务）不排序，避免只排当前页造成误解；
+  // - 列宽拖拽后固定 table-layout，避免浏览器重算导致宽度跳变。
+  function attachTableTools(table, key, sortable, container) {
+    if (!table || !key) return;
+    var ths = Array.prototype.slice.call(table.querySelectorAll('thead th'));
+    if (!ths.length) return;
+    var titles = ths.map(function (th) { return (th.textContent || '').trim(); });
+    var hidden = {}, widths = {}, sortState = null;
+    try { hidden = JSON.parse(localStorage.getItem('tblcols:' + key) || '{}') || {}; } catch (e) { hidden = {}; }
+    try { widths = JSON.parse(localStorage.getItem('tblw:' + key) || '{}') || {}; } catch (e) { widths = {}; }
+    try { sortState = JSON.parse(localStorage.getItem('tblsort:' + key) || 'null'); } catch (e) { sortState = null; }
+
+    function save() {
+      try {
+        localStorage.setItem('tblcols:' + key, JSON.stringify(hidden));
+        localStorage.setItem('tblw:' + key, JSON.stringify(widths));
+        localStorage.setItem('tblsort:' + key, JSON.stringify(sortState));
+      } catch (e) {}
+    }
+
+    function applyCols() {
+      ths.forEach(function (th, i) {
+        var hide = !!hidden[titles[i]];
+        th.style.display = hide ? 'none' : '';
+        var rows = table.querySelectorAll('tbody tr');
+        for (var r = 0; r < rows.length; r++) {
+          if (rows[r].cells[i]) rows[r].cells[i].style.display = hide ? 'none' : '';
+        }
+      });
+    }
+
+    function applyWidths() {
+      ths.forEach(function (th, i) {
+        if (widths[titles[i]]) th.style.width = widths[titles[i]];
+      });
+    }
+
+    function sortBy(idx, dir) {
+      var tb = table.querySelector('tbody');
+      if (!tb || !tb.rows.length || idx < 0) return;
+      var rows = Array.prototype.slice.call(tb.rows);
+      rows.sort(function (a, b) {
+        var av = a.cells[idx] ? (a.cells[idx].textContent || '').trim() : '';
+        var bv = b.cells[idx] ? (b.cells[idx].textContent || '').trim() : '';
+        var na = parseFloat(av.replace(/[^0-9.\-]/g, ''));
+        var nb = parseFloat(bv.replace(/[^0-9.\-]/g, ''));
+        var numeric = av !== '' && bv !== '' && !isNaN(na) && !isNaN(nb);
+        var cmp = numeric ? na - nb : av.localeCompare(bv, 'zh-CN');
+        return dir === 'desc' ? -cmp : cmp;
+      });
+      rows.forEach(function (r) { tb.appendChild(r); });
+    }
+
+    function addResizer(th, title) {
+      var grip = h('span', { class: 'col-resizer', 'aria-hidden': 'true' }, []);
+      grip.onclick = function (e) { e.stopPropagation(); };
+      grip.onmousedown = function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var startX = e.clientX, startW = th.offsetWidth;
+        table.style.tableLayout = 'fixed';
+        function move(ev) {
+          th.style.width = Math.max(60, startW + ev.clientX - startX) + 'px';
+        }
+        function up() {
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up);
+          widths[title] = th.style.width;
+          save();
+        }
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      };
+      th.appendChild(grip);
+    }
+
+    var checks = titles.map(function (t, i) {
+      var cb = h('input', { type: 'checkbox', checked: !hidden[t] }, []);
+      cb.onchange = function () {
+        if (cb.checked) delete hidden[t]; else hidden[t] = true;
+        save();
+        applyCols();
+      };
+      return h('label', { class: 'check' }, [cb, ' ' + t]);
+    });
+
+    var sortHint = sortable
+      ? h('span', { class: 'muted' }, ['（点击表头排序）'])
+      : null;
+    var tools = h('details', { class: 'table-tools' }, [
+      h('summary', {}, ['列 / 排序']),
+      h('div', { class: 'table-tools-menu' }, [
+        h('div', { class: 'muted' }, ['勾选显示的列']),
+        h('div', { class: 'table-tools-cols' }, checks),
+        h('div', { class: 'toolbar' }, [
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              hidden = {}; widths = {}; sortState = null;
+              save();
+              ths.forEach(function (th) { th.style.display = ''; th.style.width = ''; });
+              table.style.tableLayout = '';
+              applyCols();
+              applyWidths();
+              ths.forEach(function (th) { th.classList.remove('sort-asc', 'sort-desc'); });
+            }
+          }, ['重置表格设置']),
+          sortHint
+        ])
+      ])
+    ]);
+
+    // 排序：仅客户端全量表启用。
+    if (sortable) {
+      ths.forEach(function (th, idx) {
+        th.classList.add('sortable');
+        th.onclick = function () {
+          if (hidden[titles[idx]]) return;
+          if (sortState && sortState.title === titles[idx]) {
+            sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+          } else {
+            sortState = { title: titles[idx], dir: 'asc' };
+          }
+          save();
+          ths.forEach(function (x) { x.classList.remove('sort-asc', 'sort-desc'); });
+          th.classList.add(sortState.dir === 'desc' ? 'sort-desc' : 'sort-asc');
+          sortBy(idx, sortState.dir);
+        };
+      });
+    }
+    ths.forEach(function (th, i) { addResizer(th, titles[i]); });
+
+    applyCols();
+    applyWidths();
+    if (sortable && sortState) {
+      var idx = titles.indexOf(sortState.title);
+      if (idx >= 0) {
+        var th = ths[idx];
+        th.classList.add(sortState.dir === 'desc' ? 'sort-desc' : 'sort-asc');
+        sortBy(idx, sortState.dir);
+      }
+    }
+
+    if (container) {
+      container.insertBefore(tools, container.firstChild || null);
+    } else if (table.parentNode) {
+      table.parentNode.insertBefore(tools, table);
+    }
   }
 
   // advText 把组件里属于“高级配置”的字段序列化到 textarea。
@@ -2486,6 +3068,21 @@
   function componentsView() {
     var c = state.editingComp || null;
     var tpl = c && c._tpl ? COMP_TEMPLATES.filter(function (t) { return t.key === c._tpl; })[0] : null;
+
+    // 组件列表保持全量（任务/组织下拉依赖），页面内做搜索 + 客户端分页。
+    var q = (state.compQ || '').trim().toLowerCase();
+    var filteredComps = state.components.filter(function (x) {
+      if (!q) return true;
+      return (x.name || '').toLowerCase().indexOf(q) >= 0 ||
+        (x.display_name || '').toLowerCase().indexOf(q) >= 0;
+    });
+    var compPages = Math.max(1, Math.ceil(filteredComps.length / state.compSize));
+    if (state.compPage > compPages) state.compPage = compPages;
+    var compItems = filteredComps.slice((state.compPage - 1) * state.compSize, state.compPage * state.compSize);
+    var compQEl = h('input', {
+      value: state.compQ || '', placeholder: '按名称 / 显示名称搜索',
+      onchange: function () { state.compQ = compQEl.value.trim(); state.compPage = 1; render(); }
+    }, []);
 
     function fillTemplate(key) {
       var t = COMP_TEMPLATES.filter(function (x) { return x.key === key; })[0] || COMP_TEMPLATES[0];
@@ -2640,12 +3237,14 @@
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script'); } }, ['脚本安装']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script_update'); } }, ['脚本更新']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: function () { fillTemplate('windows_exporter_script_uninstall'); } }, ['脚本卸载']) : null,
-      h('span', { class: 'muted' }, ['共 ' + state.components.length + ' 个组件'])
+      h('label', { class: 'muted' }, ['搜索：', compQEl]),
+      h('span', { class: 'muted' }, ['共 ' + filteredComps.length + ' 个组件' +
+        (q ? '（全部 ' + state.components.length + '）' : '')])
     ]);
 
     var table = simpleTable(
       ['ID', '名称', '显示名称', '模式', '安装路径', '服务', '操作'],
-      state.components,
+      compItems,
       function (x) {
         var actions = isAdmin() ? h('div', { class: 'row-actions' }, [
           h('button', {
@@ -2715,14 +3314,29 @@
           }, ['删除'])
         ]) : '-';
         return [x.id, x.name, x.display_name || '-', x.deploy_mode, x.install_path || '-', x.service_name || '-', actions];
-      }
+      },
+      { key: 'components', sortable: true }
     );
 
-    var empty = state.components.length === 0
-      ? h('div', { class: 'muted empty' }, ['还没有组件。点击“新建组件”，或直接点“填入示例：只执行命令（安装 / 更新 / 卸载）、脚本（安装 / 更新 / 卸载）或二进制替换”。'])
+    var empty = filteredComps.length === 0
+      ? h('div', { class: 'muted empty' }, [q
+          ? '没有匹配的组件。'
+          : '还没有组件。点击“新建组件”，或直接点“填入示例：只执行命令（安装 / 更新 / 卸载）、脚本（安装 / 更新 / 卸载）或二进制替换”。'])
       : null;
+    var compPager = compPages > 1 ? h('div', { class: 'pager' }, [
+      h('span', { class: 'muted' }, ['第 ' + state.compPage + ' / ' + compPages +
+        ' 页 · 共 ' + filteredComps.length + ' 个组件']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.compPage <= 1 ? '' : null,
+        onclick: function () { state.compPage -= 1; render(); }
+      }, ['上一页']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.compPage >= compPages ? '' : null,
+        onclick: function () { state.compPage += 1; render(); }
+      }, ['下一页'])
+    ]) : null;
 
-    return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table, empty])]);
+    return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table, compPager, empty])]);
   }
 
   var ARTIFACT_ARCHES = [
@@ -2804,6 +3418,7 @@
             fileEl.value = '';
             verEl.value = '';
             notesEl.value = '';
+            state.artifactPage = 1;
             loadArtifacts();
           })
           .catch(function (e) { state.err = e.message; render(); });
@@ -2831,9 +3446,35 @@
       ]);
     }
 
+    var artQEl = h('input', {
+      value: state.artifactQ || '', placeholder: '版本 / 文件名 / 备注',
+      onchange: function () { state.artifactQ = artQEl.value.trim(); loadArtifacts(1); }
+    }, []);
+    var artCompEl = h('select', {
+      value: state.artifactFilterComp || '',
+      onchange: function () { state.artifactFilterComp = artCompEl.value; loadArtifacts(1); }
+    }, [h('option', { value: '' }, ['全部组件'])].concat(
+      state.components.map(function (c) { return h('option', { value: String(c.id) }, [c.name]); })
+    ));
+    var artPages = state.artifactPages || 1;
+    var artPager = artPages > 1 ? h('div', { class: 'pager' }, [
+      h('span', { class: 'muted' }, ['第 ' + state.artifactPage + ' / ' + artPages +
+        ' 页 · 共 ' + state.artifactTotal + ' 个制品']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.artifactPage <= 1 ? '' : null,
+        onclick: function () { loadArtifacts(state.artifactPage - 1); }
+      }, ['上一页']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.artifactPage >= artPages ? '' : null,
+        onclick: function () { loadArtifacts(state.artifactPage + 1); }
+      }, ['下一页'])
+    ]) : null;
+
     var table = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
-        h('span', { class: 'muted' }, ['共 ' + state.artifacts.length + ' 个制品（版本 × 架构，md5 校验）']),
+        h('span', { class: 'muted' }, ['共 ' + state.artifactTotal + ' 个制品（版本 × 架构，md5 校验）']),
+        h('label', { class: 'muted' }, ['按组件：', artCompEl]),
+        h('label', { class: 'muted' }, ['搜索：', artQEl]),
         h('span', { class: 'muted' }, ['任务匹配 arch 相同或 all、os_family 相同或为空的制品'])
       ]),
       simpleTable(['ID', '组件', '版本', 'ARCH', 'OS', '文件名', '大小', 'MD5', '备注'], state.artifacts,
@@ -2850,8 +3491,14 @@
             (x.md5 || '').slice(0, 12),
             x.notes || '-'
           ];
-        }),
-      state.artifacts.length === 0 ? h('div', { class: 'muted empty' }, ['还没有制品。先在“组件”页创建 node_exporter，再上传下载好的二进制。']) : null
+        },
+        { key: 'artifacts' }),
+      state.artifacts.length === 0 ? h('div', { class: 'muted empty' }, [
+        (state.artifactQ || state.artifactFilterComp)
+          ? '没有匹配的制品。'
+          : '还没有制品。先在“组件”页创建 node_exporter，再上传下载好的二进制。'
+      ]) : null,
+      artPager
     ]);
 
     return h('div', {}, [uploadForm, table]);
@@ -2865,7 +3512,7 @@
       onclick: function (e) { if (e.target === mask) closeTaskDetail(); },
       onscroll: function () { state.taskDetailScroll = mask.scrollTop; }
     }, []);
-    var modal = h('div', { class: 'modal' }, []);
+    var modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true' }, []);
     mask.appendChild(modal);
 
     var title = '任务详情' + (d && d.id ? ' #' + d.id : (state.taskDetailId ? ' #' + state.taskDetailId : ''));
@@ -3451,6 +4098,18 @@
       h('option', { value: 'upgrade' }, ['组件']),
       h('option', { value: 'command' }, ['执行命令'])
     ]);
+    var filterStatusEl = h('select', {
+      value: state.taskFilterStatus,
+      onchange: function () {
+        state.taskFilterStatus = filterStatusEl.value;
+        state.taskPage = 1;
+        loadTasks();
+      }
+    }, [h('option', { value: '' }, ['全部状态'])].concat(
+      Object.keys(TASK_STATUS).map(function (k) {
+        return h('option', { value: k }, [TASK_STATUS[k]]);
+      })
+    ));
     var filterCreatorEl = h('select', {
       value: state.taskFilterCreator,
       onchange: function () {
@@ -3491,19 +4150,22 @@
     var list = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, [
-          (state.taskFilterComp || state.taskFilterKind || state.taskFilterCreator || state.taskQ)
+          (state.taskFilterComp || state.taskFilterKind || state.taskFilterStatus || state.taskFilterCreator || state.taskQ)
             ? ('筛选结果 ' + state.taskTotal + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
             : ('共 ' + state.taskTotal + ' 个任务；点“详情日志”查看批次进度、逐机阶段和执行日志。')
         ]),
         h('label', { class: 'muted' }, ['按组件筛选：', filterCompEl]),
         h('label', { class: 'muted' }, ['类型：', filterKindEl]),
+        h('label', { class: 'muted' }, ['状态：', filterStatusEl]),
         h('label', { class: 'muted' }, ['创建者：', filterCreatorEl]),
         h('label', { class: 'muted' }, ['搜索：', taskQEl]),
-        state.taskFilterComp || state.taskFilterKind || state.taskFilterCreator || state.taskQ
+        state.taskFilterComp || state.taskFilterKind || state.taskFilterStatus ||
+          state.taskFilterCreator || state.taskQ
           ? h('button', {
             class: 'btn ghost small', onclick: function () {
               state.taskFilterComp = '';
               state.taskFilterKind = '';
+              state.taskFilterStatus = '';
               state.taskFilterCreator = '';
               state.taskQ = '';
               state.taskPage = 1;
@@ -3538,7 +4200,8 @@
             (x.created_by || '-') +
               (state.user && x.created_by === state.user.Username ? '（我）' : ''),
             h('div', { class: 'row-actions' }, acts)];
-        }),
+        },
+        { key: 'tasks' }),
       taskPager,
       state.tasks.length === 0
         ? h('div', { class: 'muted empty' }, [
@@ -3612,6 +4275,7 @@
       case 'components': body = componentsView(); break;
       case 'artifacts': body = artifactsView(); break;
       case 'tasks': body = tasksView(); break;
+      case 'audit': body = auditView(); break;
       case 'password': body = passwordView(); break;
       default: body = hostsView();
     }
@@ -3620,6 +4284,8 @@
       body = h('div', {}, [guide(), body]);
     }
     app.appendChild(h('div', { class: 'container' }, [tabs(), body]));
+    applyI18n(app);
+    syncHash();
     // 手工触发的局部刷新（如搜索框输入）会重建 DOM，按 id 还原焦点与光标。
     if (state.focusId) {
       var focusEl = document.getElementById(state.focusId);
@@ -3645,6 +4311,8 @@
   var autoBusy = false;
   function loadHosts(page, quiet) {
     if (!quiet) state.view = 'hosts';
+    // 版本分布变化较慢：只在手动刷新/进入页面时拉取，避免自动刷新每 5 秒查询。
+    if (!quiet) loadAgentStats();
     // 主机自定义字段定义：列表列与编辑表单共用；只加载一次，失败后置空数组。
     if (state.hostFieldDefs === undefined) {
       state.hostFieldDefs = null;
@@ -3712,10 +4380,23 @@
       .then(function (d) { state.components = d || []; render(); })
       .catch(function (e) { state.err = e.message; state.components = []; render(); });
   }
-  function loadArtifacts() {
-    Promise.all([api('/api/artifacts'), api('/api/components')])
+  function artifactURL() {
+    var qs = ['page=' + (state.artifactPage || 1), 'size=' + (state.artifactSize || 50)];
+    if (state.artifactFilterComp) qs.push('component_id=' + encodeURIComponent(state.artifactFilterComp));
+    if (state.artifactQ) qs.push('q=' + encodeURIComponent(state.artifactQ));
+    return '/api/artifacts/paged?' + qs.join('&');
+  }
+
+  function loadArtifacts(page) {
+    if (page) state.artifactPage = page;
+    Promise.all([api(artifactURL()), api('/api/components')])
       .then(function (rs) {
-        state.artifacts = rs[0] || [];
+        var d = rs[0] || {};
+        state.artifacts = d.list || [];
+        state.artifactTotal = d.total || 0;
+        state.artifactPage = d.page || 1;
+        state.artifactSize = d.size || state.artifactSize;
+        state.artifactPages = d.pages || 1;
         state.components = rs[1] || [];
         render();
       })
@@ -3729,6 +4410,7 @@
     var qs = [];
     if (state.taskFilterComp) qs.push('component_id=' + encodeURIComponent(state.taskFilterComp));
     if (state.taskFilterKind) qs.push('kind=' + encodeURIComponent(state.taskFilterKind));
+    if (state.taskFilterStatus) qs.push('status=' + encodeURIComponent(state.taskFilterStatus));
     if (state.taskFilterCreator) qs.push('created_by=' + encodeURIComponent(state.taskFilterCreator));
     if (state.taskQ) qs.push('q=' + encodeURIComponent(state.taskQ));
     qs.push('page=' + (state.taskPage || 1));
@@ -4067,8 +4749,22 @@
   }
 
   // 启动：尝试拿当前用户
+  window.addEventListener('hashchange', function () {
+    if (!state.user) return;
+    var route = parseHash();
+    if (!route) return;
+    applyHashToState(route);
+    switchView(route.view);
+  });
+
   api('/api/auth/userinfo').then(function (u) {
     state.user = u;
-    loadHosts().then(scheduleAutoRefresh, scheduleAutoRefresh);
+    var route = parseHash();
+    if (route) {
+      applyHashToState(route);
+      switchView(route.view);
+    } else {
+      loadHosts().then(scheduleAutoRefresh, scheduleAutoRefresh);
+    }
   }).catch(function () { render(); });
 })();

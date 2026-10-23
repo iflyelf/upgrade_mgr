@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,4 +121,21 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestWindowsPowerShell7E2E PowerShell 7（pwsh）兼容性；未安装时跳过。
+func TestWindowsPowerShell7E2E(t *testing.T) {
+	if _, err := exec.LookPath("pwsh.exe"); err != nil {
+		if _, err2 := exec.LookPath("pwsh"); err2 != nil {
+			t.Skip("未安装 PowerShell 7，跳过")
+		}
+	}
+	res := runWindowsCommand(t, "Write-Output 'pwsh-ok'\r\nexit 0\r\n", "pwsh.exe", "")
+	if !res.Success || !strings.Contains(res.Log, "pwsh-ok") {
+		t.Fatalf("pwsh 执行失败: %+v", res)
+	}
+	res = runWindowsCommand(t, "exit 5\r\n", "pwsh", "")
+	if res.Success || res.ExitCode != 5 {
+		t.Fatalf("pwsh 退出码应透传: %+v", res)
+	}
 }

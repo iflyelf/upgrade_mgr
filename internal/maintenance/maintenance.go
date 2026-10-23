@@ -11,12 +11,17 @@ import (
 // Maintainer 数据库维护器。
 type Maintainer struct {
 	db *sql.DB
+	// auditRetention 返回审计日志保留天数（页面可改，热加载）。
+	auditRetention func() int
 }
 
 // New 创建维护器。
 func New(db *sql.DB) *Maintainer {
 	return &Maintainer{db: db}
 }
+
+// SetAuditRetention 注入审计日志保留天数读取函数（<=0 时使用默认 180 天）。
+func (m *Maintainer) SetAuditRetention(fn func() int) { m.auditRetention = fn }
 
 // Start 启动自动维护任务（每日凌晨 2 点执行）。
 func (m *Maintainer) Start(ctx context.Context) {
@@ -80,13 +85,16 @@ func (m *Maintainer) runMaintenance(ctx context.Context) {
 	// 2. 清理完成任务的旧指令（保留 30 天）
 	m.cleanupOldCommands(ctx)
 
-	// 3. 归档旧任务（保留 90 天）
+	// 3. 清理超过保留期的审计日志
+	m.cleanupAuditLogs(ctx)
+
+	// 4. 归档旧任务（保留 90 天）
 	m.archiveOldTasks(ctx)
 
-	// 4. VACUUM ANALYZE（优化表 + 更新统计信息）
+	// 5. VACUUM ANALYZE（优化表 + 更新统计信息）
 	m.vacuumAnalyze(ctx)
 
-	// 5. 重建膨胀索引
+	// 6. 重建膨胀索引
 	m.reindexIfNeeded(ctx)
 
 	log.Println("✅ 数据库自动维护完成")
@@ -136,6 +144,26 @@ func (m *Maintainer) cleanupOldCommands(ctx context.Context) {
 	}
 	if rows, _ := result.RowsAffected(); rows > 0 {
 		log.Printf("🗑️ 清理旧指令: %d 条", rows)
+	}
+}
+
+// cleanupAuditLogs 清理超过保留期的审计日志（保留天数可在设置页调整）。
+func (m *Maintainer) cleanupAuditLogs(ctx context.Context) {
+	days := 180
+	if m.auditRetention != nil {
+		if v := m.auditRetention(); v > 0 {
+			days = v
+		}
+	}
+	result, err := m.db.ExecContext(ctx, `
+		DELETE FROM audit_logs
+		WHERE created_at < NOW() - ($1 || ' days')::interval`, days)
+	if err != nil {
+		log.Printf("⚠️ 清理审计日志失败: %v", err)
+		return
+	}
+	if rows, _ := result.RowsAffected(); rows > 0 {
+		log.Printf("🗑️ 清理审计日志（保留 %d 天）: %d 条", days, rows)
 	}
 }
 

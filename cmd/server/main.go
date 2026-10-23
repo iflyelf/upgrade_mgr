@@ -196,6 +196,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 
 	// 制品管理
 	mux.HandleFunc("GET /api/artifacts", middleware.RequireAuth(auth, handler.ArtifactList(sc)))
+	mux.HandleFunc("GET /api/artifacts/paged", middleware.RequireAuth(auth, handler.ArtifactListPaged(sc)))
 	mux.HandleFunc("POST /api/artifacts", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ArtifactUpload(sc))))
 	// 制品下载：Agent 用 Bearer token 或匿名内网访问（P2 放开，P3 收敛为签名 URL）
 	// 制品下载：Agent 专用（Bearer 认证 + 租户作用域），防匿名拖取二进制
@@ -215,9 +216,12 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("DELETE /api/tasks/{id}", middleware.RequireAuth(auth, handler.TaskDelete(sc)))
 
 	// 主机
+	mux.HandleFunc("GET /api/agents/stats", middleware.RequireAuth(auth, handler.AgentStats(sc)))
 	mux.HandleFunc("GET /api/hosts/{ip}/upgrade-history", middleware.RequireAuth(auth, handler.HostUpgradeHistory(sc)))
 
 	// 用户与租户管理（管理员）：多租户可用性的必要入口
+	mux.HandleFunc("GET /api/audit-logs", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AuditLogList(sc))))
+	mux.HandleFunc("GET /api/audit-logs/export", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AuditLogExport(sc))))
 	mux.HandleFunc("GET /api/my/permissions", middleware.RequireAuth(auth, handler.MyPermissions(sc)))
 	mux.HandleFunc("GET /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserList(sc))))
 	mux.HandleFunc("POST /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCreate(sc))))

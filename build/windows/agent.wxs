@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows Agent MSI（WiX Toolset v3）
+
+  安装内容：
+    - upgrade-agent.exe → %ProgramFiles%\Upgrade Agent\
+    - 注册并启动 Windows 服务 upgrade-agent（LocalSystem）
+    - 状态目录 %ProgramData%\upgrade-agent\
+
+  安装时必须提供控制台地址与注册令牌：
+    msiexec /i upgrade-agent-x.y.z-x64.msi SERVERURL=https://upgrade.example.com ENROLLTOKEN=<令牌>
+
+  令牌建议使用 15 分钟有效期的一次性注册令牌（设置页生成）。
+  卸载：msiexec /x upgrade-agent-x.y.z-x64.msi（会自动停止并删除服务）。
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Upgrade Agent"
+           Language="2052"
+           Version="$(var.Version)"
+           Manufacturer="iflyelf"
+           UpgradeCode="3C9A7E8B-6D0F-4E7B-9F2A-1B5D8C4E6A71">
+
+    <Package InstallerVersion="200"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="upgrade_mgr Windows Agent"/>
+
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 Upgrade Agent，请先卸载。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="SERVERURL" Secure="yes" />
+    <Property Id="ENROLLTOKEN" Secure="yes" />
+    <Condition Message="必须指定控制台地址：msiexec /i &lt;msi&gt; SERVERURL=https://upgrade.example.com ENROLLTOKEN=&lt;注册令牌&gt;">SERVERURL</Condition>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Upgrade Agent" />
+      </Directory>
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="DATAFOLDER" Name="upgrade-agent" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="AgentServiceComponent" Guid="A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D" Win64="yes">
+        <File Id="AgentExe" Source="$(var.AgentExe)" KeyPath="yes" />
+        <ServiceInstall Id="AgentServiceInstall"
+                        Name="upgrade-agent"
+                        DisplayName="Upgrade Agent (upgrade_mgr)"
+                        Description="upgrade_mgr 被控端：注册、心跳、长轮询执行升级指令"
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Arguments="run --server &quot;[SERVERURL]&quot; --enroll-token &quot;[ENROLLTOKEN]&quot; --state &quot;[DATAFOLDER]state.json&quot; --service" />
+        <ServiceControl Id="AgentServiceControl"
+                        Name="upgrade-agent"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DATAFOLDER">
+      <Component Id="DataFolderComponent" Guid="B2C3D4E5-F6A7-4B8C-9D0E-1F2A3B4C5D6E" Win64="yes">
+        <CreateFolder />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="Upgrade Agent" Level="1">
+      <ComponentRef Id="AgentServiceComponent" />
+      <ComponentRef Id="DataFolderComponent" />
+    </Feature>
+  </Product>
+</Wix>

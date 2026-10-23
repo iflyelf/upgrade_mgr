@@ -378,14 +378,72 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','https://<server
 `service_name` 直接填 SCM 服务名即可。PowerShell 脚本建议显式 `exit` 非零码，
 否则 Windows 不会把脚本内未捕获异常以外的失败反映到退出码上。
 
-⚠️ 尚未在真实 Server 2008 R2 主机上验证，上线前请先实测 `install` / `run` / `watchdog` /
-组件升级与自升级链路。
+**服务运行账户（最小权限）**
+
+默认以 LocalSystem 运行（安装/启停服务、写 Program Files 都需要较高权限）。
+如需低权限账户，先授予其「作为服务登录」权限，再安装：
+
+```powershell
+upgrade-agent.exe install --server https://<server> --enroll-token <token> `
+  --service-account 'DOMAIN\svc_upgrade' --service-password '<password>'
+```
+
+`windows_exporter` 示例脚本同样支持 `-ServiceAccount` / `-ServicePassword`；
+卸载时会删除防火墙规则（Agent 只主动出站，不创建入站规则）。
+
+**MSI 安装包**
+
+CI 的 Windows 作业会生成 `dist/upgrade-agent-<version>-x64.msi`（WiX v3）：
+
+```powershell
+msiexec /i upgrade-agent-0.1.0-x64.msi SERVERURL=https://upgrade.example.com ENROLLTOKEN=<一次性令牌>
+```
+
+- 安装到 `%ProgramFiles%\Upgrade Agent`，注册并启动服务 `upgrade-agent`；
+- `ENROLLTOKEN` 建议使用 15 分钟有效期的注册令牌；
+- 卸载：`msiexec /x upgrade-agent-0.1.0-x64.msi`（自动停服并删除服务）。
+
+**真机回归流水线**
+
+`.github/workflows/windows-e2e.yml`：
+
+- `windows-latest`：每次改动 Agent 相关代码即编译、vet、真实执行 PowerShell/cmd 用例
+  （输出、退出码、stdin、中文脚本 BOM）、PowerShell 7 兼容性、构建 MSI；
+- **Windows Server 2008 R2**：自托管 runner（标签 `server2008r2`），
+  仓库变量 `ENABLE_WIN2008R2_RUNNER=true` 后启用；
+- **Windows arm64**：自托管 runner（标签 `arm64`），仓库变量 `ENABLE_WINARM64_RUNNER=true` 后启用。
+
+首次接入 2008 R2 / arm64 机器时，用管理员 PowerShell 执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows_runner_setup.ps1 `
+  -RepoURL https://github.com/iflyelf/upgrade_mgr `
+  -RunnerToken <runner 注册令牌> -Labels server2008r2
+```
+
+> Server 2008 R2 需 .NET Framework 4.6.2+；Runner 版本过高可能不再支持该系统，脚本默认 2.311.0。
+
+**自动升级灰度**
+
+设置页「Agent → 自动升级灰度比例」支持 0-100：按 `agent_id` 的稳定哈希选择，
+同一主机多次心跳结果一致。建议按 5% → 25% → 100% 分批放量。
+
+**执行资源限制**
+
+- 单次命令脚本上限 1MB（服务端另有 200KB 限制）；
+- 单次命令超时上限 24h，超过自动收敛；
+- stdout/stderr 各保留最多 4MB，超出部分截断并追加提示（实时日志流不受影响）。
 
 ---
 
 ## CI/CD 与镜像发布
 
-仓库只有一条流水线 `.github/workflows/ci-cd.yml`（原 `build.yml` 与 `publish.yml` 已合并，避免同一事件重复编译）：
+主流水线为 `.github/workflows/ci-cd.yml`；另有：
+
+- `.github/workflows/windows-e2e.yml`：Windows 真机（windows-latest / 2008 R2 / arm64）；
+- `.github/workflows/web-e2e.yml`：Playwright 前端端到端。
+
+主流水线说明（原 `build.yml` 与 `publish.yml` 已合并，避免同一事件重复编译）：
 
 - **Pull Request**：跑 PostgreSQL 集成测试、`go vet`、前端语法检查，并编译三种架构做校验，不发布任何产物。
 - **push main / 手动触发**：测试通过后编译多架构二进制与 Legacy Agent，打包发布到 GitHub Release 的 `latest`，并构建推送镜像。
@@ -1958,6 +2016,64 @@ MIT © iflyelf
 - 备用地址轮换不依赖服务端配置，避免「服务端推送错误覆盖地址」导致主机失联。
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
+
+### 2026-10-24 安全与运维补强（审计 / 多租户 / 索引 / 探针）
+
+- **创建用户密码策略**：`rbac.Create` 统一调用 `ValidatePassword`（≥8 位、≤72 字节），
+  管理员创建账号不再能设置弱密码。
+- **审计日志**：
+  - 新增 `GET /api/audit-logs`（租户隔离、用户/操作/资源/结果/日期/关键字过滤、分页）；
+  - 新增 `GET /api/audit-logs/export`（CSV，UTF-8 BOM，最多 2 万条）；
+  - 前端新增「审计日志」页（仅管理员）；
+  - 审计表新增 `tenant_id`，登录事件按用户名回填租户；
+  - 设置项 `server.audit_retention_days`（默认 180，最小 7），维护任务自动清理。
+- **索引**：迁移 026 增加 `upgrade_tasks(component_id)`、
+  `(tenant_id,status,created_at)`；可选 `pg_trgm` 任务名 GIN 索引（无权限时自动跳过）。
+- **任务状态筛选**：任务列表新增状态下拉（后端原本已支持 `status`）。
+- **健康探针**：SPA 兜底只对浏览器页面导航生效；`/healthz`、`/readyz`、
+  `/api/*` 与缺失静态资源一律 404，避免探针把 200 HTML 误判为健康。
+- **多租户隔离**：迁移 027 为 `roles` / `teams` / `service_groups` /
+  `org_departments` / `audit_logs` 增加 `tenant_id`：
+  - 名称唯一约束改为租户内唯一；
+  - 组织层查询从 ctx 推导租户（superadmin 可跨租户）；
+  - 团队/服务组/角色/组织架构/审计均按租户隔离，内部后台调用保持兼容。
+
+### 2026-10-24 Windows Agent 增强（灰度 / 看板 / 资源限制 / MSI）
+
+- **自升级灰度**：`agent.auto_update_percent`（0-100），按 `agent_id` 稳定哈希选择，
+  同一主机结果稳定；设置页可改。
+- **版本分布看板**：新增 `GET /api/agents/stats` 与主机页「Agent 版本分布」卡片
+  （版本/OS/架构、离线数、旧版本数）；Prometheus 新增
+  `upgrade_mgr_agents_version_info`。
+- **执行资源限制**：单命令脚本上限 1MB、超时上限 24h、stdout/stderr 各保留 4MB
+  （超出截断并提示，实时流不受影响）。
+- **最小权限服务账户**：`upgrade-agent install` 新增
+  `--service-account` / `--service-password`；`windows_exporter` 示例脚本新增
+  `-ServiceAccount` / `-ServicePassword`（需预先授予「作为服务登录」）。
+- **MSI**：新增 `build/windows/agent.wxs` + `scripts/build_windows_msi.ps1`，
+  CI 构建 `upgrade-agent-<version>-x64.msi`；安装时传
+  `SERVERURL` / `ENROLLTOKEN`。
+- **真机回归**：
+  - `.github/workflows/windows-e2e.yml` 增加 PowerShell 7 用例、MSI 构建；
+  - 新增 Windows arm64 自托管 runner 作业（`ENABLE_WINARM64_RUNNER=true`）；
+  - 新增 `scripts/windows_runner_setup.ps1`（Go 1.20 + Runner，PS2 兼容解压）；
+  - 2008 R2 作业继续由 `ENABLE_WIN2008R2_RUNNER=true` 控制。
+- 新增示例告警：`deploy/k8s/prometheus-rules.example.yaml`。
+
+### 2026-10-24 前端体验（分页 / 路由 / 表格 / 移动端 / i18n / E2E）
+
+- **分页与搜索**：制品列表改为服务端分页（`/api/artifacts/paged`，支持组件/关键字）；
+  组件列表增加关键字搜索与客户端分页（保持全量供下拉复用）。
+- **URL 路由**：页面视图、主机/任务/组件/制品/审计的筛选与页码写入 hash，
+  刷新/前进后退可恢复；登录后按 URL 直接进入对应页面。
+- **表格工具**：主机/任务/组件/制品/审计表支持列显隐、列宽拖拽与记忆；
+  组件表支持点击表头排序（客户端全量数据）。
+- **移动端与可访问性**：窄屏单列布局、横向滚动标签/表格、弹窗自适应；
+  tabs 增加 `role=tab`、表头 `scope=col`、弹窗 `role=dialog`、焦点可见样式。
+- **英文模式**：顶栏/登录页可切换中英文，覆盖导航、按钮、表头、状态与常用标签
+  （长帮助文本仍为中文）。
+- **Playwright E2E**：`web/e2e` + `.github/workflows/web-e2e.yml`，覆盖登录失败/成功、
+  导航与刷新恢复、创建组件、审计/组织页面、英文切换。
 
 ### 2026-10-24 任务列表按创建者筛选
 

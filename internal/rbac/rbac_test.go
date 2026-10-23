@@ -267,3 +267,29 @@ func TestSetDisabled(t *testing.T) {
 	}
 	t.Log("✅ 已禁用用户无法登录")
 }
+
+// TestCreateRejectsWeakPassword 管理员创建用户同样执行密码策略（≥8 位）。
+func TestCreateRejectsWeakPassword(t *testing.T) {
+	db := openDB(t)
+	t.Cleanup(func() { db.Close() })
+	svc := NewService(db)
+	ctx := context.Background()
+	sfx := time.Now().UnixNano()
+	tid, cl := seedTenant(t, db, fmt.Sprintf("rbac_pw_%d", sfx))
+	defer cl()
+
+	admin := &auth.User{Username: "adminPW", TenantID: tid, Roles: []string{auth.RoleAdmin}}
+	uname := fmt.Sprintf("weak_%d", sfx)
+	if _, err := svc.Create(ctx, admin, CreateRequest{
+		Username: uname, Password: "short", Roles: []string{auth.RoleUser},
+	}); err == nil {
+		t.Fatal("弱密码应被拒绝")
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM local_users WHERE username=$1`, uname) })
+
+	if _, err := svc.Create(ctx, admin, CreateRequest{
+		Username: uname, Password: "good-password-1", Roles: []string{auth.RoleUser},
+	}); err != nil {
+		t.Fatalf("合法密码应通过: %v", err)
+	}
+}

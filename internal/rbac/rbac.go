@@ -121,6 +121,10 @@ func (s *Service) Create(ctx context.Context, actor *auth.User, req CreateReques
 	if strings.TrimSpace(req.Username) == "" || req.Password == "" {
 		return 0, fmt.Errorf("username 与 password 必填")
 	}
+	// 与修改密码一致：至少 8 位、最多 72 字节，避免管理员创建弱密码账号。
+	if err := auth.ValidatePassword("", req.Password); err != nil {
+		return 0, err
+	}
 	roles, err := normalizeRoles(req.Roles)
 	if err != nil {
 		return 0, err
