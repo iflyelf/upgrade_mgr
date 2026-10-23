@@ -1,0 +1,12 @@
+# examples/windows_exporter legacy 配置（Server 2008 R2 ~ 2012 R2 / Windows 7~8.1）
+#
+# 必须配合本仓库的 windows_exporter-<arch>-legacy.exe（含 hardware_info）。
+# 官方 v0.23.1 不含 hardware_info；若使用官方二进制，请从 enabled 中删除 hardware_info。
+# 用法示例：
+#   install.ps1 install -Flavor legacy -ConfigPath .\config-legacy.yaml
+collectors:
+  enabled: cpu,cs,logical_disk,memory,net,os,service,system,textfile,hardware_info
+
+collector:
+  service:
+    services-where: "Name='windows_exporter' OR Name='upgrade-agent'"

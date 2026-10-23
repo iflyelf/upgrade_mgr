@@ -48,9 +48,12 @@
 .PARAMETER BinaryPath
     本地已存在的 exe 路径（跳过下载）。老系统（Server 2008 R2 + PowerShell 2.0/.NET 2.0）
     不支持 TLS 1.2，无法直连 GitHub；推荐由平台先把 exe 下发到本机，再用本参数安装。
+    legacy 默认配置启用 hardware_info，因此必须使用本仓库的 *-legacy 资产；
+    官方 v0.23.1 不含该采集器，请配合 -NoConfig 自备配置。
 
 .PARAMETER BinaryUrl
     完整 exe 下载地址（可用 http）。也可把 exe 放到内网 HTTP 地址，用本参数直接下载。
+    legacy 通道需指向本仓库 *-legacy 资产（含 hardware_info）。
 
 .PARAMETER ConfigPath
     自定义配置文件路径；指定后安装/更新时复制为安装目录下的 config.yaml。
@@ -126,6 +129,8 @@ if ($env:WINDOWS_EXPORTER_VERSION) { $Version = $env:WINDOWS_EXPORTER_VERSION }
 if ($env:WINDOWS_EXPORTER_FLAVOR) { $Flavor = $env:WINDOWS_EXPORTER_FLAVOR }
 # 最后一个用 Go 1.20 构建、支持 Windows 7 / Server 2008 R2 的官方版本。
 $LegacyVersion = '0.23.1'
+# 默认配置模板版本：模板内容变更时递增，旧脚本生成的配置会自动备份并升级。
+$ConfigTemplateVersion = '2'
 if ($env:WINDOWS_EXPORTER_LISTEN_PORT) { $ListenPort = [int]$env:WINDOWS_EXPORTER_LISTEN_PORT }
 # 自定义下载基础地址（末尾不要带斜杠），默认 iflyelf release。
 $script:BaseUrl = ''
@@ -223,16 +228,19 @@ function Initialize-Exporter {
     if ($script:ExporterFlavor -eq 'legacy') {
         $script:AssetName = "$($script:AssetName)-legacy"
         $script:ReleaseVersion = $LegacyVersion
-        if ($Version -and $Version -ne 'latest') { $script:ReleaseVersion = $Version.TrimStart('v') }
+        if ($Version -and $Version -ne 'latest') {
+            $requested = $Version.TrimStart('v')
+            if ($requested -ne $LegacyVersion) {
+                Fail "legacy 通道只提供 v$LegacyVersion（Go 1.20 / 含 hardware_info）；不支持 -Version $Version" 2
+            }
+            $script:ReleaseVersion = $requested
+        }
     } else {
         $script:ReleaseVersion = $Version
         if (-not $script:ReleaseVersion) { $script:ReleaseVersion = 'latest' }
         if ($Version -ne 'latest') {
             Fail 'latest 通道只对应 iflyelf/windows_exporter 的 latest 发布；旧系统/历史版本请用 -Flavor legacy' 2
         }
-    }
-    if ($script:ExporterFlavor -eq 'legacy' -and $script:ReleaseVersion -ne $LegacyVersion) {
-        Write-Warn "legacy 仅验证过 v$LegacyVersion（Go 1.20）；指定 v$($script:ReleaseVersion) 可能不支持旧系统"
     }
     # 平台外部文件名称可覆盖（例如私有镜像使用不同命名）。
     if ($env:WINDOWS_EXPORTER_PLATFORM_ASSET) {
@@ -339,14 +347,16 @@ function Download-Exporter([string]$OutFile) {
         # 自定义内网镜像：默认按对应通道的官方文件名拼接，可用环境变量覆盖文件名。
         $assetFile = "windows_exporter-$arch.exe"
         if ($script:ExporterFlavor -eq 'legacy') {
-            $assetFile = "windows_exporter-$($script:ReleaseVersion)-$arch.exe"
+            $assetFile = "windows_exporter-$arch-legacy.exe"
         }
         if ($env:WINDOWS_EXPORTER_ASSET_FILE) {
             $assetFile = $env:WINDOWS_EXPORTER_ASSET_FILE.Trim()
         }
         $primary = "$($script:BaseUrl)/$assetFile"
     } elseif ($script:ExporterFlavor -eq 'legacy') {
-        $base = "https://github.com/prometheus-community/windows_exporter/releases/download/v$($script:ReleaseVersion)/windows_exporter-$($script:ReleaseVersion)-$arch.exe"
+        # 必须使用本仓库 legacy 资产：官方 v0.23.1 不含 hardware_info，
+        # 而默认配置会启用它。平台资产不可用时仍可 -BinaryPath/-BinaryUrl 指定。
+        $base = "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-$arch-legacy.exe"
         $primary = "$ProxyPrefix$base"
     } else {
         $base = "https://github.com/iflyelf/windows_exporter/releases/download/$Version/windows_exporter-$arch.exe"
@@ -401,7 +411,7 @@ function Download-Exporter([string]$OutFile) {
     $msg = "下载失败：`n" + ($errors -join "`n")
     $asset = $script:AssetName
     if ($script:ExporterFlavor -eq 'legacy') {
-        $pkg = "windows_exporter-$arch-legacy.exe（或官方 windows_exporter-$($script:ReleaseVersion)-$arch.exe）"
+        $pkg = "windows_exporter-$arch-legacy.exe"
         $msg += "`n旧系统需要使用 Go 1.20 构建的 windows_exporter v$($script:ReleaseVersion)。" +
                 "请在控制台「外部文件」为 $asset 上传离线文件（$pkg），上传后平台直接返回本地文件。" +
                 "若平台本身可出网，也可先点该行「刷新缓存」让平台预下载后再重试。"
@@ -420,10 +430,11 @@ function Get-DefaultConfigContent {
     if ($script:ExporterFlavor -eq 'legacy') {
         return @"
 # windows_exporter 配置（由 install.ps1 生成）
+# config-version: 2
 # flavor: legacy（windows_exporter v0.23.1 / Go 1.20，支持 Server 2008 R2 ~ 2012 R2）
-# 注意：旧系统通道不支持 physical_disk；hardware_info 可选（默认不启用），服务过滤使用 services-where。
+# 注意：旧系统通道不支持 physical_disk；hardware_info 默认启用（本仓库 legacy 资产）。
 collectors:
-  enabled: cpu,cs,logical_disk,memory,net,os,service,system,textfile
+  enabled: cpu,cs,logical_disk,memory,net,os,service,system,textfile,hardware_info
 
 collector:
   service:
@@ -432,6 +443,7 @@ collector:
     }
     return @"
 # windows_exporter 配置（由 install.ps1 生成）
+# config-version: 2
 # flavor: latest（windows_exporter latest，支持 Windows 10 / Server 2016+）
 # 采集器与 textfile 目录可在此调整；修改后重启服务生效。
 collectors:
@@ -466,9 +478,11 @@ function Write-DefaultConfig {
     if (-not $needWrite) {
         try { $existing = [System.IO.File]::ReadAllText($ConfigFile) } catch { $existing = '' }
         if ($existing -match '# windows_exporter 配置（由 install\.ps1 生成）') {
-            if ($existing -notmatch ('# flavor:\s*' + [regex]::Escape($script:ExporterFlavor))) {
+            $flavorMatches = $existing -match ('# flavor:\s*' + [regex]::Escape($script:ExporterFlavor))
+            $templateMatches = $existing -match ('# config-version:\s*' + [regex]::Escape($ConfigTemplateVersion))
+            if (-not $flavorMatches -or -not $templateMatches) {
                 $needWrite = $true
-                Write-Warn "现有配置由其它下载通道生成，将备份为 $ConfigFile.bak 后重新生成"
+                Write-Warn "现有配置由旧模板/其它下载通道生成，将备份为 $ConfigFile.bak 后重新生成"
             }
         }
     }
