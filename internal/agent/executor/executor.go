@@ -35,6 +35,9 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	res := &Result{ToVersion: cmd.Payload.ToVersion}
 	comp := cmd.Payload.Component
 	art := cmd.Payload.Artifact
+	// 组件表里的默认 backup_dir 是 Linux 路径（/var/lib/...），Windows 主机
+	// 需要改用 ProgramData 下的 Agent 备份目录，否则会落到当前盘符根目录。
+	comp.BackupDir = resolveBackupDir(comp.BackupDir)
 
 	// 安全：白名单校验 install_path，防止服务端被攻破后下发恶意路径删除任意文件。
 	// script 模式与 exec+script_url 模式不读写 install_path（安装位置由脚本自行决定），
@@ -338,21 +341,26 @@ func runExec(ctx context.Context, comp protocol.ComponentSpec) error {
 
 // runScript 执行 script 模式下载的安装脚本。
 //
-// 优先用 bash（目标发行版均自带），缺失时回退 /bin/sh；通过解释器执行，
-// 避免备份目录挂载 noexec 时直接 exec 失败；
+// Linux 优先 bash，缺失时回退 /bin/sh；Windows 按脚本扩展名选择 PowerShell 或 cmd。
+// 通过解释器执行，避免备份目录挂载 noexec 时直接 exec 失败；
 // 脚本参数来自 exec_args，环境变量来自 exec_env，超时来自 exec_timeout。
-func runScript(ctx context.Context, comp protocol.ComponentSpec, path string) (string, error) {
-	if err := os.Chmod(path, 0755); err != nil {
-		return "", fmt.Errorf("设置安装脚本可执行权限失败: %w", err)
+func runScript(ctx context.Context, comp protocol.ComponentSpec, scriptPath string) (string, error) {
+	// Windows 上下载的制品名可能没有脚本扩展名（如 artifact-1.bin），
+	// 需要先落到带 .ps1 的路径，PowerShell -File 才能执行。
+	prepared, cleanup, err := prepareScriptPath(scriptPath)
+	if err != nil {
+		return "", err
 	}
-	// exec + script_url 时组件可能仍填了 exec_path=/bin/bash，优先尊重它；
-	// 只接受 shell 解释器，避免被用来执行任意二进制。
-	interp := shellPath()
-	switch filepath.Base(strings.TrimSpace(comp.ExecPath)) {
-	case "bash", "sh", "dash", "ksh", "zsh":
-		interp = strings.TrimSpace(comp.ExecPath)
+	defer cleanup()
+	scriptPath = prepared
+	if err := os.Chmod(scriptPath, 0755); err != nil {
+		// Windows 上 Chmod 仅切换只读属性，通常不会失败；失败不阻断执行。
+		log.Printf("⚠️ 设置安装脚本可执行权限失败（继续执行）: %v", err)
 	}
-	argv := append([]string{interp, path}, comp.ExecArgs...)
+	argv, err := scriptArgv(comp, scriptPath)
+	if err != nil {
+		return "", err
+	}
 	timeout, _ := time.ParseDuration(comp.ExecTimeout)
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
@@ -385,12 +393,12 @@ func runPostInstallScript(ctx context.Context, comp protocol.ComponentSpec) (str
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("创建脚本目录失败: %w", err)
 	}
-	f, err := os.CreateTemp(dir, "post-install-*.sh")
+	f, err := os.CreateTemp(dir, "post-install-*"+scriptExt(""))
 	if err != nil {
 		return "", fmt.Errorf("创建 post_install 脚本失败: %w", err)
 	}
-	path := f.Name()
-	defer os.Remove(path)
+	scriptPath := f.Name()
+	defer os.Remove(scriptPath)
 	if _, err := f.WriteString(comp.PostInstallScript); err != nil {
 		f.Close()
 		return "", fmt.Errorf("写入 post_install 脚本失败: %w", err)
@@ -398,16 +406,18 @@ func runPostInstallScript(ctx context.Context, comp protocol.ComponentSpec) (str
 	if err := f.Close(); err != nil {
 		return "", fmt.Errorf("写入 post_install 脚本失败: %w", err)
 	}
-	if err := os.Chmod(path, 0700); err != nil {
-		return "", fmt.Errorf("设置 post_install 脚本权限失败: %w", err)
-	}
+	_ = os.Chmod(scriptPath, 0700)
 
 	timeout, _ := time.ParseDuration(comp.ExecTimeout)
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
+	argv, err := scriptArgv(comp, scriptPath)
+	if err != nil {
+		return "", err
+	}
 	res, err := runner.Run(ctx, runner.Spec{
-		Argv: []string{shellPath(), path}, Dir: comp.WorkDir, Env: comp.ExecEnv, Timeout: timeout,
+		Argv: argv, Dir: comp.WorkDir, Env: comp.ExecEnv, Timeout: timeout,
 	})
 	var out string
 	if res != nil {
@@ -420,14 +430,6 @@ func runPostInstallScript(ctx context.Context, comp protocol.ComponentSpec) (str
 		return out, fmt.Errorf("post_install 脚本退出码 %d", res.ExitCode)
 	}
 	return out, nil
-}
-
-// shellPath 选择目标机可用的 Shell：优先 bash，缺失时回退 sh。
-func shellPath() string {
-	if _, err := os.Stat("/bin/bash"); err == nil {
-		return "/bin/bash"
-	}
-	return "/bin/sh"
 }
 
 func runHealthCheck(ctx context.Context, cmd [][]string) bool {
@@ -448,41 +450,6 @@ func runVersionCheck(ctx context.Context, cmd [][]string, regex string) string {
 		}
 	}
 	return ""
-}
-
-// denyPrefixes 是硬安全边界：任何情况下都拒绝在这些目录下替换/删除文件。
-//
-// 这些路径承载系统启动、配置、内核接口与凭据，一旦被误替换或删除会导致主机
-// 不可恢复；即使服务端被攻破下发恶意 install_path，也必须在 Agent 侧挡住。
-var denyPrefixes = []string{
-	"/etc/", "/boot/", "/sys/", "/proc/", "/dev/", "/root/",
-	"/var/run/", "/run/", "/lib/", "/lib64/", "/bin/", "/sbin/",
-}
-
-// allowInstallRoots 允许部署的根目录，可用 UPGRADE_AGENT_ALLOW_ROOTS 覆盖
-// （冒号分隔，如 "/opt:/data"）。默认涵盖常见部署位置。
-//
-// 设计取舍：以「黑名单为硬边界 + 白名单为可配置」，避免白名单漏项导致
-// 合法部署路径（如 /srv、/var/lib/<app>）被误杀。
-func allowInstallRoots() []string {
-	if v := os.Getenv("UPGRADE_AGENT_ALLOW_ROOTS"); v != "" {
-		var out []string
-		for _, p := range strings.Split(v, ":") {
-			if p = strings.TrimSpace(p); p != "" {
-				if !strings.HasSuffix(p, "/") {
-					p += "/"
-				}
-				out = append(out, p)
-			}
-		}
-		if len(out) > 0 {
-			return out
-		}
-	}
-	return []string{
-		"/usr/local/", "/opt/", "/home/", "/data/", "/app/", "/srv/",
-		"/var/lib/", "/usr/share/", "/tmp/", "/var/tmp/",
-	}
 }
 
 // validateScriptURL 在 Agent 侧再次限制 script_url 只能是绝对 http/https URL，
@@ -555,60 +522,4 @@ func artifactIDFromPath(p string) string {
 		}
 	}
 	return ""
-}
-
-// validateInstallPath 校验 install_path，防止越权替换/删除敏感文件。
-//
-// 校验顺序：
-//  1. 必须是绝对路径且不含 ..（防路径遍历）
-//  2. 命中 denyPrefixes 立即拒绝（硬边界，不可配置绕过）
-//  3. 必须落在 allowInstallRoots 之一内
-//  4. 拒绝符号链接目标逃逸出允许根目录（防 TOCTOU 提权）
-func validateInstallPath(path string) error {
-	if path == "" {
-		return fmt.Errorf("路径为空")
-	}
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("路径不能包含 ..")
-	}
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("必须是绝对路径: %s", path)
-	}
-	absPath := filepath.Clean(path)
-
-	// 2) 硬安全边界优先：黑名单命中即拒，且不允许被白名单覆盖。
-	for _, prefix := range denyPrefixes {
-		if absPath == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(absPath, prefix) {
-			return fmt.Errorf("拒绝操作系统关键路径 %s", absPath)
-		}
-	}
-
-	// 3) 必须在允许的部署根目录内。
-	roots := allowInstallRoots()
-	inAllow := false
-	for _, prefix := range roots {
-		if strings.HasPrefix(absPath, prefix) {
-			inAllow = true
-			break
-		}
-	}
-	if !inAllow {
-		return fmt.Errorf("路径 %s 不在允许的部署目录内（可用 UPGRADE_AGENT_ALLOW_ROOTS 配置）", absPath)
-	}
-
-	// 4) 防符号链接指向系统关键路径（TOCTOU 提权）。
-	//
-	// 只用黑名单校验解析后的真实路径，不再要求真实路径仍落在白名单内：
-	// 发行版会合法地将部署目录符号链接到别处（如 /usr/local -> /var/usrlocal），
-	// 若要求真实路径也在白名单内会误杀正常系统布局。
-	// 黑名单才是硬安全边界——它能拦住"白名单目录里的软链指向 /etc"这类攻击。
-	if realParent, err := filepath.EvalSymlinks(filepath.Dir(absPath)); err == nil {
-		realTarget := filepath.Join(realParent, filepath.Base(absPath))
-		for _, prefix := range denyPrefixes {
-			if realTarget == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(realTarget, prefix) {
-				return fmt.Errorf("符号链接指向系统关键路径 %s", realTarget)
-			}
-		}
-	}
-	return nil
 }

@@ -1,6 +1,6 @@
-// Package watchdog Agent 保活看门狗：flock 单实例+心跳新鲜度+拉起。
+// Package watchdog Agent 保活看门狗：单实例锁+心跳新鲜度+拉起。
 //
-// 设计：由 cron 每分钟调用一次；检查 state 心跳新鲜度，超阈值则拉起 Agent。
+// Linux 由 cron 每分钟调用；Windows 由计划任务每分钟调用（安装器注册）。
 package watchdog
 
 import (
@@ -9,10 +9,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"syscall"
 	"time"
 
+	"github.com/iflyelf/upgrade_mgr/internal/agent/agentpath"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/selfupdate"
 )
 
@@ -45,27 +44,16 @@ func readState(path string) (stateFile, error) {
 
 // Check 检查 Agent 存活性，必要时拉起；连续崩溃触发回滚。
 func Check(statePath, binPath string, threshold time.Duration) error {
-	// flock 单实例保护。
-	//
-	// 安全要点：绝不能把锁放在 /var/lock、/tmp 等 world-writable 目录。
-	// 实测 /run/lock 为 drwxrwxrwt，普通用户可预先创建并长期持有该锁，
-	// 使本函数每次都判定「另一实例在运行」而直接返回，
-	// 从而永久禁用 root Agent 的保活与崩溃回滚（拒绝服务 + 掩盖故障）。
-	// 因此锁文件放在仅 root 可写的运行目录，并用 O_NOFOLLOW 阻断符号链接替换。
-	lockPath, err := ensureLockPath()
+	// 单实例保护：同一时刻只允许一个 watchdog 执行拉起/回滚。
+	release, ok, err := acquireLock()
 	if err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
-	if err != nil {
-		return fmt.Errorf("打开锁文件失败（疑似被替换为符号链接）: %w", err)
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if !ok {
 		// 另一实例在运行
 		return nil
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer release()
 
 	// 读 state 心跳
 	state, err := readState(statePath)
@@ -93,8 +81,7 @@ func Check(statePath, binPath string, threshold time.Duration) error {
 	// 连续崩溃 ≥3 次 → 回滚（防自升级后新版本持续崩溃）
 	if state.CrashCount >= 3 {
 		fmt.Printf("⚠️ Agent 连续崩溃 %d 次，触发回滚...\n", state.CrashCount)
-		backupDir := "/var/lib/upgrade-agent/backup"
-		if err := selfupdate.Rollback(binPath, backupDir); err != nil {
+		if err := selfupdate.Rollback(binPath, agentpath.BackupDir()); err != nil {
 			return fmt.Errorf("回滚失败: %w", err)
 		}
 		state.CrashCount = 0
@@ -108,12 +95,10 @@ func Check(statePath, binPath string, threshold time.Duration) error {
 	if state.ServerURL != "" {
 		args = append(args, "--server", state.ServerURL)
 	}
-	cmd := exec.Command(binPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	if err := startAgent(binPath, args); err != nil {
 		return fmt.Errorf("拉起失败: %w", err)
 	}
-	return cmd.Process.Release()
+	return nil
 }
 
 // updateState 只修改 crash_count / last_heartbeat，保留完整凭据字段。
@@ -142,22 +127,12 @@ func updateState(path string, crashCount int, lastHeartbeat time.Time) {
 	_ = os.Rename(tmp, path)
 }
 
-// lockDir 保活锁所在目录：必须仅 root 可写，不可使用 /var/lock 或 /tmp。
-const lockDir = "/var/lib/upgrade-agent"
-
-// ensureLockPath 确保锁目录存在且权限收紧（0700），返回锁文件绝对路径。
-//
-// 若目录已存在但权限过宽（组/其他可写），主动收紧，避免非特权用户抢占锁。
-func ensureLockPath() (string, error) {
-	if err := os.MkdirAll(lockDir, 0700); err != nil {
-		return "", fmt.Errorf("创建锁目录失败: %w", err)
+// spawnAgent 直接拉起一个脱离当前会话的 Agent 进程（非 Windows 服务场景）。
+func spawnAgent(binPath string, args []string) error {
+	cmd := exec.Command(binPath, args...)
+	detachProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
 	}
-	if fi, err := os.Stat(lockDir); err == nil {
-		if fi.Mode().Perm()&0022 != 0 {
-			if err := os.Chmod(lockDir, 0700); err != nil {
-				return "", fmt.Errorf("锁目录权限过宽且无法收紧: %w", err)
-			}
-		}
-	}
-	return filepath.Join(lockDir, "watchdog.lock"), nil
+	return cmd.Process.Release()
 }

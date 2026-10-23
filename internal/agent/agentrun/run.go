@@ -139,7 +139,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			// 正常停止（服务停止/收到信号）返回 nil，避免 Windows SCM 判定为崩溃并触发恢复动作。
+			return nil
 		case <-heartbeatTicker.C:
 			a.heartbeat()
 		default:
