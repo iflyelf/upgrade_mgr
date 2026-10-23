@@ -10,7 +10,8 @@
       status     查看安装状态与版本
 
     兼容 Windows Server 2008 R2 ~ Windows 11，PowerShell 2.0 起可用
-    （下载使用 System.Net.WebClient，不依赖 Invoke-WebRequest / Expand-Archive）。
+    （下载使用 System.Net.HttpWebRequest，不依赖 Invoke-WebRequest / Expand-Archive）。
+    Windows 10 / Server 2016 以下自动使用 legacy 通道，避免 Go 1.21+ 二进制无法启动。
 
 .PARAMETER Action
     install（默认）/ update / uninstall / status。
@@ -26,6 +27,14 @@
 
 .PARAMETER Version
     目标版本，默认 latest（iflyelf/windows_exporter 的 latest 发布）。
+    legacy 通道默认使用官方 v0.23.1；一般无需手动指定。
+
+.PARAMETER Flavor
+    auto（默认）/ latest / legacy。
+    auto 在 Windows 10 / Server 2016 及以上使用 latest；在 Windows 7 / 8 / 8.1 /
+    Server 2008 R2 / 2012 / 2012 R2 使用 legacy。
+    legacy 固定使用官方 windows_exporter v0.23.1（Go 1.20 构建，最后支持旧系统的版本），
+    对应平台外部文件 windows-exporter-<arch>-legacy。
 
 .PARAMETER ListenPort
     监听端口，默认 16666。
@@ -83,6 +92,9 @@ param(
 
     [string]$Arch = '',
     [string]$Version = 'latest',
+
+    [ValidateSet('auto', 'latest', 'legacy')]
+    [string]$Flavor = 'auto',
     [int]$ListenPort = 16666,
     [string]$TextfileDir = 'C:\monitor\windows_exporter\textfile_inputs',
     [string]$InstallDir = '',
@@ -111,6 +123,9 @@ $FirewallRule = "windows_exporter (TCP $ListenPort)"
 $ProxyPrefix = 'https://proxy.xiaonuo.live/?url='
 if ($env:WINDOWS_EXPORTER_PROXY) { $ProxyPrefix = $env:WINDOWS_EXPORTER_PROXY }
 if ($env:WINDOWS_EXPORTER_VERSION) { $Version = $env:WINDOWS_EXPORTER_VERSION }
+if ($env:WINDOWS_EXPORTER_FLAVOR) { $Flavor = $env:WINDOWS_EXPORTER_FLAVOR }
+# 最后一个用 Go 1.20 构建、支持 Windows 7 / Server 2008 R2 的官方版本。
+$LegacyVersion = '0.23.1'
 if ($env:WINDOWS_EXPORTER_LISTEN_PORT) { $ListenPort = [int]$env:WINDOWS_EXPORTER_LISTEN_PORT }
 # 自定义下载基础地址（末尾不要带斜杠），默认 iflyelf release。
 $script:BaseUrl = ''
@@ -186,6 +201,48 @@ function Resolve-Arch {
     if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { return 'arm64' }
     if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { return 'arm64' }
     return 'amd64'
+}
+
+function Resolve-Flavor {
+    $f = $Flavor
+    if ($env:WINDOWS_EXPORTER_FLAVOR) { $f = $env:WINDOWS_EXPORTER_FLAVOR }
+    $f = ($f + '').Trim().ToLower()
+    if ($f -eq 'latest' -or $f -eq 'legacy') { return $f }
+    if ($f -ne '' -and $f -ne 'auto') {
+        Fail "不支持的 Flavor: $f（可选 auto / latest / legacy）" 2
+    }
+    # Go 1.21+ 的二进制不再支持 Windows 7 / 8 / 8.1 / Server 2008 R2 / 2012 / 2012 R2。
+    # Windows 10 / Server 2016 起主版本号为 10。
+    if ([Environment]::OSVersion.Version.Major -lt 10) { return 'legacy' }
+    return 'latest'
+}
+
+function Initialize-Exporter {
+    $script:ExporterFlavor = Resolve-Flavor
+    $script:AssetName = "windows-exporter-$($script:ResolvedArch)"
+    if ($script:ExporterFlavor -eq 'legacy') {
+        $script:AssetName = "$($script:AssetName)-legacy"
+        $script:ReleaseVersion = $LegacyVersion
+        if ($Version -and $Version -ne 'latest') { $script:ReleaseVersion = $Version.TrimStart('v') }
+    } else {
+        $script:ReleaseVersion = $Version
+        if (-not $script:ReleaseVersion) { $script:ReleaseVersion = 'latest' }
+        if ($Version -ne 'latest') {
+            Fail 'latest 通道只对应 iflyelf/windows_exporter 的 latest 发布；旧系统/历史版本请用 -Flavor legacy' 2
+        }
+    }
+    if ($script:ExporterFlavor -eq 'legacy' -and $script:ReleaseVersion -ne $LegacyVersion) {
+        Write-Warn "legacy 仅验证过 v$LegacyVersion（Go 1.20）；指定 v$($script:ReleaseVersion) 可能不支持旧系统"
+    }
+    # 平台外部文件名称可覆盖（例如私有镜像使用不同命名）。
+    if ($env:WINDOWS_EXPORTER_PLATFORM_ASSET) {
+        $script:AssetName = $env:WINDOWS_EXPORTER_PLATFORM_ASSET.Trim()
+    }
+    $osv = [Environment]::OSVersion.Version
+    Write-Step "下载通道: $($script:ExporterFlavor)（OS $($osv.Major).$($osv.Minor) build $($osv.Build)，平台资产 $($script:AssetName)）"
+    if ($script:ExporterFlavor -eq 'legacy') {
+        Write-Step "旧系统通道使用 windows_exporter v$($script:ReleaseVersion)（Go 1.20，支持 Server 2008 R2 ~ 2012 R2）"
+    }
 }
 
 function Get-ServiceState {
@@ -272,20 +329,32 @@ function Download-Exporter([string]$OutFile) {
         if (-not (Test-DownloadedFile $OutFile)) {
             Fail "本地安装包过小或不可读，可能不是 windows_exporter.exe: $BinaryPath" 1
         }
-        return $OutFile
+        return
     }
 
+    $arch = $script:ResolvedArch
     if ($BinaryUrl) {
         $primary = $BinaryUrl
     } elseif ($script:BaseUrl) {
-        $primary = "$($script:BaseUrl)/windows_exporter-$($script:ResolvedArch).exe"
+        # 自定义内网镜像：默认按对应通道的官方文件名拼接，可用环境变量覆盖文件名。
+        $assetFile = "windows_exporter-$arch.exe"
+        if ($script:ExporterFlavor -eq 'legacy') {
+            $assetFile = "windows_exporter-$($script:ReleaseVersion)-$arch.exe"
+        }
+        if ($env:WINDOWS_EXPORTER_ASSET_FILE) {
+            $assetFile = $env:WINDOWS_EXPORTER_ASSET_FILE.Trim()
+        }
+        $primary = "$($script:BaseUrl)/$assetFile"
+    } elseif ($script:ExporterFlavor -eq 'legacy') {
+        $base = "https://github.com/prometheus-community/windows_exporter/releases/download/v$($script:ReleaseVersion)/windows_exporter-$($script:ReleaseVersion)-$arch.exe"
+        $primary = "$ProxyPrefix$base"
     } else {
-        $base = "https://github.com/iflyelf/windows_exporter/releases/download/$Version/windows_exporter-$($script:ResolvedArch).exe"
+        $base = "https://github.com/iflyelf/windows_exporter/releases/download/$Version/windows_exporter-$arch.exe"
         $primary = "$ProxyPrefix$base"
     }
     $platform = ''
     if ($PlatformURL -and -not $BinaryUrl) {
-        $platform = $PlatformURL.TrimEnd('/') + "/api/external/binary/windows-exporter-" + $script:ResolvedArch
+        $platform = $PlatformURL.TrimEnd('/') + "/api/external/binary/" + $script:AssetName
     }
     $platformLocal = ''
     if ($platform) { $platformLocal = $platform + '?local=1' }
@@ -321,7 +390,7 @@ function Download-Exporter([string]$OutFile) {
             if (-not (Test-DownloadedFile $OutFile)) {
                 throw '下载文件不存在或过小（可能是错误页面）'
             }
-            return $OutFile
+            return
         } catch {
             $errors += ("{0}: {1}" -f $a.Label, $_.Exception.Message)
             Write-Warn "$($a.Label) 失败：$($_.Exception.Message)"
@@ -330,33 +399,43 @@ function Download-Exporter([string]$OutFile) {
 
     Remove-Item -Force $OutFile -ErrorAction SilentlyContinue
     $msg = "下载失败：`n" + ($errors -join "`n")
-    if (-not $tls12Supported -and $PlatformURL) {
-        $msg += "`n平台未找到离线文件（?local=1 未命中）。请在控制台「外部文件」为 " +
-                "windows-exporter-$($script:ResolvedArch) 上传离线 exe；上传后平台直接返回本地文件，" +
-                "无需平台出网。若平台本身可出网，也可先点该行「刷新缓存」让平台预下载后再重试。" +
-                "还可用 -BinaryPath 指定本地文件 / -BinaryUrl 指定内网 HTTP 地址。"
+    $asset = $script:AssetName
+    if ($script:ExporterFlavor -eq 'legacy') {
+        $pkg = "windows_exporter-$arch-legacy.exe（或官方 windows_exporter-$($script:ReleaseVersion)-$arch.exe）"
+        $msg += "`n旧系统需要使用 Go 1.20 构建的 windows_exporter v$($script:ReleaseVersion)。" +
+                "请在控制台「外部文件」为 $asset 上传离线文件（$pkg），上传后平台直接返回本地文件。" +
+                "若平台本身可出网，也可先点该行「刷新缓存」让平台预下载后再重试。"
     } else {
-        $msg += "`n请在控制台「外部文件」为 windows-exporter-$($script:ResolvedArch) 上传离线 exe，" +
+        $pkg = "windows_exporter-$arch.exe"
+        $msg += "`n请在控制台「外部文件」为 $asset 上传离线文件（$pkg），" +
                 "或改用 -BinaryPath / -BinaryUrl。"
+    }
+    if (-not $tls12Supported -and $PlatformURL) {
+        $msg += "`n当前 .NET 不支持 TLS 1.2，脚本只尝试平台本地/缓存；不会等待平台现场下载。"
     }
     Fail $msg 1
 }
 
-function Write-DefaultConfig {
-    if ($NoConfig) {
-        Write-Step '跳过配置生成（-NoConfig）'
-        return
-    }
-    if ($ConfigPath -and (Test-Path $ConfigPath)) {
-        Write-Step "使用自定义配置 $ConfigPath"
-        Copy-Item -Force $ConfigPath $ConfigFile
-    } elseif (-not (Test-Path $ConfigFile)) {
-        Write-Step "生成默认配置 $ConfigFile"
-        $content = @"
+function Get-DefaultConfigContent {
+    if ($script:ExporterFlavor -eq 'legacy') {
+        return @"
 # windows_exporter 配置（由 install.ps1 生成）
+# flavor: legacy（windows_exporter v0.23.1 / Go 1.20，支持 Server 2008 R2 ~ 2012 R2）
+# 注意：旧系统通道不支持 physical_disk；hardware_info 可选（默认不启用），服务过滤使用 services-where。
+collectors:
+  enabled: cpu,cs,logical_disk,memory,net,os,service,system,textfile
+
+collector:
+  service:
+    services-where: "Name='windows_exporter' OR Name='upgrade-agent'"
+"@
+    }
+    return @"
+# windows_exporter 配置（由 install.ps1 生成）
+# flavor: latest（windows_exporter latest，支持 Windows 10 / Server 2016+）
 # 采集器与 textfile 目录可在此调整；修改后重启服务生效。
 collectors:
-  enabled: cpu,logical_disk,physical_disk,memory,os,hardware_info,net,service
+  enabled: cpu,logical_disk,physical_disk,memory,os,hardware_info,net,service,textfile
 
 collector:
   textfile:
@@ -369,13 +448,44 @@ collector:
     # examples/windows_exporter/config.yaml
     include: "windows_exporter|upgrade-agent"
 "@
-        # 配置里含中文注释：用无 BOM 的 UTF-8 写入。
-        # 不用 Set-Content -Encoding UTF8：PS 5 会写 BOM，YAML 解析器可能报错。
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($ConfigFile, $content, $utf8NoBom)
-    } else {
-        Write-Step "保留已有配置 $ConfigFile"
+}
+
+function Write-DefaultConfig {
+    if ($NoConfig) {
+        Write-Step '跳过配置生成（-NoConfig）'
+        return
     }
+    if ($ConfigPath -and (Test-Path $ConfigPath)) {
+        Write-Step "使用自定义配置 $ConfigPath"
+        Write-Warn "自定义配置需兼容当前下载通道 $($script:ExporterFlavor)，不兼容会导致服务启动失败"
+        Copy-Item -Force $ConfigPath $ConfigFile
+        return
+    }
+    $needWrite = -not (Test-Path $ConfigFile)
+    $existing = ''
+    if (-not $needWrite) {
+        try { $existing = [System.IO.File]::ReadAllText($ConfigFile) } catch { $existing = '' }
+        if ($existing -match '# windows_exporter 配置（由 install\.ps1 生成）') {
+            if ($existing -notmatch ('# flavor:\s*' + [regex]::Escape($script:ExporterFlavor))) {
+                $needWrite = $true
+                Write-Warn "现有配置由其它下载通道生成，将备份为 $ConfigFile.bak 后重新生成"
+            }
+        }
+    }
+    if (-not $needWrite) {
+        Write-Step "保留已有配置 $ConfigFile"
+        return
+    }
+    if (Test-Path $ConfigFile) {
+        Copy-Item -Force $ConfigFile "$ConfigFile.bak"
+    } else {
+        Write-Step "生成默认配置 $ConfigFile"
+    }
+    # 配置里含中文注释：用无 BOM 的 UTF-8 写入。
+    # 不用 Set-Content -Encoding UTF8：PS 5 会写 BOM，YAML 解析器可能报错。
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($ConfigFile, (Get-DefaultConfigContent), $utf8NoBom)
+    Write-Step "配置已按 $($script:ExporterFlavor) 通道生成"
 }
 
 function Ensure-Dirs {
@@ -395,12 +505,23 @@ function Remove-FirewallRule {
     & netsh advfirewall firewall delete rule name="$FirewallRule" 2>$null | Out-Null
 }
 
+function Get-ExporterArgs {
+    # 两个通道的 textfile 参数名不同：
+    #   v0.23.1（旧系统）：--collector.textfile.directory
+    #   latest（Go 1.27） ：--collector.textfile.directories
+    $textfileFlag = '--collector.textfile.directories'
+    if ($script:ExporterFlavor -eq 'legacy') {
+        $textfileFlag = '--collector.textfile.directory'
+    }
+    return '--config.file="' + $ConfigFile + '"' +
+           ' --web.listen-address=:' + $ListenPort +
+           ' ' + $textfileFlag + '="' + $TextfileDir + '"'
+}
+
 function Create-Service {
     # 使用 New-Service 而非 sc.exe create：binPath 含空格与引号时，
     # PowerShell 调用原生 exe 的转义规则很绕，New-Service 直接按原样写入。
-    $argLine = '--config.file="' + $ConfigFile + '"' +
-               ' --web.listen-address=:' + $ListenPort +
-               ' --collector.textfile.directory="' + $TextfileDir + '"'
+    $argLine = Get-ExporterArgs
     $binPath = '"' + $ExePath + '" ' + $argLine
 
     Write-Step "删除同名旧服务（如存在）"
@@ -479,8 +600,101 @@ function Get-ExporterVersion {
     }
 }
 
+function Get-ServiceBinPath {
+    try {
+        $svc = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
+        if ($svc) { return $svc.PathName }
+    } catch { }
+    return ''
+}
+
+function Set-ServiceBinPath([string]$BinPath) {
+    if (-not $BinPath) { return }
+    try {
+        $svc = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
+        if (-not $svc) { return }
+        # Win32_Service.Change 只改 PathName，其余传 $null 表示保持不变（含服务账户）。
+        $r = $svc.Change($null, $BinPath, $null, $null, $null, $null, $null, $null, $null, $null, $null)
+        if ($r.ReturnValue -ne 0) {
+            Write-Warn "更新服务启动参数失败（WMI 返回 $($r.ReturnValue)）"
+        }
+    } catch {
+        Write-Warn "更新服务启动参数失败：$($_.Exception.Message)"
+    }
+}
+
+function Update-ServiceArgs {
+    $binPath = '"' + $ExePath + '" ' + (Get-ExporterArgs)
+    Write-Step '更新服务启动参数（保留原服务账户）'
+    Set-ServiceBinPath $binPath
+}
+
+function Show-ServiceFailureDetails {
+    Write-Warn '==== 服务启动诊断开始 ===='
+    try {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc) { Write-Warn "服务状态: $($svc.Status)" } else { Write-Warn '服务不存在' }
+    } catch { }
+    try {
+        & sc.exe qc $ServiceName 2>&1 | ForEach-Object { Write-Warn "sc qc: $_" }
+    } catch { }
+    try {
+        $events = Get-EventLog -LogName Application -Newest 100 -ErrorAction Stop |
+            Where-Object {
+                $_.Source -eq 'Service Control Manager' -or
+                $_.Source -eq $ServiceName -or
+                $_.Message -match 'windows_exporter'
+            } |
+            Select-Object -First 5
+        if (-not $events) {
+            Write-Warn '最近事件日志中没有 windows_exporter / 服务控制管理器记录'
+        } else {
+            foreach ($e in $events) {
+                $text = ($e.Message -replace '\s+', ' ').Trim()
+                Write-Warn ("事件[{0}] {1}: {2}" -f $e.TimeGenerated, $e.Source, $text)
+            }
+        }
+    } catch {
+        Write-Warn "读取事件日志失败：$($_.Exception.Message)"
+    }
+    try {
+        $ver = & $ExePath --version 2>&1
+        Write-Warn ("exe --version: {0}（退出码 {1}）" -f (($ver | Out-String).Trim()), $LASTEXITCODE)
+    } catch {
+        Write-Warn "exe 无法执行（常见于二进制与系统不兼容）：$($_.Exception.Message)"
+    }
+    $outFile = Join-Path $env:TEMP "windows_exporter-fg-$PID.out"
+    $errFile = Join-Path $env:TEMP "windows_exporter-fg-$PID.err"
+    try {
+        $fgArgs = Get-ExporterArgs
+        $p = Start-Process -FilePath $ExePath -ArgumentList $fgArgs -PassThru -NoNewWindow `
+             -RedirectStandardOutput $outFile -RedirectStandardError $errFile -ErrorAction Stop
+        if ($p.WaitForExit(5000)) {
+            Write-Warn "前台运行退出码: $($p.ExitCode)"
+        } else {
+            Write-Warn '前台运行 5 秒未退出（二进制可启动；服务失败可能与服务账户/权限有关）'
+            try { $p.Kill() } catch { }
+        }
+        Start-Sleep -Milliseconds 300
+        foreach ($f in @($outFile, $errFile)) {
+            if (Test-Path $f) {
+                $lines = @(Get-Content -LiteralPath $f -ErrorAction SilentlyContinue | Select-Object -Last 30)
+                foreach ($line in $lines) {
+                    if ($line -ne '') { Write-Warn $line }
+                }
+                Remove-Item -Force $f -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Write-Warn "前台运行失败：$($_.Exception.Message)"
+    }
+    Write-Warn '==== 服务启动诊断结束 ===='
+}
+
 function Do-Install {
     $script:ResolvedArch = Resolve-Arch
+    Initialize-Exporter
+    $script:PrevBinPath = Get-ServiceBinPath
     Write-Step "系统: $([Environment]::OSVersion.VersionString)；架构: $script:ResolvedArch；端口: $ListenPort"
     Ensure-Dirs
     Stop-ServiceIfRunning
@@ -493,19 +707,28 @@ function Do-Install {
     Copy-Item -Force $tmp $ExePath
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
 
+    $configBackupInstall = "$ConfigFile.install-bak"
+    if (Test-Path $ConfigFile) { Copy-Item -Force $ConfigFile $configBackupInstall }
     Write-DefaultConfig
     Create-Service
     Install-FirewallRule
     if (-not (Start-AndVerify)) {
-        Write-Warn '服务启动失败，尝试回滚'
+        Write-Warn '服务启动失败，收集诊断信息（事件日志 / 前台运行输出）'
+        Show-ServiceFailureDetails
+        Write-Warn '尝试回滚'
+        if (Test-Path $configBackupInstall) {
+            Copy-Item -Force $configBackupInstall $ConfigFile
+        }
         if (Test-Path $ExeBak) {
             Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
             Copy-Item -Force $ExeBak $ExePath
+            Set-ServiceBinPath $script:PrevBinPath
             Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
         }
-        Fail "服务未能启动。请查看事件日志：Get-EventLog -LogName Application -Source $ServiceName -Newest 20" 1
+        Fail "服务未能启动。请根据上方诊断处理；可手动在前台运行：`"$ExePath`" $(Get-ExporterArgs)" 1
     }
+    Remove-Item -Force $configBackupInstall -ErrorAction SilentlyContinue
     Write-Output ''
     Write-Output "安装完成：$ExePath"
     Write-Output "配置文件：$ConfigFile"
@@ -514,9 +737,13 @@ function Do-Install {
 
 function Do-Update {
     $script:ResolvedArch = Resolve-Arch
+    Initialize-Exporter
     if ((Get-ServiceState) -eq 'Missing') {
         Fail '未安装 windows_exporter 服务，请先执行 install' 1
     }
+    $script:PrevBinPath = Get-ServiceBinPath
+    $configBackup = "$ConfigFile.update-bak"
+    if (Test-Path $ConfigFile) { Copy-Item -Force $ConfigFile $configBackup }
     Write-Step '备份当前版本'
     if (Test-Path $ExePath) { Copy-Item -Force $ExePath $ExeBak }
 
@@ -526,19 +753,29 @@ function Do-Update {
     Copy-Item -Force $tmp $ExePath
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
 
+    Write-DefaultConfig
+    Update-ServiceArgs
     if (-not (Start-AndVerify)) {
-        Write-Warn '新版本启动失败，回滚到备份'
+        Write-Warn '新版本启动失败，收集诊断信息'
+        Show-ServiceFailureDetails
+        Write-Warn '回滚到备份'
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
         if (Test-Path $ExeBak) {
             Copy-Item -Force $ExeBak $ExePath
-            Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
-            if (Wait-ServiceState 'Running' 30) {
-                Fail '更新失败，已回滚到旧版本（服务运行中）' 1
-            }
         }
-        Fail '更新失败，回滚后服务仍未运行，请查看事件日志' 1
+        if (Test-Path $configBackup) {
+            Copy-Item -Force $configBackup $ConfigFile
+            Remove-Item -Force $configBackup -ErrorAction SilentlyContinue
+        }
+        Set-ServiceBinPath $script:PrevBinPath
+        Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if (Wait-ServiceState 'Running' 30) {
+            Fail '更新失败，已回滚到旧版本（服务运行中），诊断信息见上' 1
+        }
+        Fail '更新失败，回滚后服务仍未运行，诊断信息见上' 1
     }
+    Remove-Item -Force $configBackup -ErrorAction SilentlyContinue
     Write-Output ''
     Write-Output '更新完成。'
 }

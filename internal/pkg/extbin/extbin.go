@@ -28,9 +28,14 @@ const scriptPrefix = "script:"
 // 保证升级后原有 Windows 接入不因缺少配置而中断。
 func DefaultBinaries() map[string]string {
 	return map[string]string{
-		"windows-exporter-amd64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64.exe",
-		"windows-exporter-arm64":       "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64.exe",
-		"windows-exporter-install.ps1": "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
+		"windows-exporter-amd64": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64.exe",
+		"windows-exporter-arm64": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64.exe",
+		// 旧系统专用：v0.23.1 是最后一个用 Go 1.20 构建的官方版本。
+		// Go 1.21 起不再支持 Windows 7 / Server 2008 R2 / Server 2012 R2。
+		// 新版二进制在 2008 R2 上会注册服务成功但启动即失败。
+		"windows-exporter-amd64-legacy": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64-legacy.exe",
+		"windows-exporter-arm64-legacy": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64-legacy.exe",
+		"windows-exporter-install.ps1":  "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
 	}
 }
 

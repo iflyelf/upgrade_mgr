@@ -103,11 +103,16 @@ func TestExternalBinaryDownloadServesCached(t *testing.T) {
 func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 	cfg := config.Default()
 	got := effectiveExternalBinaries(cfg)
-	if len(got) != 3 {
-		t.Fatalf("默认应有 3 条，实际 %d", len(got))
+	if len(got) != 5 {
+		t.Fatalf("默认应有 5 条，实际 %d", len(got))
 	}
-	if _, ok := got["windows-exporter-amd64"]; !ok {
-		t.Fatal("默认应包含 windows-exporter-amd64")
+	for _, name := range []string{"windows-exporter-amd64", "windows-exporter-amd64-legacy", "windows-exporter-arm64-legacy"} {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("默认应包含 %s", name)
+		}
+	}
+	if !strings.Contains(got["windows-exporter-amd64-legacy"], "windows_exporter-amd64-legacy.exe") {
+		t.Fatalf("legacy 地址不符: %s", got["windows-exporter-amd64-legacy"])
 	}
 
 	// 配置了就用配置（完全覆盖，不与默认合并）
