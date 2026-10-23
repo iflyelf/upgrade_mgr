@@ -212,6 +212,11 @@ pre.code {
 .tag.status-paused, .tag.status-canceled, .tag.status-skipped { background: color-mix(in srgb, #f59e0b 20%, transparent); }
 .tag.status-rolled_back { background: color-mix(in srgb, #f97316 22%, transparent); }
 .tag.status-draft { opacity: .8; }
+/* 隧道自检：失败标红、通过标绿、检查中黄色提示。 */
+.tag.tunnel-ok { background: color-mix(in srgb, #22c55e 20%, transparent); }
+.tag.tunnel-fail { background: color-mix(in srgb, var(--err-color) 18%, transparent); color: var(--err-color); }
+.tag.tunnel-pending { background: color-mix(in srgb, #f59e0b 20%, transparent); }
+td.tunnel-fail-cell { box-shadow: inset 3px 0 0 var(--err-color); }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 999px; }

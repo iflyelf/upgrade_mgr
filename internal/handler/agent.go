@@ -3,6 +3,7 @@ package handler
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/netutil"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/safepath"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/tunnelprobe"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
@@ -145,7 +147,10 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant)
 		// 维护窗口内不覆盖 upgrading 状态；RETURNING server_tunnel_url 顺便取出
 		// 该主机配置的平台侧隧道地址，避免每次心跳多一次查询。
-		var serverTunnelURL string
+		var (
+			serverTunnelURL string
+			checkRequested  sql.NullTime
+		)
 		_ = s.DB.QueryRowContext(r.Context(), `UPDATE hosts SET last_seen=NOW(),
 			agent_status=CASE WHEN maintenance_until IS NOT NULL AND maintenance_until>NOW() THEN agent_status ELSE $2 END,
 			agent_build_version=CASE WHEN $4<>'' THEN $3 ELSE agent_build_version END,
@@ -155,18 +160,33 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			agent_server_url=CASE WHEN $7<>'' THEN $7 ELSE agent_server_url END,
 			agent_default_server_url=CASE WHEN $8<>'' THEN $8 ELSE agent_default_server_url END
 			WHERE agent_id=$1
-			RETURNING COALESCE(server_tunnel_url,'')`, agentID, status, buildVersion, buildHash, buildVariant,
+			RETURNING COALESCE(server_tunnel_url,''), tunnel_check_requested_at`, agentID, status, buildVersion, buildHash, buildVariant,
 			hostnet.NormalizeExitIP(req.ExitIP),
 			normalizeServerURL(req.AgentServerURL), normalizeServerURL(req.AgentDefaultServerURL)).
-			Scan(&serverTunnelURL)
+			Scan(&serverTunnelURL, &checkRequested)
 		// 自升级命令在 Agent 退出前无法上报 success，由新版本心跳按目标 SHA256 确认。
 		if buildHash != "" {
 			markSelfUpdateSuccess(r.Context(), s.DB, agentID, buildHash)
 		}
 		maybeAutoUpdateAgent(s, r, agentID)
+		// 主机侧回连自检：Agent 在上一轮被要求拨测后，本轮心跳带回结果。
+		if req.TunnelCheck != nil && req.TunnelCheck.URL != "" {
+			saveAgentTunnelCheck(r.Context(), s.DB, agentID, protocolTunnelCheck(*req.TunnelCheck))
+		}
 		// 隧道地址：管理员为该主机配置过则在响应中下发，Agent 自动切换。
-		httpx.OK(w, protocol.HeartbeatResponse{ServerURL: tunnelServerURL(s, r, serverTunnelURL,
-			normalizeServerURL(req.AgentDefaultServerURL))})
+		resp := protocol.HeartbeatResponse{ServerURL: tunnelServerURL(s, r, serverTunnelURL,
+			normalizeServerURL(req.AgentDefaultServerURL))}
+		if checkRequested.Valid {
+			if time.Since(checkRequested.Time) < agentCheckWindow && resp.ServerURL != "" {
+				// 仍在校验窗口内：继续下发待测地址，直到 Agent 回报结果。
+				resp.TunnelCheckURL = resp.ServerURL
+			} else {
+				// 超时未回报（主机离线/旧 Agent 不支持）：清除标记，保留平台侧结论。
+				_, _ = s.DB.ExecContext(r.Context(),
+					`UPDATE hosts SET tunnel_check_requested_at=NULL WHERE agent_id=$1`, agentID)
+			}
+		}
+		httpx.OK(w, resp)
 	}
 }
 
@@ -188,6 +208,15 @@ func tunnelServerURL(s *svc.ServiceContext, r *http.Request, serverTunnel, agent
 		fallback = strings.TrimRight(strings.TrimSpace(snap.Server.ExternalURL), "/")
 	}
 	return hostnet.ResolveServerURL(tunnel, fallback)
+}
+
+// protocolTunnelCheck 把 Agent 上报的自检结果转成拨测结果（用于统一落库）。
+func protocolTunnelCheck(r protocol.TunnelCheckResult) tunnelprobe.Result {
+	res := tunnelprobe.Result{Target: r.URL, OK: r.OK, LatencyMS: r.LatencyMS}
+	if !r.OK {
+		res.Hint = r.Detail
+	}
+	return res
 }
 
 // normalizeServerURL 校验 Agent 上报的服务端地址（只允许 http/https 绝对地址）。

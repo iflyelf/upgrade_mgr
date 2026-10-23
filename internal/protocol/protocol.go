@@ -212,6 +212,17 @@ type RegisterResponse struct {
 	Secret  string `json:"secret"` // 指令信封 HMAC 校验密钥
 }
 
+// TunnelCheckResult 主机侧回连自检结果（随心跳上报）。
+//
+// Agent 收到心跳响应中的 tunnel_check_url 后，从主机侧拨测该地址，
+// 把结果放在下一次心跳里回报，服务端写入 hosts.tunnel_check_*。
+type TunnelCheckResult struct {
+	URL       string `json:"url"`
+	OK        bool   `json:"ok"`
+	LatencyMS int64  `json:"latency_ms"`
+	Detail    string `json:"detail,omitempty"`
+}
+
 // HeartbeatRequest 心跳（含忙碌状态与本机组件版本）。
 type HeartbeatRequest struct {
 	AgentID string `json:"agent_id"`
@@ -234,6 +245,8 @@ type HeartbeatRequest struct {
 	SignatureModes []string `json:"signature_modes,omitempty"`
 	// Capabilities 与注册时一致；服务端据此刷新功能能力。
 	Capabilities []string `json:"capabilities,omitempty"`
+	// TunnelCheck 主机侧回连自检结果（上一轮被要求拨测时上报）。
+	TunnelCheck *TunnelCheckResult `json:"tunnel_check,omitempty"`
 }
 
 // HeartbeatResponse 心跳响应。
@@ -243,6 +256,9 @@ type HeartbeatRequest struct {
 // 为空表示未配置隧道，Agent 若此前切换过，应回退到安装时的默认地址。
 type HeartbeatResponse struct {
 	ServerURL string `json:"server_url,omitempty"`
+	// TunnelCheckURL 非空时要求 Agent 从主机侧拨测该地址，并在下一次心跳回报结果。
+	// 服务端仅在保存隧道地址后的一段时间内下发，避免持续占用主机资源。
+	TunnelCheckURL string `json:"tunnel_check_url,omitempty"`
 }
 
 // PollRequest 长轮询取指令。

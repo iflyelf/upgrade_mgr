@@ -58,6 +58,14 @@ const DefaultTimeout = 5 * time.Second
 // target 需是已规范化的完整 URL（见 hostnet.ResolveServerURL）；
 // timeout<=0 时使用 DefaultTimeout。
 func Probe(ctx context.Context, target string, timeout time.Duration) Result {
+	return ProbeWithClient(ctx, target, timeout, nil)
+}
+
+// ProbeWithClient 使用指定 HTTP 客户端拨测（Agent 侧传自己的 TLS 客户端）。
+//
+// client 为 nil 时使用内置客户端；即使传入 client，也只使用其 Transport，
+// 超时由 ctx 与 timeout 控制。
+func ProbeWithClient(ctx context.Context, target string, timeout time.Duration, client *http.Client) Result {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
@@ -134,7 +142,21 @@ func Probe(ctx context.Context, target string, timeout time.Duration) Result {
 	// 3. TLS（https 目标）
 	if u.Scheme == "https" {
 		stepStart = time.Now()
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+		// 沿用调用方客户端的 TLS 配置：Agent 自检时可能配置了私有 CA 或客户端证书，
+		// 否则这里会误报证书校验失败。
+		tlsCfg := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+		if client != nil {
+			if tr, ok := client.Transport.(*http.Transport); ok && tr.TLSClientConfig != nil {
+				tlsCfg = tr.TLSClientConfig.Clone()
+				if tlsCfg.ServerName == "" {
+					tlsCfg.ServerName = host
+				}
+				if tlsCfg.MinVersion == 0 {
+					tlsCfg.MinVersion = tls.VersionTLS12
+				}
+			}
+		}
+		tlsConn := tls.Client(conn, tlsCfg)
 		_ = tlsConn.SetDeadline(time.Now().Add(timeout))
 		handshakeErr := tlsConn.HandshakeContext(ctx)
 		info := &TLSInfo{ServerName: host}
@@ -166,12 +188,14 @@ func Probe(ctx context.Context, target string, timeout time.Duration) Result {
 
 	// 4. HTTP /health
 	stepStart = time.Now()
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			TLSClientConfig:   &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12},
-			ForceAttemptHTTP2: true,
-		},
+	if client == nil {
+		client = &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				TLSClientConfig:   &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12},
+				ForceAttemptHTTP2: true,
+			},
+		}
 	}
 	// 保留 base path（反向代理可能挂在子路径下）。
 	healthURL := u.Scheme + "://" + u.Host + strings.TrimRight(u.Path, "/") + "/health"
