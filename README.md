@@ -2391,6 +2391,8 @@ MIT © iflyelf
   「服务无法启动」而无从排查。
 - 外部文件默认白名单新增 `windows-exporter-{amd64,arm64}-legacy`（指向 iflyelf 仓库）；
   迁移 028 为已有白名单自动补条目，页面可上传离线 legacy exe。
+- Windows 组件示例的 `version_cmd` 改为 `windows_exporter.exe --version`，
+  legacy 构建没有 Windows FileVersion 资源也能正确显示版本。
 
 ### 2026-10-24 安全与运维补强（审计 / 多租户 / 索引 / 探针）
 
