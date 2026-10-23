@@ -2,6 +2,7 @@ package handler
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -34,27 +35,29 @@ type Host struct {
 	TunnelCheckAt        *time.Time `json:"tunnel_check_at,omitempty"`
 	TunnelCheckLatencyMS int        `json:"tunnel_check_latency_ms"`
 	TunnelCheckDetail    string     `json:"tunnel_check_detail"`
-	Hostname             string     `json:"hostname"`
-	OSFamily             string     `json:"os_family"`
-	OSType               string     `json:"os_type"`
-	Arch                 string     `json:"arch"`
-	Account              string     `json:"account"`
-	AppCode              string     `json:"app_code"`
-	BizGroup             string     `json:"biz_group"`
-	Department           string     `json:"department"`
-	Vendor               string     `json:"vendor"`
-	HostType             string     `json:"host_type"`
-	AgentID              string     `json:"agent_id"`
-	AgentVersion         string     `json:"agent_version"`
-	AgentBuildVersion    string     `json:"agent_build_version"`
-	AgentBuildHash       string     `json:"agent_build_hash"`
-	AgentBuildVariant    string     `json:"agent_build_variant"`
-	AgentStatus          string     `json:"agent_status"`
-	AgentUpdateStatus    string     `json:"agent_update_status,omitempty"`
-	AgentUpdateStage     string     `json:"agent_update_stage,omitempty"`
-	AgentUpdateLog       string     `json:"agent_update_log,omitempty"`
-	AgentUpdateAt        *time.Time `json:"agent_update_at,omitempty"`
-	Source               string     `json:"source"`
+	// CustomFields 主机自定义字段值（键见 host_field_defs）。
+	CustomFields      map[string]string `json:"custom_fields,omitempty"`
+	Hostname          string            `json:"hostname"`
+	OSFamily          string            `json:"os_family"`
+	OSType            string            `json:"os_type"`
+	Arch              string            `json:"arch"`
+	Account           string            `json:"account"`
+	AppCode           string            `json:"app_code"`
+	BizGroup          string            `json:"biz_group"`
+	Department        string            `json:"department"`
+	Vendor            string            `json:"vendor"`
+	HostType          string            `json:"host_type"`
+	AgentID           string            `json:"agent_id"`
+	AgentVersion      string            `json:"agent_version"`
+	AgentBuildVersion string            `json:"agent_build_version"`
+	AgentBuildHash    string            `json:"agent_build_hash"`
+	AgentBuildVariant string            `json:"agent_build_variant"`
+	AgentStatus       string            `json:"agent_status"`
+	AgentUpdateStatus string            `json:"agent_update_status,omitempty"`
+	AgentUpdateStage  string            `json:"agent_update_stage,omitempty"`
+	AgentUpdateLog    string            `json:"agent_update_log,omitempty"`
+	AgentUpdateAt     *time.Time        `json:"agent_update_at,omitempty"`
+	Source            string            `json:"source"`
 }
 
 // ListHosts 主机列表，支持关键字与分组过滤（?q=&app_code=&os_family=&page=&size=）。
@@ -130,6 +133,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			        COALESCE(agent_server_url,''), COALESCE(agent_default_server_url,''),
 			        tunnel_check_ok, COALESCE(tunnel_check_source,''), tunnel_check_at,
 			        COALESCE(tunnel_check_latency_ms,0), COALESCE(tunnel_check_detail,''),
+			        COALESCE(custom_fields,'{}'::jsonb),
 			        hostname, os_family, os_type, arch, account, app_code,
 			        biz_group, department, vendor, host_type, COALESCE(agent_id,''),
 			        agent_version, COALESCE(agent_build_version,''), COALESCE(agent_build_hash,''),
@@ -147,10 +151,11 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			var h Host
 			var checkOK sql.NullBool
 			var checkAt sql.NullTime
+			var customRaw []byte
 			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerURLOverride,
 				&h.AgentServerURL, &h.DefaultServerURL,
 				&checkOK, &h.TunnelCheckSource, &checkAt,
-				&h.TunnelCheckLatencyMS, &h.TunnelCheckDetail,
+				&h.TunnelCheckLatencyMS, &h.TunnelCheckDetail, &customRaw,
 				&h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
 				&h.Account, &h.AppCode, &h.BizGroup, &h.Department, &h.Vendor, &h.HostType,
 				&h.AgentID, &h.AgentVersion, &h.AgentBuildVersion, &h.AgentBuildHash,
@@ -165,6 +170,9 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			if checkAt.Valid {
 				t := checkAt.Time
 				h.TunnelCheckAt = &t
+			}
+			if len(customRaw) > 0 {
+				_ = json.Unmarshal(customRaw, &h.CustomFields)
 			}
 			list = append(list, h)
 		}
