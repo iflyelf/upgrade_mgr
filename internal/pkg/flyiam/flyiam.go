@@ -22,6 +22,7 @@ import (
 const (
 	appCredentialsPath   = "/api/casdoor/app-credentials"
 	userFieldsExportPath = "/api/user-fields/export"
+	usersPath            = "/api/users/export"
 )
 
 // AppCredentials Casdoor 应用连接凭据。
@@ -132,6 +133,29 @@ func (c *Client) FetchUserFields(ctx context.Context) ([]UserFieldDef, error) {
 		return nil, err
 	}
 	return defs, nil
+}
+
+// RemoteUser FlyIAM 导出的用户（只读展示用）。
+//
+// 只取展示所需字段；本系统不写回用户数据（用户以 Casdoor 为准）。
+type RemoteUser struct {
+	Username    string            `json:"username"`
+	DisplayName string            `json:"displayName"`
+	Email       string            `json:"email"`
+	Phone       string            `json:"phone"`
+	Properties  map[string]string `json:"properties"`
+}
+
+// FetchUsers 拉取用户列表（只读；用于「人员组织」页与本地账号对照）。
+func (c *Client) FetchUsers(ctx context.Context) ([]RemoteUser, error) {
+	if c == nil {
+		return nil, fmt.Errorf("未配置 FlyIAM 地址或服务令牌")
+	}
+	var users []RemoteUser
+	if err := c.do(ctx, usersPath, &users); err != nil {
+		return nil, err
+	}
+	return users, nil
 }
 
 // HealthCheck 探测 FlyIAM 可用性（用于设置页「测试连接」）。

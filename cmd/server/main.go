@@ -234,6 +234,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	// FlyIAM 集成：连通性测试 + 用户字段定义同步
 	mux.HandleFunc("POST /api/flyiam/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestFlyIAM(sc))))
 	mux.HandleFunc("POST /api/flyiam/sync-user-fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncUserFieldsFromFlyIAM(sc))))
+	mux.HandleFunc("GET /api/flyiam/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMUsers(sc))))
 
 	// 人员组织：角色 / 团队 / 服务组 / 授权
 	mux.HandleFunc("GET /api/roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RoleList(sc))))

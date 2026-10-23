@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS team_group_permissions (
     permissions TEXT[]      DEFAULT '{}',
     role_ids    BIGINT[]    DEFAULT '{}',
     services    TEXT[]      DEFAULT '{}',
+    host_groups TEXT[]      DEFAULT '{}',
     created_at  TIMESTAMPTZ DEFAULT NOW(),
     updated_at  TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (team_id, group_id)

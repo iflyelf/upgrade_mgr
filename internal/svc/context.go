@@ -22,6 +22,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
 	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/task"
 	"github.com/iflyelf/upgrade_mgr/internal/maintenance"
@@ -81,6 +82,14 @@ func New(c *config.Config) *ServiceContext {
 	gw := agentgw.New(db)
 	taskSvc := task.NewService(db, compRepo, artRepo, func() bool { return c.Agent.AllowExecMode })
 	taskSvc.SetReconciler(gw.ReconcileTasks)
+	// 组件级权限：无 deploy 权限的用户不能发任务（管理员不受限）。
+	orgSvc := org.NewService(db)
+	if fn := org.DeployAuthorizer(orgSvc); fn != nil {
+		taskSvc.SetAuthorizer(fn)
+	}
+	if fn := org.HostGroupResolver(orgSvc); fn != nil {
+		taskSvc.SetHostGroupResolver(fn)
+	}
 	svc := &ServiceContext{
 		Config:     c,
 		DB:         db,

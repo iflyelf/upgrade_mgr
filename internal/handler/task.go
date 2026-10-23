@@ -45,6 +45,7 @@ func TaskCreate(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		if u, ok := auth.FromContext(r.Context()); ok {
 			req.CreatedBy = u.Username
+			req.SetActor(u)
 		}
 		id, err := s.Task.Create(r.Context(), reqScope(r), req)
 		if err != nil {

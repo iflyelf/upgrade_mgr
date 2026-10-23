@@ -102,3 +102,34 @@ func TestFieldJSONShape(t *testing.T) {
 		t.Fatalf("解析不符: %+v", d)
 	}
 }
+
+// TestFetchUsers 用户列表只读拉取。
+func TestFetchUsers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/users/export" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("X-Service-Token") != "tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":[
+		  {"username":"alice","displayName":"爱丽丝","email":"a@x.com","properties":{"empCode":"E1"}},
+		  {"username":"bob","displayName":"鲍勃"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "tok")
+	users, err := c.FetchUsers(context.Background())
+	if err != nil {
+		t.Fatalf("FetchUsers: %v", err)
+	}
+	if len(users) != 2 || users[0].Username != "alice" {
+		t.Fatalf("用户不符: %+v", users)
+	}
+	if users[0].Properties["empCode"] != "E1" {
+		t.Fatalf("扩展字段未解析: %+v", users[0].Properties)
+	}
+}
