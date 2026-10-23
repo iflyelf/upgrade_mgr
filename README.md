@@ -1959,6 +1959,17 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-24 主机自定义字段前后端打通 + 迁移修正
+
+- **主机自定义字段全链路**：
+  - 前端主机编辑表单按 `/api/field-defs/host` 动态渲染控件（text/textarea/number/select/date），
+    保存时随 `custom_fields` 一起提交（服务端按键合并）；
+  - 主机列表按字段定义的 `showInList` 动态追加列。
+- **迁移修正**：`host_field_defs` 缺少 `builtin` 列（020 遗漏），而通用字段仓储对
+  user/host 共用同一套 SQL，导致主机字段接口报 `column "builtin" does not exist`。
+  新增迁移 `023` 补列（020 同步修正，新装环境直接带上）。
+- 新增单测：主机自定义字段写入/未知键丢弃/数字校验。
+
 ### 2026-10-23 任务创建者展示与 owner 策略完善
 
 - 任务列表返回 `created_by`，前端新增「创建者」列并标注「（我）」，便于判断 owner 限制。

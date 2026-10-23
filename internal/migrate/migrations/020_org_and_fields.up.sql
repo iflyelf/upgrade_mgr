@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS host_field_defs (
     show_in_list  BOOLEAN      NOT NULL DEFAULT FALSE,
     show_in_form  BOOLEAN      NOT NULL DEFAULT TRUE,
     editable      BOOLEAN      NOT NULL DEFAULT TRUE,
+    -- builtin 与 user_field_defs 对齐：内置字段不可删除、键不可改。
+    builtin       BOOLEAN      NOT NULL DEFAULT FALSE,
     sort_order    INT          NOT NULL DEFAULT 0,
     created_at    TIMESTAMPTZ  DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  DEFAULT NOW()
