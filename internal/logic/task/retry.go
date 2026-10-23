@@ -243,9 +243,10 @@ func (s *Service) Retry(ctx context.Context, sc scope.Scope, taskID int64, req R
 	res.TaskStatus = "running"
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE upgrade_tasks
-		SET status='running', updated_at=NOW()
+		SET status='running', updated_at=NOW(),
+		    updated_by=COALESCE(NULLIF($2,''), updated_by)
 		WHERE id=$1 AND status IN ('running','paused','failed','success','canceled','rolled_back')`,
-		taskID); err != nil {
+		taskID, actorUsername(ctx)); err != nil {
 		return res, err
 	}
 

@@ -1959,6 +1959,24 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-24 任务详情可见性、updated_by 与 Windows 真机回归
+
+- **任务详情/日志可见性**：仅创建者、同团队成员、管理员可见；列表返回 `can_view`，
+  前端无权限时隐藏「详情日志」并显示「无权限」。命令任务仍仅管理员可见。
+- **updated_by 同步**：启动 / 暂停 / 推进 / 取消 / 重试都会写入当前操作者
+  （`updated_by`）；后台/匿名调用（无 actor）保留最后一次人工操作人。
+- **Windows 真机 E2E 流水线**：新增 `.github/workflows/windows-e2e.yml`
+  - `windows-latest`：每次改动 Agent 相关代码即编译、`go vet`、真实执行
+    PowerShell/cmd 用例（输出、退出码、stdin、中文脚本 BOM 预处理）；
+  - Windows Server 2008 R2：自托管 runner（标签 `self-hosted,windows,server2008r2`），
+    仓库变量 `ENABLE_WIN2008R2_RUNNER=true` 后启用；
+  - 新增 `scripts/windows_agent_smoke.ps1`（PowerShell 2.0 兼容）验证
+    `version` / `status` / `diagnose` CLI。
+- **修复**：命令任务脚本在 Windows 上未做 UTF-8 BOM + CRLF 预处理，
+  含中文的脚本会按系统 ANSI 解码而乱码/语法错误；现已与安装脚本统一。
+- 新增 Windows-only E2E 测试（PowerShell/cmd 真实执行、BOM 校验），
+  以及详情可见性、`TeamMates`/`SharesTeam`、`updated_by` 单测。
+
 ### 2026-10-24 团队成员添加改为多选
 
 - 团队详情内改为从本地用户列表多选添加（自动排除已在团队的用户），
