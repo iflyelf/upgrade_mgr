@@ -25,6 +25,12 @@ var (
 		Buckets: []float64{30, 60, 120, 300, 600, 1800},
 	})
 
+	// AgentsVersionInfo Agent 版本/OS/架构分布，便于观察升级进度与遗留系统。
+	AgentsVersionInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "upgrade_mgr_agents_version_info",
+		Help: "Number of agents by version/os/arch",
+	}, []string{"version", "os", "arch"})
+
 	// 任务指标
 	TasksTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "upgrade_mgr_tasks_total",
@@ -179,6 +185,7 @@ func (c *Collector) Collect() {
 	TaskFailureRate.Reset()
 	TasksTotal.Reset()
 	AgentsTotal.Reset()
+	AgentsVersionInfo.Reset()
 
 	c.collectAgents(ctx)
 	c.collectTasks(ctx)

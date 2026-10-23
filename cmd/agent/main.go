@@ -180,6 +180,8 @@ func installCmd() {
 	tlsCA := fs.String("tls-ca", "", "可选：校验服务端证书的 CA 文件（PEM）")
 	tlsCert := fs.String("tls-cert", "", "可选：客户端证书（双向 TLS）")
 	tlsKey := fs.String("tls-key", "", "可选：客户端私钥（双向 TLS）")
+	serviceAccount := fs.String("service-account", "", "可选：Windows 服务运行账户（留空为 LocalSystem）")
+	servicePassword := fs.String("service-password", "", "可选：服务账户密码（gMSA 可留空）")
 	fs.Parse(os.Args[2:])
 	if *serverURL == "" {
 		fmt.Fprintln(os.Stderr, "错误: --server 必填")
@@ -189,6 +191,7 @@ func installCmd() {
 		ServerURL: *serverURL, ServerURLs: splitServers(*serverURL), EnrollToken: *enrollToken,
 		BinPath: *binPath, StatePath: *statePath, InstallCron: *installCron,
 		Force: *force, TLSCA: *tlsCA, TLSCert: *tlsCert, TLSKey: *tlsKey,
+		ServiceAccount: *serviceAccount, ServicePassword: *servicePassword,
 	}
 	if err := installer.Install(opts); err != nil {
 		log.Fatalf("安装失败: %v", err)

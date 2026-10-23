@@ -16,6 +16,8 @@ import (
 	"strings"
 
 	"github.com/lib/pq"
+
+	"github.com/iflyelf/upgrade_mgr/internal/auth"
 )
 
 // 权限常量。
@@ -36,6 +38,63 @@ type Service struct{ db *sql.DB }
 
 // NewService 创建服务。
 func NewService(db *sql.DB) *Service { return &Service{db: db} }
+
+// tenantOf 返回请求所在租户；0 表示不过滤（内部调用或 superadmin）。
+//
+// 组织数据（角色/团队/服务组/组织架构）与业务表不同：查询发生在 service 层，
+// 因此从 ctx 中的登录用户推导租户，避免每个方法都增加 scope 参数。
+func tenantOf(ctx context.Context) int64 {
+	u, ok := auth.FromContext(ctx)
+	if !ok || u == nil || u.IsSuperAdmin() {
+		return 0
+	}
+	if u.TenantID <= 0 {
+		return 1
+	}
+	return u.TenantID
+}
+
+// tenantForWrite 写入时使用的租户：优先请求用户租户，内部/后台调用默认 1。
+func tenantForWrite(ctx context.Context) int64 {
+	if u, ok := auth.FromContext(ctx); ok && u != nil && u.TenantID > 0 {
+		return u.TenantID
+	}
+	return 1
+}
+
+// teamInTenant 校验团队属于当前租户（tenant=0 表示不限制）。
+func (s *Service) teamInTenant(ctx context.Context, teamID int64) error {
+	t := tenantOf(ctx)
+	if t == 0 {
+		return nil
+	}
+	var ok bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM teams WHERE id=$1 AND tenant_id=$2)`, teamID, t).Scan(&ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("团队不存在")
+	}
+	return nil
+}
+
+// groupInTenant 校验服务组属于当前租户（tenant=0 表示不限制）。
+func (s *Service) groupInTenant(ctx context.Context, groupID int64) error {
+	t := tenantOf(ctx)
+	if t == 0 {
+		return nil
+	}
+	var ok bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM service_groups WHERE id=$1 AND tenant_id=$2)`, groupID, t).Scan(&ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("服务组不存在")
+	}
+	return nil
+}
 
 // Role 角色。
 type Role struct {
@@ -141,7 +200,7 @@ func (s *Service) ListRoles(ctx context.Context) ([]Role, error) {
 		       TO_CHAR(r.created_at,'YYYY-MM-DD HH24:MI:SS'),
 		       TO_CHAR(r.updated_at,'YYYY-MM-DD HH24:MI:SS'),
 		       (SELECT COUNT(*) FROM team_group_permissions p WHERE r.id = ANY(p.role_ids))
-		FROM roles r ORDER BY r.id`)
+		FROM roles r WHERE ($1=0 OR r.tenant_id=$1) ORDER BY r.id`, tenantOf(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -175,9 +234,9 @@ func (s *Service) CreateRole(ctx context.Context, name, code, description string
 	}
 	var id int64
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO roles (name, code, description, permissions)
-		VALUES ($1,$2,$3,$4) RETURNING id`,
-		name, code, trimName(description), pq.Array(p)).Scan(&id)
+		INSERT INTO roles (name, code, description, permissions, tenant_id)
+		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		name, code, trimName(description), pq.Array(p), tenantForWrite(ctx)).Scan(&id)
 	if err != nil {
 		if isUnique(err) {
 			return 0, fmt.Errorf("角色名称「%s」已存在", name)
@@ -199,7 +258,8 @@ func (s *Service) UpdateRole(ctx context.Context, id int64, name, description st
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE roles SET name=$2, description=$3, permissions=$4, updated_at=NOW()
-		WHERE id=$1`, id, name, trimName(description), pq.Array(p))
+		WHERE id=$1 AND ($5=0 OR tenant_id=$5)`,
+		id, name, trimName(description), pq.Array(p), tenantOf(ctx))
 	if err != nil {
 		if isUnique(err) {
 			return fmt.Errorf("角色名称「%s」已存在", name)
@@ -222,7 +282,8 @@ func (s *Service) DeleteRole(ctx context.Context, id int64) error {
 	if refs > 0 {
 		return fmt.Errorf("角色仍被 %d 个团队授权引用，请先解除引用", refs)
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM roles WHERE id=$1`, id)
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM roles WHERE id=$1 AND ($2=0 OR tenant_id=$2)`, id, tenantOf(ctx))
 	if err != nil {
 		return err
 	}
@@ -244,7 +305,7 @@ func (s *Service) ListTeams(ctx context.Context) ([]Team, error) {
 		       TO_CHAR(t.updated_at,'YYYY-MM-DD HH24:MI:SS'),
 		       (SELECT COUNT(*) FROM team_members m WHERE m.team_id=t.id),
 		       (SELECT COUNT(*) FROM team_group_permissions g WHERE g.team_id=t.id)
-		FROM teams t ORDER BY t.id`)
+		FROM teams t WHERE ($1=0 OR t.tenant_id=$1) ORDER BY t.id`, tenantOf(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -302,9 +363,10 @@ func (s *Service) CreateTeamWithPolicy(ctx context.Context, name, code, descript
 	defer tx.Rollback()
 	var id int64
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO teams (name, code, description, created_by, owner_only)
-		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-		name, code, trimName(description), createdBy, NormalizeTeamOwnerOnly(ownerOnly)).Scan(&id); err != nil {
+		INSERT INTO teams (name, code, description, created_by, owner_only, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+		name, code, trimName(description), createdBy, NormalizeTeamOwnerOnly(ownerOnly),
+		tenantForWrite(ctx)).Scan(&id); err != nil {
 		if isUnique(err) {
 			return 0, fmt.Errorf("团队名称「%s」已存在", name)
 		}
@@ -346,8 +408,8 @@ func (s *Service) UpdateTeamWithPolicy(ctx context.Context, id int64, name, desc
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE teams SET name=$2, description=$3, status=$4,
 		       owner_only = COALESCE(NULLIF($5,''), owner_only), updated_at=NOW()
-		WHERE id=$1`,
-		id, name, trimName(description), status, policy)
+		WHERE id=$1 AND ($6=0 OR tenant_id=$6)`,
+		id, name, trimName(description), status, policy, tenantOf(ctx))
 	if err != nil {
 		if isUnique(err) {
 			return fmt.Errorf("团队名称「%s」已存在", name)
@@ -362,7 +424,8 @@ func (s *Service) UpdateTeamWithPolicy(ctx context.Context, id int64, name, desc
 
 // DeleteTeam 删除团队（成员与授权级联删除）。
 func (s *Service) DeleteTeam(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM teams WHERE id=$1`, id)
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM teams WHERE id=$1 AND ($2=0 OR tenant_id=$2)`, id, tenantOf(ctx))
 	if err != nil {
 		return err
 	}
@@ -374,6 +437,9 @@ func (s *Service) DeleteTeam(ctx context.Context, id int64) error {
 
 // ListMembers 列出团队成员。
 func (s *Service) ListMembers(ctx context.Context, teamID int64) ([]Member, error) {
+	if err := s.teamInTenant(ctx, teamID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.team_id, m.user_id, COALESCE(m.username,''), COALESCE(m.display_name,''),
 		       TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS')
@@ -395,6 +461,9 @@ func (s *Service) ListMembers(ctx context.Context, teamID int64) ([]Member, erro
 
 // AddMembers 批量添加成员（按用户名，忽略重复）。
 func (s *Service) AddMembers(ctx context.Context, teamID int64, usernames []string) error {
+	if err := s.teamInTenant(ctx, teamID); err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -416,6 +485,9 @@ func (s *Service) AddMembers(ctx context.Context, teamID int64, usernames []stri
 
 // RemoveMember 移除成员。
 func (s *Service) RemoveMember(ctx context.Context, teamID int64, userID string) error {
+	if err := s.teamInTenant(ctx, teamID); err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM team_members WHERE team_id=$1 AND user_id=$2`, teamID, trimName(userID))
 	if err != nil {
@@ -437,7 +509,7 @@ func (s *Service) ListGroups(ctx context.Context) ([]Group, error) {
 		       TO_CHAR(g.created_at,'YYYY-MM-DD HH24:MI:SS'),
 		       TO_CHAR(g.updated_at,'YYYY-MM-DD HH24:MI:SS'),
 		       (SELECT COUNT(*) FROM team_group_permissions p WHERE p.group_id=g.id)
-		FROM service_groups g ORDER BY g.id`)
+		FROM service_groups g WHERE ($1=0 OR g.tenant_id=$1) ORDER BY g.id`, tenantOf(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -504,9 +576,9 @@ func (s *Service) CreateGroup(ctx context.Context, name, code, description strin
 	defer tx.Rollback()
 	var id int64
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO service_groups (name, code, description, created_by)
-		VALUES ($1,$2,$3,$4) RETURNING id`,
-		name, code, trimName(description), createdBy).Scan(&id); err != nil {
+		INSERT INTO service_groups (name, code, description, created_by, tenant_id)
+		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		name, code, trimName(description), createdBy, tenantForWrite(ctx)).Scan(&id); err != nil {
 		if isUnique(err) {
 			return 0, fmt.Errorf("服务组名称「%s」已存在", name)
 		}
@@ -530,8 +602,9 @@ func (s *Service) UpdateGroup(ctx context.Context, id int64, name, description s
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `
-		UPDATE service_groups SET name=$2, description=$3, updated_at=NOW() WHERE id=$1`,
-		id, name, trimName(description))
+		UPDATE service_groups SET name=$2, description=$3, updated_at=NOW()
+		WHERE id=$1 AND ($4=0 OR tenant_id=$4)`,
+		id, name, trimName(description), tenantOf(ctx))
 	if err != nil {
 		if isUnique(err) {
 			return fmt.Errorf("服务组名称「%s」已存在", name)
@@ -570,7 +643,8 @@ func setGroupComponentsTx(ctx context.Context, tx *sql.Tx, groupID int64, compon
 
 // DeleteGroup 删除服务组（授权级联删除）。
 func (s *Service) DeleteGroup(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM service_groups WHERE id=$1`, id)
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM service_groups WHERE id=$1 AND ($2=0 OR tenant_id=$2)`, id, tenantOf(ctx))
 	if err != nil {
 		return err
 	}
@@ -584,6 +658,9 @@ func (s *Service) DeleteGroup(ctx context.Context, id int64) error {
 
 // ListGroupPermissions 列出团队在各服务组的授权。
 func (s *Service) ListGroupPermissions(ctx context.Context, teamID int64) ([]GroupPermission, error) {
+	if err := s.teamInTenant(ctx, teamID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.id, p.team_id, p.group_id, COALESCE(g.name,''),
 		       COALESCE(p.permissions,'{}'), COALESCE(p.role_ids,'{}'), COALESCE(p.services,'{}'),
@@ -616,6 +693,12 @@ func (s *Service) ListGroupPermissions(ctx context.Context, teamID int64) ([]Gro
 
 // SetGroupPermission 设置团队对某服务组的授权（存在则覆盖）。
 func (s *Service) SetGroupPermission(ctx context.Context, teamID, groupID int64, perms []string, roleIDs []int64, services, hostGroups []string) error {
+	if err := s.teamInTenant(ctx, teamID); err != nil {
+		return err
+	}
+	if err := s.groupInTenant(ctx, groupID); err != nil {
+		return err
+	}
 	p, err := normalizePerms(perms)
 	if err != nil {
 		return err
@@ -624,7 +707,8 @@ func (s *Service) SetGroupPermission(ctx context.Context, teamID, groupID int64,
 	if len(roleIDs) > 0 {
 		var n int
 		if err := s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM roles WHERE id = ANY($1)`, pq.Array(roleIDs)).Scan(&n); err != nil {
+			`SELECT COUNT(*) FROM roles WHERE id = ANY($1) AND ($2=0 OR tenant_id=$2)`,
+			pq.Array(roleIDs), tenantOf(ctx)).Scan(&n); err != nil {
 			return err
 		}
 		if n != len(uniqueInt64(roleIDs)) {
@@ -666,6 +750,12 @@ func (s *Service) SetGroupPermission(ctx context.Context, teamID, groupID int64,
 
 // DeleteGroupPermission 解除授权。
 func (s *Service) DeleteGroupPermission(ctx context.Context, teamID, groupID int64) error {
+	if err := s.teamInTenant(ctx, teamID); err != nil {
+		return err
+	}
+	if err := s.groupInTenant(ctx, groupID); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM team_group_permissions WHERE team_id=$1 AND group_id=$2`, teamID, groupID)
 	return err
@@ -704,10 +794,11 @@ func (s *Service) EffectivePermissionsWithHosts(ctx context.Context, username st
 		       COALESCE(p.host_groups,'{}'),
 		       sg.component_id, c.name
 		FROM team_members m
+		JOIN teams t ON t.id = m.team_id
 		JOIN team_group_permissions p ON p.team_id = m.team_id
 		JOIN service_group_components sg ON sg.group_id = p.group_id
 		JOIN components c ON c.id = sg.component_id
-		WHERE m.user_id = $1`, username)
+		WHERE m.user_id = $1 AND ($2=0 OR t.tenant_id=$2)`, username, tenantOf(ctx))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -779,7 +870,8 @@ func (s *Service) EffectivePermissionsWithHosts(ctx context.Context, username st
 
 // rolePermissions 返回 roleID → 权限集合。
 func (s *Service) rolePermissions(ctx context.Context) (map[int64][]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(permissions,'{}') FROM roles`)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, COALESCE(permissions,'{}') FROM roles WHERE ($1=0 OR tenant_id=$1)`, tenantOf(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -802,7 +894,8 @@ func (s *Service) TeamOwnerPolicy(ctx context.Context, username string) (string,
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT COALESCE(t.owner_only,'inherit')
 		FROM team_members m JOIN teams t ON t.id = m.team_id
-		WHERE m.user_id = $1`, strings.TrimSpace(username))
+		WHERE m.user_id = $1 AND ($2=0 OR t.tenant_id=$2)`,
+		strings.TrimSpace(username), tenantOf(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -860,7 +953,8 @@ func (s *Service) CanShareTasks(ctx context.Context, actor, creator string) (boo
 			  JOIN teams t ON t.id = a.team_id
 			  JOIN team_members b ON b.team_id = a.team_id
 			 WHERE a.user_id = $1 AND b.user_id = $2 AND t.owner_only = 'off'
-		)`, actor, creator).Scan(&ok)
+			   AND ($3=0 OR t.tenant_id=$3)
+		)`, actor, creator, tenantOf(ctx)).Scan(&ok)
 	return ok, err
 }
 
@@ -874,8 +968,10 @@ func (s *Service) TeamMates(ctx context.Context, username string) (map[string]bo
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT b.user_id
 		  FROM team_members a
+		  JOIN teams t ON t.id = a.team_id
 		  JOIN team_members b ON b.team_id = a.team_id
-		 WHERE a.user_id = $1 AND b.user_id <> $1`, username)
+		 WHERE a.user_id = $1 AND b.user_id <> $1 AND ($2=0 OR t.tenant_id=$2)`,
+		username, tenantOf(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -907,9 +1003,11 @@ func (s *Service) SharesTeam(ctx context.Context, a, b string) (bool, error) {
 		SELECT EXISTS (
 			SELECT 1
 			  FROM team_members x
+			  JOIN teams t ON t.id = x.team_id
 			  JOIN team_members y ON y.team_id = x.team_id
 			 WHERE x.user_id = $1 AND y.user_id = $2
-		)`, a, b).Scan(&ok)
+			   AND ($3=0 OR t.tenant_id=$3)
+		)`, a, b, tenantOf(ctx)).Scan(&ok)
 	return ok, err
 }
 

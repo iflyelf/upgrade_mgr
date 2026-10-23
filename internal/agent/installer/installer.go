@@ -42,6 +42,10 @@ type Options struct {
 	TLSCA   string
 	TLSCert string
 	TLSKey  string
+	// ServiceAccount / ServicePassword 可选：Windows 服务运行账户。
+	// 留空使用 LocalSystem；使用低权限账户前需先授予「作为服务登录」权限。
+	ServiceAccount  string
+	ServicePassword string
 }
 
 // Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选看门狗。

@@ -13,6 +13,13 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
 )
 
+const (
+	// maxCommandScriptBytes 单次命令脚本大小上限（服务端另有 200KB 限制）。
+	maxCommandScriptBytes = 1 << 20
+	// maxCommandTimeout 单次命令最长执行时间，防止异常指令长期占用 Agent。
+	maxCommandTimeout = 24 * time.Hour
+)
+
 // CommandResult 一次性命令执行结果。
 type CommandResult struct {
 	Success  bool
@@ -43,9 +50,17 @@ func ExecuteCommand(ctx context.Context, spec protocol.CommandSpec, onOutput fun
 		res.Log = "[exec] 脚本内容为空\n"
 		return res
 	}
+	if len(script) > maxCommandScriptBytes {
+		res.Log = fmt.Sprintf("[exec] 脚本过大（%d 字节，上限 %d）\n", len(script), maxCommandScriptBytes)
+		return res
+	}
 	timeout, _ := time.ParseDuration(strings.TrimSpace(spec.Timeout))
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
+	}
+	if timeout > maxCommandTimeout {
+		logf(protocol.StageRunCommand, "超时 %s 超过上限，已收敛为 %s", timeout, maxCommandTimeout)
+		timeout = maxCommandTimeout
 	}
 
 	interp := strings.TrimSpace(spec.Interpreter)

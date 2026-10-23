@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/safepath"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
@@ -365,4 +366,60 @@ func (r *Repo) deleteObject(p string) error {
 		return fmt.Errorf("存储后端未初始化")
 	}
 	return r.backend.Delete(p)
+}
+
+// ListPaged 分页查询制品（支持组件过滤与关键字搜索）。
+//
+// 与 List 并存：任务页需要完整列表做版本下拉，列表页使用分页避免大表全量传输。
+func (r *Repo) ListPaged(ctx context.Context, sc scope.Scope, componentID int64, q string, page, size int) ([]*Artifact, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 50
+	}
+	if size > 200 {
+		size = 200
+	}
+	cond, targs := sc.Where("", 1)
+	where := []string{cond}
+	args := append([]any{}, targs...)
+	if componentID > 0 {
+		args = append(args, componentID)
+		where = append(where, fmt.Sprintf("component_id=$%d", len(args)))
+	}
+	if q = strings.TrimSpace(q); q != "" {
+		args = append(args, "%"+q+"%")
+		n := len(args)
+		where = append(where, fmt.Sprintf(
+			"(version ILIKE $%d OR filename ILIKE $%d OR notes ILIKE $%d OR inner_path ILIKE $%d)",
+			n, n, n, n))
+	}
+	whereSQL := strings.Join(where, " AND ")
+	var total int
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM artifacts WHERE `+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	listArgs := append(append([]any{}, args...), size, (page-1)*size)
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, tenant_id, component_id, version, os_family, arch, filename, size, md5, sha256,
+		       storage, path, inner_path, notes, status
+		  FROM artifacts WHERE %s
+		 ORDER BY id DESC LIMIT $%d OFFSET $%d`,
+		whereSQL, len(listArgs)-1, len(listArgs)), listArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]*Artifact, 0, size)
+	for rows.Next() {
+		var a Artifact
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.ComponentID, &a.Version, &a.OSFamily, &a.Arch, &a.Filename,
+			&a.Size, &a.MD5, &a.SHA256, &a.Storage, &a.Path, &a.InnerPath, &a.Notes, &a.Status); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, &a)
+	}
+	return out, total, rows.Err()
 }

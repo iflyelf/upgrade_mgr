@@ -23,13 +23,16 @@ func auditOpDetails(s *svc.ServiceContext, r *http.Request, action, resType, res
 		return
 	}
 	var userID, username string
+	var tenantID int64
 	if u, ok := auth.FromContext(r.Context()); ok && u != nil {
 		userID, username = u.ID, u.Username
+		tenantID = u.TenantID
 	}
 	ev := audit.Event{
 		Action:       action,
 		UserID:       userID,
 		Username:     username,
+		TenantID:     tenantID,
 		IP:           clientIP(s, r),
 		ResourceType: resType,
 		ResourceID:   resID,

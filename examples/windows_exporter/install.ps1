@@ -49,6 +49,14 @@
 .PARAMETER NoConfig
     不生成/覆盖 config.yaml（使用已有配置）。
 
+.PARAMETER ServiceAccount
+    可选：服务运行账户（如 NT AUTHORITY\LocalService 或 DOMAIN\svc_exporter）。
+    留空使用 LocalSystem。使用低权限账户前，需先在「本地安全策略 → 用户权限分配 →
+    作为服务登录」中授予该账户权限，否则服务无法启动。
+
+.PARAMETER ServicePassword
+    可选：服务账户密码；托管服务账户（gMSA）可留空。
+
 .PARAMETER NoFirewall
     不创建 Windows 防火墙入站规则。
 
@@ -82,6 +90,8 @@ param(
     [string]$BinaryUrl = '',
     [string]$ConfigPath = '',
     [switch]$NoConfig,
+    [string]$ServiceAccount = '',
+    [string]$ServicePassword = '',
     [switch]$NoFirewall
 )
 
@@ -346,6 +356,19 @@ function Create-Service {
         New-Service -Name $ServiceName -BinaryPathName $binPath -DisplayName $DisplayName -StartupType Automatic -ErrorAction Stop | Out-Null
     } catch {
         Fail "创建服务失败：$($_.Exception.Message)`n请确认以管理员身份运行，且没有同名服务被占用。" 1
+    }
+    # 可选低权限服务账户（需预先授予「作为服务登录」权限）。
+    if ($ServiceAccount -ne '') {
+        Write-Step "配置服务运行账户：$ServiceAccount"
+        if ($ServicePassword -ne '') {
+            & sc.exe config $ServiceName obj= "$ServiceAccount" password= "$ServicePassword" | Out-Null
+        } else {
+            # gMSA / LocalService 等无需密码
+            & sc.exe config $ServiceName obj= "$ServiceAccount" | Out-Null
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Fail "配置服务账户失败（请确认账户已授予“作为服务登录”权限，密码正确）。" 1
+        }
     }
     # 描述与失败重启策略：sc.exe 的参数都是简单 token，无引号问题。
     & sc.exe description $ServiceName "windows_exporter - Prometheus metrics exporter for Windows" | Out-Null

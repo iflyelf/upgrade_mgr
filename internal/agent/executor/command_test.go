@@ -126,3 +126,16 @@ func TestTTYCommandReturnCode(t *testing.T) {
 		t.Fatalf("命令参数拼装错误: %q", argv[len(argv)-2])
 	}
 }
+
+// TestExecuteCommandRejectsOversizedScript 超限脚本直接拒绝，避免内存/磁盘压力。
+func TestExecuteCommandRejectsOversizedScript(t *testing.T) {
+	res := ExecuteCommand(context.Background(), protocol.CommandSpec{
+		Script: strings.Repeat("a", maxCommandScriptBytes+1),
+	}, nil, nil)
+	if res.Success {
+		t.Fatal("超限脚本不应执行")
+	}
+	if !strings.Contains(res.Log, "脚本过大") {
+		t.Fatalf("应提示脚本过大: %q", res.Log)
+	}
+}

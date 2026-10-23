@@ -50,9 +50,11 @@ func TestSPAHandlerCacheBusting(t *testing.T) {
 		t.Fatalf("If-None-Match 命中应返回 304，got %d", rec.Code)
 	}
 
-	// history 路由回退 index.html，同样带版本参数
+	// history 路由回退 index.html，同样带版本参数（浏览器导航会带 Accept: text/html）
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/components", nil))
+	req = httptest.NewRequest(http.MethodGet, "/components", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	h.ServeHTTP(rec, req)
 	body, _ = io.ReadAll(rec.Body)
 	if rec.Header().Get("ETag") != indexTag || !regexp.MustCompile(`\?v=`).Match(body) {
 		t.Fatal("history 路由回退的 index.html 未改写")
@@ -70,5 +72,17 @@ func TestSPAHandlerCacheBusting(t *testing.T) {
 	}
 	if rec.Body.Len() < 100 {
 		t.Fatalf("favicon 内容异常，长度 %d", rec.Body.Len())
+	}
+}
+
+// TestSPAProbePaths 健康探针/缺失资源不能被 SPA 回退成 200 HTML。
+func TestSPAProbePaths(t *testing.T) {
+	h := spaHandler()
+	for _, path := range []string{"/healthz", "/readyz", "/api/typo", "/assets/missing.js"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d，应为 404", path, rec.Code)
+		}
 	}
 }

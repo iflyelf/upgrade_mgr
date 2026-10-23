@@ -24,13 +24,15 @@ type Department struct {
 // 事务内先清空再写入：上游已删除的部门不会残留；读取方在事务提交前
 // 看到的仍是旧快照，不会出现「空树」中间态。
 func (s *Service) ReplaceDepartments(ctx context.Context, deps []flyiam.Department) (int, error) {
+	tenantID := tenantForWrite(ctx)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM org_departments`); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM org_departments WHERE tenant_id=$1`, tenantID); err != nil {
 		return 0, err
 	}
 	seen := map[string]bool{}
@@ -43,9 +45,9 @@ func (s *Service) ReplaceDepartments(ctx context.Context, deps []flyiam.Departme
 		seen[deptID] = true
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO org_departments
-			    (dept_id, dept_name, parent_id, level, full_path, user_count, synced_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
-			ON CONFLICT (dept_id) DO UPDATE SET
+			    (dept_id, dept_name, parent_id, level, full_path, user_count, synced_at, updated_at, tenant_id)
+			VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW(),$7)
+			ON CONFLICT (tenant_id, dept_id) DO UPDATE SET
 			    dept_name=EXCLUDED.dept_name, parent_id=EXCLUDED.parent_id,
 			    level=EXCLUDED.level, full_path=EXCLUDED.full_path,
 			    user_count=EXCLUDED.user_count, synced_at=NOW(), updated_at=NOW()`,
@@ -55,6 +57,7 @@ func (s *Service) ReplaceDepartments(ctx context.Context, deps []flyiam.Departme
 			d.Level,
 			strings.TrimSpace(d.FullPath),
 			d.UserCount,
+			tenantID,
 		); err != nil {
 			return 0, err
 		}
@@ -71,7 +74,8 @@ func (s *Service) ListDepartments(ctx context.Context) ([]Department, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT dept_id, dept_name, parent_id, level, full_path, user_count, synced_at
 		  FROM org_departments
-		 ORDER BY full_path, dept_id`)
+		 WHERE ($1=0 OR tenant_id=$1)
+		 ORDER BY full_path, dept_id`, tenantOf(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +95,8 @@ func (s *Service) ListDepartments(ctx context.Context) ([]Department, error) {
 // DepartmentCount 返回本地快照节点数（用于页面提示）。
 func (s *Service) DepartmentCount(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM org_departments`).Scan(&n)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM org_departments WHERE ($1=0 OR tenant_id=$1)`, tenantOf(ctx)).Scan(&n)
 	return n, err
 }
 

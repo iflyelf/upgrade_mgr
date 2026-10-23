@@ -14,6 +14,7 @@ type Event struct {
 	Action       string                 // 操作类型（如 component.create）
 	UserID       string                 // 操作用户 ID
 	Username     string                 // 操作用户名
+	TenantID     int64                  // 所属租户（0 表示未知，写入前按用户名回填）
 	IP           string                 // 客户端 IP → ip_address
 	ResourceType string                 // 资源类型（component/task/artifact）
 	ResourceID   string                 // 资源 ID
@@ -50,14 +51,21 @@ func (l *Logger) Log(ctx context.Context, event Event) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		tenantID := event.TenantID
+		// 认证前事件（如登录失败）没有租户上下文：按用户名回填，
+		// 查不到（例如用户名不存在）时保留 0，仅超级管理员可见。
+		if tenantID == 0 && event.Username != "" {
+			_ = l.db.QueryRowContext(ctx,
+				`SELECT tenant_id FROM local_users WHERE username=$1`, event.Username).Scan(&tenantID)
+		}
 		_, err := l.db.ExecContext(ctx, `
 			INSERT INTO audit_logs
 				(action, user_id, username, resource_type, resource_id, resource_name,
-				 details, ip_address, status, error_message, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+				 details, ip_address, status, error_message, created_at, tenant_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 			event.Action, event.UserID, event.Username,
 			event.ResourceType, event.ResourceID, event.ResourceName,
-			detailsJSON, event.IP, status, event.Message, event.Timestamp)
+			detailsJSON, event.IP, status, event.Message, event.Timestamp, tenantID)
 		if err != nil {
 			log.Printf("⚠️ 审计日志写入失败: %v", err)
 		}

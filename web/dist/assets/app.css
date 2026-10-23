@@ -240,3 +240,36 @@ td.tunnel-fail-cell { box-shadow: inset 3px 0 0 var(--err-color); }
 .tag-x:hover { color: #d33; }
 .tag-picker .toolbar { margin: 0; }
 .tag-picker input { min-width: 260px; }
+
+/* 表格工具：列显隐 / 排序 / 列宽拖拽 */
+.table-block { position: relative; }
+.table-tools { margin: 0 0 6px; }
+.table-tools summary { cursor: pointer; font-size: 12px; color: var(--muted-color, #666); user-select: none; }
+.table-tools-menu { margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border-color, #ddd); border-radius: 6px; }
+.table-tools-cols { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable.sort-asc::after { content: ' ▲'; font-size: 10px; opacity: .7; }
+th.sortable.sort-desc::after { content: ' ▼'; font-size: 10px; opacity: .7; }
+th { position: relative; }
+.col-resizer { position: absolute; right: 0; top: 0; width: 6px; height: 100%; cursor: col-resize; }
+.col-resizer:hover { background: color-mix(in srgb, var(--primary-color, #3b82f6) 30%, transparent); }
+
+/* ---------- 移动端与可访问性 ---------- */
+:focus-visible { outline: 2px solid var(--primary-color, #3b82f6); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+@media (max-width: 760px) {
+  .container { padding: 10px; }
+  .topbar { flex-wrap: wrap; gap: 6px; }
+  .tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+  .tab { flex: 0 0 auto; min-height: 36px; display: inline-flex; align-items: center; }
+  .grid2 { grid-template-columns: 1fr; }
+  .toolbar { flex-wrap: wrap; gap: 8px; }
+  .toolbar > input, .toolbar > select { width: 100%; min-width: 0; }
+  .modal { width: calc(100vw - 16px); max-height: 92vh; }
+  .pager { flex-wrap: wrap; gap: 6px; }
+  .table-tools-cols { gap: 6px 10px; }
+  .btn, .tab { min-height: 36px; }
+  table { font-size: 12px; }
+}

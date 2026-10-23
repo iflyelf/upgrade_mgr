@@ -1,0 +1,131 @@
+name: Web E2E
+
+# 前端端到端回归：真实启动控制台 + PostgreSQL，用 Playwright 覆盖
+# 登录、导航、URL 刷新恢复、创建组件、审计/组织页面与英文切换。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/dist/**'
+      - 'web/e2e/**'
+      - 'cmd/server/**'
+      - 'internal/handler/**'
+      - '.github/workflows/web-e2e.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/dist/**'
+      - 'web/e2e/**'
+      - 'cmd/server/**'
+      - 'internal/handler/**'
+      - '.github/workflows/web-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # 国内网络：Go / npm / Playwright 浏览器均走镜像。
+  GOPROXY: https://goproxy.cn,direct
+  npm_config_registry: https://registry.npmmirror.com
+  PLAYWRIGHT_DOWNLOAD_HOST: https://npmmirror.com/mirrors/playwright
+
+concurrency:
+  group: web-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web-e2e:
+    name: Playwright（Chromium）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: upgrade_mgr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d upgrade_mgr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7.0.1
+
+      - name: 安装 Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: 安装 Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '20'
+
+      - name: 编译控制台
+        run: |
+          mkdir -p /tmp/artifacts
+          go build -o /tmp/upgrade-mgr ./cmd/server
+
+      - name: 启动控制台
+        run: |
+          cat > /tmp/config.yaml <<'YAML'
+          server:
+            host: 127.0.0.1
+            port: 18090
+            external_url: http://127.0.0.1:18090
+            web_embedded: true
+            agent_binary_dir: ./dist
+            audit_retention_days: 30
+          database:
+            host: 127.0.0.1
+            port: 5432
+            user: postgres
+            password: postgres
+            dbname: upgrade_mgr
+            sslmode: disable
+          auth:
+            provider: builtin
+            admin_username: admin
+            admin_password: admin123
+          artifact:
+            dir: /tmp/artifacts
+          log:
+            level: warn
+          YAML
+          nohup /tmp/upgrade-mgr -c /tmp/config.yaml > /tmp/server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18090/ready >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18090/ready
+
+      - name: 安装 Playwright
+        working-directory: web/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: 运行 E2E
+        working-directory: web/e2e
+        env:
+          BASE_URL: http://127.0.0.1:18090
+        run: npx playwright test
+
+      - name: 失败时输出服务端日志
+        if: failure()
+        run: tail -200 /tmp/server.log
+
+      - name: 上传测试报告
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: playwright-report
+          path: |
+            web/e2e/playwright-report
+            web/e2e/test-results

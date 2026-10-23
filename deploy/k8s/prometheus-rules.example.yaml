@@ -1,0 +1,59 @@
+# 示例 PrometheusRule（Prometheus Operator）
+# 按实际 namespace/labels 调整；指标由 /metrics 暴露（需配置 metrics_token 或会话）。
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: upgrade-mgr-alerts
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: upgrade-mgr
+      rules:
+        - alert: UpgradeMgrAgentsAllOffline
+          expr: |
+            sum(upgrade_mgr_agents_total) > 0
+            and sum(upgrade_mgr_agents_total{status="online"}) == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "upgrade_mgr 所有 Agent 离线"
+            description: "最近 10 分钟没有在线 Agent，检查控制台与网络。"
+
+        - alert: UpgradeMgrAgentOfflineRatioHigh
+          expr: |
+            sum(upgrade_mgr_agents_total{status="offline"}) /
+            clamp_min(sum(upgrade_mgr_agents_total), 1) > 0.3
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "upgrade_mgr Agent 离线比例超过 30%"
+
+        - alert: UpgradeMgrTaskFailureRateHigh
+          expr: max(upgrade_mgr_task_failure_rate) > 20
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "upgrade_mgr 任务失败率超过 20%"
+            description: "检查任务详情中的失败主机与执行日志。"
+
+        - alert: UpgradeMgrExternalBinaryUnavailable
+          expr: upgrade_mgr_external_binary_up == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "外部文件缓存探测失败（{{ $labels.name }}）"
+            description: "上游不可达或 SSRF 策略拒绝，Windows 接入/安装可能受影响。"
+
+        - alert: UpgradeMgrAgentVersionSkew
+          expr: count(count by (version) (upgrade_mgr_agents_version_info)) > 1
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "upgrade_mgr 存在多个 Agent 版本"
+            description: "可通过设置页的自升级灰度比例逐步收敛版本。"
