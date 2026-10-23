@@ -42,6 +42,7 @@
     taskFilterComp: '', taskFilterKind: '',
     // 外部文件白名单表格（页面增删行）
     extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
+    orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1 };
 
@@ -178,7 +179,7 @@
 
   function tabs() {
     var items = [['hosts', '主机'], ['components', '组件'], ['artifacts', '制品'], ['tasks', '任务'],
-      ['extbin', '外部文件'], ['settings', '设置']];
+      ['org', '人员组织'], ['extbin', '外部文件'], ['settings', '设置']];
     return h('div', { class: 'tabs' }, items.map(function (it) {
       return h('div', {
         class: 'tab' + (state.view === it[0] ? ' active' : ''),
@@ -724,6 +725,7 @@
     else if (v === 'artifacts') loadArtifacts();
     else if (v === 'tasks') loadTasks();
     else if (v === 'extbin') loadExternalBinaries();
+    else if (v === 'org') loadOrg();
     else if (v === 'password') render();
     else loadHosts();
   }
@@ -1583,6 +1585,497 @@
         ]),
         hint('⚠️ 代下载是服务端主动出网能力：只放行确实需要的域名与网段，避免被当作访问内网或云元数据的跳板。')
       ])
+    ]);
+  }
+
+  // ---------- 人员组织（用户字段 / 角色 / 团队 / 服务组） ----------
+  //
+  // 与 consul_mgr 模型对齐：团队是权限主体，按「服务组」授权；
+  // 服务组 = 组件集合；用户与主机均支持自定义字段（字段定义存库，零硬编码）。
+  function loadOrg() {
+    state.orgErr = '';
+    var jobs = [
+      api('/api/users/fields'),
+      api('/api/roles'),
+      api('/api/teams'),
+      api('/api/service-groups')
+    ];
+    if (!(state.components || []).length) jobs.push(api('/api/components'));
+    Promise.all(jobs).then(function (res) {
+      if (res.length > 4) state.components = res[4] || [];
+      state.org = {
+        users: res[0].users || [],
+        userDefs: res[0].defs || [],
+        userValues: res[0].values || {},
+        roles: res[1] || [],
+        teams: res[2] || [],
+        groups: res[3] || []
+      };
+      render();
+    }).catch(function (e) {
+      state.orgErr = e.message;
+      render();
+    });
+  }
+
+  function orgTabs() {
+    var tabs = [['users', '人员信息'], ['fields', '用户字段'], ['roles', '角色'],
+      ['teams', '团队'], ['groups', '服务组']];
+    return h('div', { class: 'tabs', style: 'margin-bottom:12px' }, tabs.map(function (t) {
+      return h('div', {
+        class: 'tab' + (state.orgTab === t[0] ? ' active' : ''),
+        onclick: function () { state.orgTab = t[0]; render(); }
+      }, [t[1]]);
+    }));
+  }
+
+  function orgView() {
+    var o = state.org;
+    if (!o && !state.orgErr) {
+      return h('div', { class: 'card' }, [h('h3', {}, ['人员组织']), h('div', { class: 'muted' }, ['加载中…'])]);
+    }
+    var body;
+    if (state.orgTab === 'users') body = orgUsers(o);
+    else if (state.orgTab === 'fields') body = orgUserFields(o);
+    else if (state.orgTab === 'roles') body = orgRoles(o);
+    else if (state.orgTab === 'teams') body = orgTeams(o);
+    else body = orgGroups(o);
+
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['人员组织']),
+        hint('用户来自 Casdoor / 内置账号；扩展字段（人事信息）可在「用户字段」自定义并在此编辑。' +
+          '团队按「服务组」授权，服务组是组件集合。已启用 FlyIAM 时可在「设置」页同步字段定义。'),
+        state.orgErr ? h('div', { class: 'err field', role: 'alert' }, [state.orgErr]) : null
+      ]),
+      orgTabs(),
+      body
+    ]);
+  }
+
+  // 人员信息：表格展示 + 点击编辑扩展字段。
+  function orgUsers(o) {
+    var listDefs = o.userDefs.filter(function (d) { return d.showInList; })
+      .sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
+    var cols = ['用户名', '显示名称', '租户', '角色'].concat(listDefs.map(function (d) { return d.label; }))
+      .concat(['操作']);
+    var rows = o.users.map(function (u) {
+      var vals = o.userValues[u.username] || {};
+      var cells = [
+        u.username, u.display_name || '-', u.tenant_id,
+        (u.roles || []).join(', ')
+      ].concat(listDefs.map(function (d) { return vals[d.fieldKey] || '-'; }));
+      cells.push(h('button', {
+        class: 'btn ghost small', onclick: function () { state.orgSel = u.username; render(); }
+      }, ['编辑字段']));
+      return cells;
+    });
+    var editing = o.users.filter(function (u) { return u.username === state.orgSel; })[0];
+    var form = editing ? userFieldForm(o, editing) : null;
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('div', { class: 'toolbar' }, [
+          h('span', { class: 'muted' }, ['共 ' + o.users.length + ' 个用户']),
+          hint ? h('span', { class: 'muted' }, ['人员数据来自 Casdoor / 内置账号，账号增删请在「设置 → 用户」或 FlyIAM 中操作'])
+            : null
+        ]),
+        simpleTable(cols, o.users, function (u, i) { return rows[i]; })
+      ]),
+      form
+    ]);
+  }
+
+  // userFieldForm 编辑某用户的扩展字段值。
+  function userFieldForm(o, user) {
+    var vals = Object.assign({}, o.userValues[user.username] || {});
+    var inputs = {};
+    var fields = o.userDefs.filter(function (d) { return d.showInForm && d.editable; })
+      .sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
+    var controls = fields.map(function (d) {
+      var el;
+      if (d.fieldType === 'select') {
+        var opts = [];
+        try { opts = JSON.parse(d.options || '[]'); } catch (e) { opts = []; }
+        el = h('select', {}, [h('option', { value: '' }, ['（未设置）'])].concat(opts.map(function (x) {
+          return h('option', { value: x }, [x]);
+        })));
+        el.value = vals[d.fieldKey] || '';
+      } else if (d.fieldType === 'textarea') {
+        el = h('textarea', { rows: '3' }, []);
+        el.value = vals[d.fieldKey] || '';
+      } else {
+        el = h('input', {
+          value: vals[d.fieldKey] || '',
+          type: d.fieldType === 'number' ? 'number' : (d.fieldType === 'date' ? 'date' : 'text')
+        }, []);
+      }
+      inputs[d.fieldKey] = el;
+      return field(d.label, el, '');
+    });
+
+    var save = function () {
+      var values = {};
+      Object.keys(inputs).forEach(function (k) { values[k] = inputs[k].value; });
+      api('/api/users/' + encodeURIComponent(user.username) + '/fields', {
+        method: 'PUT', body: JSON.stringify({ values: values })
+      }).then(function () {
+        state.orgSel = null;
+        loadOrg();
+      }).catch(function (e) { alert('保存失败: ' + e.message); });
+    };
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['编辑人员字段：' + user.username]),
+      h('div', { class: 'grid2' }, controls),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', onclick: save }, ['保存']),
+        h('button', {
+          class: 'btn ghost', onclick: function () { state.orgSel = null; render(); }
+        }, ['取消'])
+      ])
+    ]);
+  }
+
+  // 用户字段定义管理（增删改）。
+  function orgUserFields(o) {
+    var defs = o.userDefs.slice().sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
+    var rows = defs.map(function (d) {
+      return [
+        d.fieldKey, d.label, d.fieldType,
+        d.showInList ? '是' : '否', d.showInForm ? '是' : '否',
+        d.builtin ? '内置' : '自定义',
+        d.builtin ? h('span', { class: 'muted' }, ['不可删除'])
+          : h('button', {
+            class: 'btn danger small', onclick: function () {
+              if (!confirm('删除字段 ' + d.label + '？已填写的值也会一并删除。')) return;
+              api('/api/field-defs/user/' + d.id, { method: 'DELETE' })
+                .then(loadOrg).catch(function (e) { alert('删除失败: ' + e.message); });
+            }
+          }, ['删除'])
+      ];
+    });
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['用户字段定义']),
+        hint('用于人员信息（人事字段）。字段键需与 FlyIAM 一致才能接收其同步数据；' +
+          '可在「设置 → FlyIAM」配置地址与令牌后点「同步字段」自动对齐。'),
+        h('div', { class: 'toolbar' }, [
+          h('button', {
+            class: 'btn', onclick: function () { state.orgNewField = {}; render(); }
+          }, ['新增字段']),
+          h('button', {
+            class: 'btn ghost', onclick: function () {
+              api('/api/flyiam/sync-user-fields', { method: 'POST', body: '{}' })
+                .then(function (r) {
+                  alert('同步完成：新增 ' + r.added + '，更新 ' + r.updated + '，共 ' + r.total);
+                  loadOrg();
+                })
+                .catch(function (e) { alert('同步失败: ' + e.message); });
+            }
+          }, ['从 FlyIAM 同步字段'])
+        ]),
+        simpleTable(['键', '名称', '类型', '列表显示', '表单显示', '来源', '操作'], defs, function (d, i) {
+          return rows[i];
+        }),
+        state.orgNewField !== undefined && state.orgNewField !== null ? newFieldDefForm('user') : null
+      ])
+    ]);
+  }
+
+  // newFieldDefForm 新增字段定义表单（用户/主机共用）。
+  function newFieldDefForm(kind) {
+    var f = state.orgNewField || {};
+    var keyEl = h('input', { value: f.fieldKey || '', placeholder: '如 empCode' }, []);
+    var labelEl = h('input', { value: f.label || '', placeholder: '如 工号' }, []);
+    var typeEl = h('select', {}, [
+      h('option', { value: 'text' }, ['text']),
+      h('option', { value: 'textarea' }, ['textarea']),
+      h('option', { value: 'number' }, ['number']),
+      h('option', { value: 'select' }, ['select']),
+      h('option', { value: 'date' }, ['date'])
+    ]);
+    typeEl.value = f.fieldType || 'text';
+    var optionsEl = h('input', { value: f.options || '', placeholder: '仅 select 需要，JSON 数组如 ["A","B"]' }, []);
+    var listEl = h('input', { type: 'checkbox', checked: f.showInList !== false }, []);
+    var formEl = h('input', { type: 'checkbox', checked: f.showInForm !== false }, []);
+    var orderEl = h('input', { type: 'number', value: f.sortOrder || 100 }, []);
+
+    var save = function () {
+      var payload = {
+        fieldKey: keyEl.value.trim(),
+        label: labelEl.value.trim(),
+        fieldType: typeEl.value,
+        options: typeEl.value === 'select' ? optionsEl.value.trim() : '',
+        showInList: listEl.checked,
+        showInForm: formEl.checked,
+        editable: true,
+        sortOrder: parseInt(orderEl.value, 10) || 0
+      };
+      api('/api/field-defs/' + kind, { method: 'POST', body: JSON.stringify(payload) })
+        .then(function () { state.orgNewField = null; loadOrg(); })
+        .catch(function (e) { alert('新增失败: ' + e.message); });
+    };
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['新增字段']),
+      h('div', { class: 'grid2' }, [
+        field('字段键 (fieldKey)', keyEl, '字母开头，仅字母数字下划线'),
+        field('显示名称', labelEl, '')
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('类型', typeEl, ''),
+        field('选项（select）', optionsEl, '')
+      ]),
+      h('div', { class: 'grid2' }, [
+        h('div', { class: 'field' }, [h('label', { class: 'check' }, [listEl, ' 在列表显示'])]),
+        h('div', { class: 'field' }, [h('label', { class: 'check' }, [formEl, ' 在表单显示'])])
+      ]),
+      field('排序', orderEl, '数值越小越靠前'),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', onclick: save }, ['保存']),
+        h('button', {
+          class: 'btn ghost', onclick: function () { state.orgNewField = null; render(); }
+        }, ['取消'])
+      ])
+    ]);
+  }
+
+  // 角色管理。
+  function orgRoles(o) {
+    var rows = o.roles.map(function (r) {
+      return [
+        r.name, r.description || '-', (r.permissions || []).join(', '),
+        r.team_count || 0,
+        h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'btn danger small', onclick: function () {
+              if (!confirm('删除角色 ' + r.name + '？')) return;
+              api('/api/roles/' + r.id, { method: 'DELETE' })
+                .then(loadOrg).catch(function (e) { alert('删除失败: ' + e.message); });
+            }
+          }, ['删除'])
+        ])
+      ];
+    });
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['角色']),
+      hint('角色是可复用的权限集合（read/write/delete/deploy），可被团队授权引用；' +
+        '被引用的角色不能删除。'),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn', onclick: function () {
+            var name = prompt('角色名称');
+            if (!name) return;
+            var perms = prompt('权限（逗号分隔 read,write,delete,deploy）', 'read');
+            if (perms === null) return;
+            api('/api/roles', {
+              method: 'POST',
+              body: JSON.stringify({
+                name: name, description: '',
+                permissions: perms.split(',').map(function (x) { return x.trim(); }).filter(Boolean)
+              })
+            }).then(loadOrg).catch(function (e) { alert('创建失败: ' + e.message); });
+          }
+        }, ['新增角色'])
+      ]),
+      simpleTable(['名称', '说明', '权限', '被引用', '操作'], o.roles, function (r, i) { return rows[i]; })
+    ]);
+  }
+
+  // 团队管理（成员 + 授权）。
+  function orgTeams(o) {
+    var rows = o.teams.map(function (t) {
+      return [
+        t.name, t.description || '-', t.member_count || 0, t.group_count || 0,
+        h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              state.orgSelTeam = t.id;
+              loadTeamMembers(t.id);
+            }
+          }, ['成员/授权']),
+          h('button', {
+            class: 'btn danger small', onclick: function () {
+              if (!confirm('删除团队 ' + t.name + '？成员与授权会一并删除。')) return;
+              api('/api/teams/' + t.id, { method: 'DELETE' })
+                .then(loadOrg).catch(function (e) { alert('删除失败: ' + e.message); });
+            }
+          }, ['删除'])
+        ])
+      ];
+    });
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['团队']),
+        hint('团队 = 成员集合 + 对服务组的授权。授权支持直接权限，也可引用角色（取并集）。'),
+        h('div', { class: 'toolbar' }, [
+          h('button', {
+            class: 'btn', onclick: function () {
+              var name = prompt('团队名称');
+              if (!name) return;
+              api('/api/teams', { method: 'POST', body: JSON.stringify({ name: name }) })
+                .then(loadOrg).catch(function (e) { alert('创建失败: ' + e.message); });
+            }
+          }, ['新增团队'])
+        ]),
+        simpleTable(['名称', '说明', '成员数', '授权数', '操作'], o.teams, function (t, i) { return rows[i]; })
+      ]),
+      state.orgSelTeam ? teamDetailCard(o, state.orgSelTeam) : null
+    ]);
+  }
+
+  function loadTeamMembers(teamID) {
+    Promise.all([
+      api('/api/teams/' + teamID + '/members'),
+      api('/api/teams/' + teamID + '/permissions')
+    ]).then(function (res) {
+      state.orgTeamMembers = res[0] || [];
+      state.orgTeamPerms = res[1] || [];
+      render();
+    }).catch(function (e) { alert('加载团队详情失败: ' + e.message); });
+  }
+
+  function teamDetailCard(o, teamID) {
+    var team = o.teams.filter(function (t) { return t.id === teamID; })[0];
+    var members = state.orgTeamMembers || [];
+    var perms = state.orgTeamPerms || [];
+
+    var memberRows = members.map(function (m) {
+      return [m.user_id, h('button', {
+        class: 'btn danger small', onclick: function () {
+          api('/api/teams/' + teamID + '/members/' + encodeURIComponent(m.user_id), { method: 'DELETE' })
+            .then(function () { loadTeamMembers(teamID); })
+            .catch(function (e) { alert('移除失败: ' + e.message); });
+        }
+      }, ['移除'])];
+    });
+
+    var permRows = perms.map(function (p) {
+      return [
+        p.group_name || p.group_id,
+        (p.permissions || []).join(', ') || '-',
+        (p.role_ids || []).join(', ') || '-',
+        (p.services || []).join(', ') || '-',
+        h('button', {
+          class: 'btn danger small', onclick: function () {
+            api('/api/teams/' + teamID + '/permissions/' + p.group_id, { method: 'DELETE' })
+              .then(function () { loadTeamMembers(teamID); })
+              .catch(function (e) { alert('解除失败: ' + e.message); });
+          }
+        }, ['解除'])
+      ];
+    });
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['团队详情：' + (team ? team.name : teamID)]),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn ghost', onclick: function () {
+            var names = prompt('添加成员（用户名，逗号分隔）');
+            if (!names) return;
+            api('/api/teams/' + teamID + '/members', {
+              method: 'POST',
+              body: JSON.stringify({ members: names.split(',').map(function (x) { return x.trim(); }).filter(Boolean) })
+            }).then(function () { loadTeamMembers(teamID); })
+              .catch(function (e) { alert('添加失败: ' + e.message); });
+          }
+        }, ['添加成员']),
+        h('button', {
+          class: 'btn ghost', onclick: function () { state.orgSelTeam = null; render(); }
+        }, ['关闭'])
+      ]),
+      h('h3', {}, ['成员']),
+      simpleTable(['用户名', '操作'], members, function (m, i) { return memberRows[i]; }),
+      h('h3', {}, ['服务组授权']),
+      simpleTable(['服务组', '直接权限', '引用角色', '授权服务', '操作'], perms, function (p, i) { return permRows[i]; }),
+      teamPermForm(o, teamID)
+    ]);
+  }
+
+  // teamPermForm 新增/覆盖某服务组的授权。
+  function teamPermForm(o, teamID) {
+    var groupEl = h('select', {}, o.groups.map(function (g) {
+      return h('option', { value: g.id }, [g.name]);
+    }));
+    var permEl = h('input', { value: 'read', placeholder: 'read,write,delete,deploy' }, []);
+    var roleEl = h('input', { placeholder: '角色 ID，逗号分隔（可空）' }, []);
+    var svcEl = h('input', { value: '*', placeholder: '* 表示组内全部组件' }, []);
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['设置授权']),
+      h('div', { class: 'grid2' }, [
+        field('服务组', groupEl, ''),
+        field('直接权限', permEl, '逗号分隔')
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('引用角色', roleEl, '角色 ID，可空'),
+        field('授权服务', svcEl, '* 或组件名，逗号分隔')
+      ]),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn', onclick: function () {
+            var split = function (v) {
+              return v.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+            };
+            api('/api/teams/' + teamID + '/permissions', {
+              method: 'PUT',
+              body: JSON.stringify({
+                group_id: parseInt(groupEl.value, 10),
+                permissions: split(permEl.value),
+                role_ids: split(roleEl.value).map(function (x) { return parseInt(x, 10); })
+                  .filter(function (x) { return !isNaN(x); }),
+                services: split(svcEl.value)
+              })
+            }).then(function () { loadTeamMembers(teamID); })
+              .catch(function (e) { alert('保存失败: ' + e.message); });
+          }
+        }, ['保存授权'])
+      ])
+    ]);
+  }
+
+  // 服务组管理。
+  function orgGroups(o) {
+    var comps = state.components || [];
+    var rows = o.groups.map(function (g) {
+      return [
+        g.name, g.description || '-',
+        (g.components || []).join(', ') || '-',
+        g.team_count || 0,
+        h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'btn danger small', onclick: function () {
+              if (!confirm('删除服务组 ' + g.name + '？相关授权会一并删除。')) return;
+              api('/api/service-groups/' + g.id, { method: 'DELETE' })
+                .then(loadOrg).catch(function (e) { alert('删除失败: ' + e.message); });
+            }
+          }, ['删除'])
+        ])
+      ];
+    });
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['服务组']),
+      hint('服务组 = 组件集合，是团队授权的单位。与 consul_mgr 的「服务组」概念一致，' +
+        '但这里挂载的是本平台的组件。'),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn', onclick: function () {
+            var name = prompt('服务组名称');
+            if (!name) return;
+            var ids = prompt('包含的组件 ID（逗号分隔，可空）', '');
+            if (ids === null) return;
+            api('/api/service-groups', {
+              method: 'POST',
+              body: JSON.stringify({
+                name: name,
+                component_ids: ids.split(',').map(function (x) { return parseInt(x.trim(), 10); })
+                  .filter(function (x) { return !isNaN(x); })
+              })
+            }).then(loadOrg).catch(function (e) { alert('创建失败: ' + e.message); });
+          }
+        }, ['新增服务组'])
+      ]),
+      simpleTable(['名称', '说明', '组件', '授权团队数', '操作'], o.groups, function (g, i) { return rows[i]; }),
+      hint(comps.length ? '可用组件：' + comps.map(function (c) { return c.id + '=' + c.name; }).join('，') : '')
     ]);
   }
 
@@ -2696,6 +3189,7 @@
     switch (state.view) {
       case 'settings': body = settingsView(); break;
       case 'extbin': body = externalBinariesView(); break;
+      case 'org': body = orgView(); break;
       case 'components': body = componentsView(); break;
       case 'artifacts': body = artifactsView(); break;
       case 'tasks': body = tasksView(); break;
@@ -3110,7 +3604,8 @@
       return;
     }
     if (state.user && state.view !== 'settings' && state.view !== 'components' &&
-        state.view !== 'artifacts' && state.view !== 'extbin' && state.view !== 'password') {
+        state.view !== 'artifacts' && state.view !== 'extbin' && state.view !== 'org' &&
+        state.view !== 'password') {
       // 先清掉可能仍在排队的定时器，避免同一时刻触发两次请求。
       stopAutoRefresh();
       autoRefreshTick();

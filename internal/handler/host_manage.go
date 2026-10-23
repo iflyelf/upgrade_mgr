@@ -2,6 +2,7 @@ package handler
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/iflyelf/upgrade_mgr/internal/logic/fielddef"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -36,6 +38,9 @@ type hostUpdateRequest struct {
 	// 这里只解决"同一平台存在多个可达入口，需要按主机远程切换"的情况。
 	// 支持纯 IP、IP:端口或完整 http(s) URL；留空表示取消覆盖，Agent 回退默认地址。
 	ServerURLOverride *string `json:"server_url_override"`
+	// CustomFields 主机自定义字段值（键必须在 host_field_defs 中定义）。
+	// 不传表示不修改；传入时按键合并（只覆盖传入的键）。
+	CustomFields map[string]string `json:"custom_fields"`
 }
 
 type hostField struct {
@@ -112,7 +117,7 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			}
 			req.ServerURLOverride = &v
 		}
-		hasField := req.TunnelIP != nil || req.ServerURLOverride != nil
+		hasField := req.TunnelIP != nil || req.ServerURLOverride != nil || len(req.CustomFields) > 0
 		for _, f := range fields {
 			if f.value != nil {
 				hasField = true
@@ -130,12 +135,38 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 			auditOp(s, r, audit.ActionHostUpdate, "host", strconv.FormatInt(id, 10), ip, opErr)
 		}()
 
+		// 自定义字段：按定义校验（未知键丢弃、类型/选项校验），再按键合并。
+		var customJSON []byte
+		if len(req.CustomFields) > 0 {
+			repo, repoErr := fielddef.NewRepo(s.DB, fielddef.KindHost)
+			if repoErr != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, repoErr)
+				return
+			}
+			defs, defErr := repo.List(r.Context())
+			if defErr != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, defErr)
+				return
+			}
+			clean, valErr := fielddef.ValidateValues(defs, req.CustomFields)
+			if valErr != nil {
+				httpx.Fail(w, http.StatusBadRequest, valErr.Error())
+				return
+			}
+			customJSON, _ = json.Marshal(clean)
+		}
+
 		overrideChanged := req.ServerURLOverride != nil
-		// 字段占位符 $2..$10，租户条件从 $11 开始。
-		cond, condArgs := reqScope(r).Where("", 11)
+		// 字段占位符 $2..$11，租户条件从 $12 开始。
+		cond, condArgs := reqScope(r).Where("", 12)
+		var customArg any
+		if len(customJSON) > 0 {
+			customArg = string(customJSON)
+		}
 		args := append([]any{
 			id, req.Hostname, req.Account, req.AppCode, req.BizGroup,
 			req.Department, req.Vendor, req.HostType, req.TunnelIP, req.ServerURLOverride,
+			customArg,
 		}, condArgs...)
 		err = s.DB.QueryRowContext(r.Context(), `
 			UPDATE hosts SET
@@ -148,6 +179,8 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 				host_type  = COALESCE($8, host_type),
 				tunnel_ip  = COALESCE($9, tunnel_ip),
 				server_url_override = COALESCE($10, server_url_override),
+				custom_fields = CASE WHEN $11::text IS NULL THEN custom_fields
+				                     ELSE COALESCE(custom_fields,'{}'::jsonb) || $11::jsonb END,
 				updated_at = NOW()
 			WHERE id=$1 AND `+cond+`
 			RETURNING ip`, args...).Scan(&ip)

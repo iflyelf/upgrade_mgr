@@ -105,6 +105,23 @@ var Registry = []Item{
 		Get: func(c *config.Config) string { return b2s(c.Agent.AutoUpdate) },
 		Set: func(c *config.Config, v string) { c.Agent.AutoUpdate = v == "true" }},
 
+	// FlyIAM 集成（与 consul_mgr 复用同一部署）
+	{Key: "flyiam.endpoint", Group: "FlyIAM",
+		Label: "FlyIAM 后端地址（如 http://flyiam.internal:8000）", Type: "string",
+		Get: func(c *config.Config) string { return c.FlyIAM.Endpoint },
+		Set: func(c *config.Config, v string) { c.FlyIAM.Endpoint = strings.TrimRight(strings.TrimSpace(v), "/") },
+		Validate: func(v string) error {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return nil
+			}
+			return validateHTTPURL(v)
+		}},
+	{Key: "flyiam.service_token", Group: "FlyIAM",
+		Label: "服务令牌（X-Service-Token）", Type: "secret", Secret: true,
+		Get: func(c *config.Config) string { return c.FlyIAM.ServiceToken },
+		Set: func(c *config.Config, v string) { c.FlyIAM.ServiceToken = strings.TrimSpace(v) }},
+
 	// 外部文件代缓存（供老系统通过 HTTP 获取公网文件）
 	{Key: "server.external_binaries", Group: "外部文件代缓存",
 		Label: "白名单（每行 name=地址；脚本用 script: 前缀，如 windows-exporter-install.ps1=script:https://...）",
@@ -275,6 +292,25 @@ func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, er
 		applied = append(applied, k)
 	}
 	return applied, nil
+}
+
+// validateHTTPURL 校验 http/https 绝对地址（用于服务间地址）。
+func validateHTTPURL(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("地址格式错误: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("必须以 http:// 或 https:// 开头")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("缺少主机名")
+	}
+	return nil
 }
 
 // normalizeExternalURL 去除首尾空白和结尾斜杠，避免拼接出 //api/...。

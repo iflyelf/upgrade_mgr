@@ -221,6 +221,40 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCreate(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/tenant-roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetTenantRoles(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/disabled", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetDisabled(sc))))
+	// 字段自定义（用户/主机扩展字段定义）
+	mux.HandleFunc("GET /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListFieldDefs(sc))))
+	mux.HandleFunc("POST /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CreateFieldDef(sc))))
+	mux.HandleFunc("PUT /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UpdateFieldDef(sc))))
+	mux.HandleFunc("DELETE /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DeleteFieldDef(sc))))
+	// 人员信息（用户扩展字段值）
+	mux.HandleFunc("GET /api/users/fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListUserFieldsWithValues(sc))))
+	mux.HandleFunc("GET /api/users/{username}/fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GetUserFields(sc))))
+	mux.HandleFunc("PUT /api/users/{username}/fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SaveUserFields(sc))))
+
+	// FlyIAM 集成：连通性测试 + 用户字段定义同步
+	mux.HandleFunc("POST /api/flyiam/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestFlyIAM(sc))))
+	mux.HandleFunc("POST /api/flyiam/sync-user-fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncUserFieldsFromFlyIAM(sc))))
+
+	// 人员组织：角色 / 团队 / 服务组 / 授权
+	mux.HandleFunc("GET /api/roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RoleList(sc))))
+	mux.HandleFunc("POST /api/roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RoleCreate(sc))))
+	mux.HandleFunc("PUT /api/roles/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RoleUpdate(sc))))
+	mux.HandleFunc("DELETE /api/roles/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RoleDelete(sc))))
+	mux.HandleFunc("GET /api/teams", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamList(sc))))
+	mux.HandleFunc("POST /api/teams", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamCreate(sc))))
+	mux.HandleFunc("PUT /api/teams/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamUpdate(sc))))
+	mux.HandleFunc("DELETE /api/teams/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamDelete(sc))))
+	mux.HandleFunc("GET /api/teams/{id}/members", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamMembers(sc))))
+	mux.HandleFunc("POST /api/teams/{id}/members", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamMemberAdd(sc))))
+	mux.HandleFunc("DELETE /api/teams/{id}/members/{user}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamMemberRemove(sc))))
+	mux.HandleFunc("GET /api/teams/{id}/permissions", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissions(sc))))
+	mux.HandleFunc("PUT /api/teams/{id}/permissions", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissionSet(sc))))
+	mux.HandleFunc("DELETE /api/teams/{id}/permissions/{group}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissionDelete(sc))))
+	mux.HandleFunc("GET /api/service-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupList(sc))))
+	mux.HandleFunc("POST /api/service-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupCreate(sc))))
+	mux.HandleFunc("PUT /api/service-groups/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupUpdate(sc))))
+	mux.HandleFunc("DELETE /api/service-groups/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupDelete(sc))))
+
 	mux.HandleFunc("GET /api/tenants", middleware.RequireAuth(auth, handler.TenantList(sc)))
 	mux.HandleFunc("POST /api/tenants", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TenantCreate(sc))))
 

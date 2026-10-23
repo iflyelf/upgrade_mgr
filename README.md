@@ -1959,6 +1959,43 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 人员组织、字段自定义与 FlyIAM 集成
+
+**人员组织（与 consul_mgr 对齐，照搬服务组模型）**
+
+| 实体 | 说明 |
+|---|---|
+| 用户扩展字段 `user_field_defs` | 人事字段定义（键/名称/类型/选项/列表与表单可见性/排序），页面可增删 |
+| 用户字段值 `user_field_values` | 按 (用户, 字段键) 存储；新增字段无需改表 |
+| 角色 `roles` | 可复用权限集合（read/write/delete/deploy） |
+| 团队 `teams` / `team_members` | 成员集合；团队是授权主体 |
+| 服务组 `service_groups` / `_components` | 组件集合（替代 consul_mgr 的 Consul 服务组） |
+| 团队授权 `team_group_permissions` | 直接权限 + 引用角色（并集）+ 授权服务（`*`=组内全部） |
+
+- 内置 6 个人事字段（工号/零级~二级部门/编制类型/上级账号），与 FlyIAM 键一致。
+- 角色被团队授权引用时**拒绝删除**；删除团队级联清理成员与授权。
+- `EffectivePermissions(username)` 计算用户通过团队获得的组件级权限，供后续任务下发鉴权。
+- 前端新增「人员组织」页签（人员信息 / 用户字段 / 角色 / 团队 / 服务组 五个子页），
+  支持编辑人员字段、增删字段与角色、管理团队成员与授权。
+
+**主机字段自定义**
+
+- `host_field_defs` 存定义，`hosts.custom_fields`(JSONB) 存值；
+- 主机编辑接口新增 `custom_fields`：按定义校验（未知键丢弃、数字/日期/下拉选项校验）后
+  **按键合并**，不会覆盖其它自定义字段；
+- 主机列表返回 `custom_fields`，前端可直接展示。
+
+**FlyIAM 集成**
+
+- `internal/pkg/flyiam`：`X-Service-Token` 调用
+  `/api/casdoor/app-credentials`（应用凭据）与 `/api/user-fields/export`（字段定义）；
+- 设置页新增「FlyIAM」分组（地址 + 服务令牌，令牌密文存储）；
+- `POST /api/flyiam/test` 连通性测试（回显 application/organization，绝不返回 ClientSecret）；
+- `POST /api/flyiam/sync-user-fields` 按 `field_key` 幂等同步字段定义：
+  **本地新增不会被删除**，内置字段保留 builtin 标记。
+
+**迁移 `020_org_and_fields`**：8 张新表 + `hosts.custom_fields` + 默认服务组（纳入全部已有组件）。
+
 ### 2026-10-23 外部文件：服务端分页、批量刷新与可用性指标
 
 - **服务端分页 + 搜索**：`GET /api/external/binaries?page=&size=&q=`（size 上限 200，

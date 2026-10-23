@@ -101,6 +101,27 @@ const (
 	ActionHostUpdate      = "host.update"
 	ActionHostDelete      = "host.delete"
 	ActionHostTunnelTest  = "host.tunnel_test"
+
+	// 字段定义（用户/主机扩展字段）
+	ActionFieldDefCreate = "fielddef.create"
+	ActionFieldDefUpdate = "fielddef.update"
+	ActionFieldDefDelete = "fielddef.delete"
+	ActionFieldValueSave = "fielddef.value_save"
+
+	// 人员组织：角色 / 团队 / 服务组 / 授权
+	ActionRoleCreate       = "role.create"
+	ActionRoleUpdate       = "role.update"
+	ActionRoleDelete       = "role.delete"
+	ActionTeamCreate       = "team.create"
+	ActionTeamUpdate       = "team.update"
+	ActionTeamDelete       = "team.delete"
+	ActionGroupCreate      = "group.create"
+	ActionGroupUpdate      = "group.update"
+	ActionGroupDelete      = "group.delete"
+	ActionPermissionSet    = "permission.set"
+	ActionPermissionDelete = "permission.delete"
+	// FlyIAM 集成（字段定义同步）
+	ActionFlyIAMSync      = "flyiam.sync"
 	ActionTaskStart       = "task.start"
 	ActionTaskPause       = "task.pause"
 	ActionTaskPromote     = "task.promote"

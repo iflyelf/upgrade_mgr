@@ -30,6 +30,7 @@ type Config struct {
 	Redis    RedisConfig    `yaml:"redis"`
 	Artifact ArtifactConfig `yaml:"artifact"`
 	Agent    AgentConfig    `yaml:"agent"`
+	FlyIAM   FlyIAMConfig   `yaml:"flyiam"`
 	Log      LogConfig      `yaml:"log"`
 }
 
@@ -197,6 +198,14 @@ type AgentConfig struct {
 	AutoUpdate bool `yaml:"auto_update"`
 }
 
+// FlyIAMConfig FlyIAM 服务间集成（与 consul_mgr 复用同一部署）。
+type FlyIAMConfig struct {
+	// Endpoint FlyIAM 后端地址（服务端可达），如 http://flyiam.internal:8000
+	Endpoint string `yaml:"endpoint"`
+	// ServiceToken 服务间令牌，通过 X-Service-Token 发送。
+	ServiceToken string `yaml:"service_token"`
+}
+
 // LogConfig 日志。
 type LogConfig struct {
 	Level string `yaml:"level"`
@@ -335,6 +344,8 @@ func (c *Config) applyEnv() {
 	setStr(&c.Artifact.OSSAccessKey, "ARTIFACT_OSS_ACCESS_KEY")
 	setStr(&c.Artifact.OSSSecretKey, "ARTIFACT_OSS_SECRET_KEY")
 	setBool(&c.Agent.AutoUpdate, "AGENT_AUTO_UPDATE")
+	setStr(&c.FlyIAM.Endpoint, "FLYIAM_ENDPOINT")
+	setStr(&c.FlyIAM.ServiceToken, "FLYIAM_SERVICE_TOKEN")
 	setStr(&c.Log.Level, "LOG_LEVEL")
 
 	if c.Server.Host == "" {
