@@ -41,12 +41,12 @@ func TestTunnelFailureFallsBack(t *testing.T) {
 		DefaultServerURL: "http://10.0.0.5:8090",
 	})
 	for i := 0; i < 2; i++ {
-		a.handleTunnelFailure()
+		a.handleConnectFailure()
 		if a.cfg.ServerURL != "http://10.8.0.9:8090" {
 			t.Fatalf("第 %d 次失败不应立即回退", i+1)
 		}
 	}
-	a.handleTunnelFailure()
+	a.handleConnectFailure()
 	if a.cfg.ServerURL != "http://10.0.0.5:8090" {
 		t.Fatalf("连续 3 次失败应回退，实际 %q", a.cfg.ServerURL)
 	}
@@ -80,4 +80,49 @@ func TestHeartbeatResponseTunnelResolution(t *testing.T) {
 		t.Fatalf("resolveServerURL=%q", got)
 	}
 	var _ protocol.HeartbeatResponse
+}
+
+// TestServerURLFailover 默认地址连续失败时轮换到备用地址。
+func TestServerURLFailover(t *testing.T) {
+	a := New(Config{
+		ServerURL:        "https://a.example.com",
+		DefaultServerURL: "https://a.example.com",
+		ServerURLs:       []string{"https://a.example.com", "https://b.example.com", "https://c.example.com"},
+	})
+	// 默认地址连续 2 次失败后切到 b
+	a.handleConnectFailure()
+	if a.cfg.ServerURL != "https://a.example.com" {
+		t.Fatalf("第一次失败不应切换: %q", a.cfg.ServerURL)
+	}
+	a.handleConnectFailure()
+	if a.cfg.ServerURL != "https://b.example.com" {
+		t.Fatalf("应切换到备用地址 b，实际 %q", a.cfg.ServerURL)
+	}
+	// b 是备用地址（非默认），连续 3 次失败回退默认
+	a.handleConnectFailure()
+	a.handleConnectFailure()
+	a.handleConnectFailure()
+	if a.cfg.ServerURL != "https://a.example.com" {
+		t.Fatalf("备用地址失败应回退默认，实际 %q", a.cfg.ServerURL)
+	}
+	// 再次失败继续轮换
+	a.handleConnectFailure()
+	a.handleConnectFailure()
+	if a.cfg.ServerURL != "https://b.example.com" {
+		t.Fatalf("应继续轮换，实际 %q", a.cfg.ServerURL)
+	}
+}
+
+// TestNormalizeServerList 当前地址始终包含在列表中且去重。
+func TestNormalizeServerList(t *testing.T) {
+	got := normalizeServerList("https://a/", []string{"https://b", "https://a", "", "https://b/"})
+	want := []string{"https://a", "https://b"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
 }

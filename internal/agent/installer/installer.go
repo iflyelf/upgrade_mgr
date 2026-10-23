@@ -29,7 +29,10 @@ const ServiceName = "upgrade-agent"
 
 // Options 安装参数。
 type Options struct {
-	ServerURL   string
+	ServerURL string
+	// ServerURLs 备用连接地址（含 ServerURL 本身）。安装时写入 state，
+	// Agent 默认地址不可达时按顺序轮换。
+	ServerURLs  []string
 	EnrollToken string
 	BinPath     string // 目标安装路径，留空使用平台默认值
 	StatePath   string
@@ -100,14 +103,16 @@ func Install(opts Options) error {
 // Agent 启动时由 agentrun.LoadState 读取。
 type persistedState struct {
 	ServerURL string
-	// DefaultServerURL 记录安装时的默认地址：配置隧道后 Agent 切换连接地址，
-	// 服务端清空隧道时据此回退。
+	// DefaultServerURL 记录安装时的默认地址：连接地址被覆盖后 Agent 切换，
+	// 服务端清空覆盖时据此回退。
 	DefaultServerURL string
-	EnrollToken      string
-	AgentID          string
-	Token            string
-	Secret           string
-	StatePath        string
+	// ServerURLs 备用连接地址（含默认地址），用于默认入口不可达时自动轮换。
+	ServerURLs  []string `json:",omitempty"`
+	EnrollToken string
+	AgentID     string
+	Token       string
+	Secret      string
+	StatePath   string
 	// 可选 TLS / 双向 TLS。
 	TLSCA   string `json:",omitempty"`
 	TLSCert string `json:",omitempty"`
@@ -145,8 +150,13 @@ func writeInitialState(opts Options) error {
 			}
 		}
 	}
+	urls := opts.ServerURLs
+	if len(urls) == 0 {
+		urls = []string{opts.ServerURL}
+	}
 	return writeStateAtomic(path, persistedState{
 		ServerURL: opts.ServerURL, DefaultServerURL: opts.ServerURL,
+		ServerURLs:  urls,
 		EnrollToken: opts.EnrollToken, StatePath: path,
 		TLSCA: opts.TLSCA, TLSCert: opts.TLSCert, TLSKey: opts.TLSKey,
 	})

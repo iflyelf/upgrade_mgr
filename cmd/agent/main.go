@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -61,7 +62,7 @@ func main() {
 
 func runCmd() {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	serverURL := fs.String("server", "http://localhost:8090", "控制台地址")
+	serverURL := fs.String("server", "http://localhost:8090", "控制台地址；可逗号分隔多个作为备用")
 	enrollToken := fs.String("enroll-token", "", "注册令牌")
 	statePath := fs.String("state", agentpath.StatePath(), "状态文件路径")
 	// --service 由 Windows 安装器写入服务命令行；Linux 上忽略。
@@ -76,8 +77,12 @@ func runCmd() {
 		// 文件缺失是首次安装的正常情况；内容损坏则提示运维重新安装。
 		log.Printf("⚠️ 读取状态文件失败（将按新节点处理）: %v", err)
 	}
+	// --server 支持逗号分隔的多个地址：第一个为当前地址，其余作为备用。
 	if cfg.ServerURL == "" {
-		cfg.ServerURL = *serverURL
+		cfg.ServerURL = splitServers(*serverURL)[0]
+	}
+	if len(cfg.ServerURLs) == 0 {
+		cfg.ServerURLs = splitServers(*serverURL)
 	}
 	if cfg.DefaultServerURL == "" {
 		// 旧 state / 手工 run 没有该字段：把当前地址作为默认地址，
@@ -160,7 +165,7 @@ func usage() {
 
 func installCmd() {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
-	serverURL := fs.String("server", "", "控制台地址（必填）")
+	serverURL := fs.String("server", "", "控制台地址（必填）；可逗号分隔多个作为备用，如 https://a,https://b")
 	enrollToken := fs.String("enroll-token", "", "注册令牌（可选，留空则提示手动）")
 	binPath := fs.String("bin", agentpath.BinPath(), "安装路径")
 	statePath := fs.String("state", agentpath.StatePath(), "状态文件路径")
@@ -175,7 +180,7 @@ func installCmd() {
 		os.Exit(1)
 	}
 	opts := installer.Options{
-		ServerURL: *serverURL, EnrollToken: *enrollToken,
+		ServerURL: *serverURL, ServerURLs: splitServers(*serverURL), EnrollToken: *enrollToken,
 		BinPath: *binPath, StatePath: *statePath, InstallCron: *installCron,
 		Force: *force, TLSCA: *tlsCA, TLSCert: *tlsCert, TLSKey: *tlsKey,
 	}
@@ -201,4 +206,24 @@ func watchdogCmd() {
 		log.Printf("watchdog: %v", err)
 		os.Exit(1)
 	}
+}
+
+// splitServers 拆分逗号/空白分隔的服务端地址列表。
+//
+// 支持 `--server https://a:8090,https://b:8090`，便于部署多入口/隧道场景
+// 时让 Agent 自动故障切换；返回值至少包含一个元素（可能为空串）。
+func splitServers(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
 }

@@ -145,11 +145,11 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			build_hash=CASE WHEN $4<>'' THEN $4 ELSE build_hash END,
 			build_variant=CASE WHEN $4<>'' THEN $5 ELSE build_variant END
 			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant)
-		// 维护窗口内不覆盖 upgrading 状态；RETURNING server_tunnel_url 顺便取出
-		// 该主机配置的平台侧隧道地址，避免每次心跳多一次查询。
+		// 维护窗口内不覆盖 upgrading 状态；RETURNING server_url_override 顺便取出
+		// 该主机的连接地址覆盖，避免每次心跳多一次查询。
 		var (
-			serverTunnelURL string
-			checkRequested  sql.NullTime
+			serverURLOverride string
+			checkRequested    sql.NullTime
 		)
 		_ = s.DB.QueryRowContext(r.Context(), `UPDATE hosts SET last_seen=NOW(),
 			agent_status=CASE WHEN maintenance_until IS NOT NULL AND maintenance_until>NOW() THEN agent_status ELSE $2 END,
@@ -160,10 +160,10 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			agent_server_url=CASE WHEN $7<>'' THEN $7 ELSE agent_server_url END,
 			agent_default_server_url=CASE WHEN $8<>'' THEN $8 ELSE agent_default_server_url END
 			WHERE agent_id=$1
-			RETURNING COALESCE(server_tunnel_url,''), tunnel_check_requested_at`, agentID, status, buildVersion, buildHash, buildVariant,
+			RETURNING COALESCE(server_url_override,''), tunnel_check_requested_at`, agentID, status, buildVersion, buildHash, buildVariant,
 			hostnet.NormalizeExitIP(req.ExitIP),
 			normalizeServerURL(req.AgentServerURL), normalizeServerURL(req.AgentDefaultServerURL)).
-			Scan(&serverTunnelURL, &checkRequested)
+			Scan(&serverURLOverride, &checkRequested)
 		// 自升级命令在 Agent 退出前无法上报 success，由新版本心跳按目标 SHA256 确认。
 		if buildHash != "" {
 			markSelfUpdateSuccess(r.Context(), s.DB, agentID, buildHash)
@@ -174,7 +174,7 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			saveAgentTunnelCheck(r.Context(), s.DB, agentID, protocolTunnelCheck(*req.TunnelCheck))
 		}
 		// 隧道地址：管理员为该主机配置过则在响应中下发，Agent 自动切换。
-		resp := protocol.HeartbeatResponse{ServerURL: tunnelServerURL(s, r, serverTunnelURL,
+		resp := protocol.HeartbeatResponse{ServerURL: resolveServerURLOverride(s, r, serverURLOverride,
 			normalizeServerURL(req.AgentDefaultServerURL))}
 		if checkRequested.Valid {
 			if time.Since(checkRequested.Time) < agentCheckWindow && resp.ServerURL != "" {
@@ -190,24 +190,25 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
-// tunnelServerURL 返回该主机应切换到的平台侧隧道地址（未配置返回空串）。
+// resolveServerURLOverride 返回该主机应切换到的连接地址（未配置返回空串）。
 //
-// 隧道地址允许只填 IP 或 IP:端口，此时按 Agent 上报的默认地址补齐协议与端口；
-// Agent 未上报默认地址时退化为设置页的 external_url。
-func tunnelServerURL(s *svc.ServiceContext, r *http.Request, serverTunnel, agentDefault string) string {
-	tunnel := strings.TrimSpace(serverTunnel)
-	if tunnel == "" {
+// 该地址只是 Agent 的连接入口覆盖，与隧道建立无关。允许只填 IP 或 IP:端口，
+// 此时按 Agent 上报的默认地址补齐协议与端口；Agent 未上报默认地址时
+// 退化为设置页的 external_url。
+func resolveServerURLOverride(s *svc.ServiceContext, r *http.Request, override, agentDefault string) string {
+	raw := strings.TrimSpace(override)
+	if raw == "" {
 		return ""
 	}
-	if strings.Contains(tunnel, "://") {
-		return hostnet.ResolveServerURL(tunnel, "")
+	if strings.Contains(raw, "://") {
+		return hostnet.ResolveServerURL(raw, "")
 	}
 	fallback := agentDefault
 	if fallback == "" && s.Settings != nil {
 		snap := s.Settings.Snapshot()
 		fallback = strings.TrimRight(strings.TrimSpace(snap.Server.ExternalURL), "/")
 	}
-	return hostnet.ResolveServerURL(tunnel, fallback)
+	return hostnet.ResolveServerURL(raw, fallback)
 }
 
 // protocolTunnelCheck 把 Agent 上报的自检结果转成拨测结果（用于统一落库）。
