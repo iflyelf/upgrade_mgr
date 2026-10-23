@@ -1022,15 +1022,21 @@ status upgrade-agent            # upstart
 $dir = "$env:TEMP\upgrade-agent-install"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $exe = Join-Path $dir 'upgrade-agent-windows-amd64.exe'
-$url = 'https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.exe'
+
+# 从控制台自身下载，2008 R2 可用 HTTP，不依赖 GitHub/TLS 1.2。
+# 控制台必须已在 dist 放入 upgrade-agent-windows-amd64.exe。
+$server = 'http://your-server-ip:8090'   # 换成控制台实际地址
+$url = "$server/api/agent/binary/windows-amd64"
 (New-Object System.Net.WebClient).DownloadFile($url, $exe)
 
-& $exe install --server https://upgrade.example.com --enroll-token <token>
+& $exe install --server $server --enroll-token <token>
 Get-Service upgrade-agent
 ```
 
-> 更简单的方式是在控制台「接入主机」选择 Windows 后复制一键命令（走
-> `/api/agent/binary/windows-amd64`，无需手工解压）。
+> 更简单的方式是在控制台「接入主机」选择 Windows 后复制一键命令（同样走
+> `/api/agent/binary/windows-amd64`，无需手工下载）。
+> 已启用 TLS 1.2 / .NET 4.5+ 的机器也可直接从 Release 下载 `.exe`；2008 R2 默认
+> 建议走平台 HTTP，避免 `proxy.xiaonuo.live` 的 HTTPS 握手失败。
 > 若只有旧 Release 的 `.zip`：PowerShell 5+ 用 `Expand-Archive`；PowerShell 2.0
 > 用 `Shell.Application` 解压后再执行 `upgrade-agent-windows-amd64.exe`。
 > Windows 的默认安装路径、服务名、卸载方式见上文「Windows 目标机接入」。
