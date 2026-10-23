@@ -83,6 +83,7 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		rows, err := s.DB.QueryContext(r.Context(), `
 			SELECT t.id, COALESCE(t.kind,'upgrade'), t.name, COALESCE(t.component_id,0), t.version, t.status, t.created_at,
+			       COALESCE(t.created_by,''),
 			       COUNT(th.id) AS total,
 			       COUNT(th.id) FILTER (WHERE th.status='success') AS success,
 			       COUNT(th.id) FILTER (WHERE th.status='failed') AS failed
@@ -97,16 +98,17 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 		list := []map[string]any{}
 		for rows.Next() {
 			var id, cid int64
-			var kind, name, version, status string
+			var kind, name, version, status, createdBy string
 			var createdAt any
 			var total, success, failed int
-			if err := rows.Scan(&id, &kind, &name, &cid, &version, &status, &createdAt, &total, &success, &failed); err != nil {
+			if err := rows.Scan(&id, &kind, &name, &cid, &version, &status, &createdAt,
+				&createdBy, &total, &success, &failed); err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
 			}
 			list = append(list, map[string]any{
 				"id": id, "kind": kind, "name": name, "component_id": cid, "version": version,
-				"status": status, "created_at": createdAt,
+				"status": status, "created_at": createdAt, "created_by": createdBy,
 				"total": total, "success": success, "failed": failed,
 			})
 		}

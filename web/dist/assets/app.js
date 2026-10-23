@@ -43,6 +43,8 @@
     // 外部文件白名单表格（页面增删行）
     extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
     orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
+    orgSelTeam: null, orgTeamMembers: null, orgTeamPerms: null, orgNewField: null,
+    flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1 };
 
@@ -3190,7 +3192,7 @@
           : null,
         h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
       ]),
-      simpleTable(['ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '操作'], state.tasks,
+      simpleTable(['ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '创建者', '操作'], state.tasks,
         function (x) {
           var c = compMap[x.component_id];
           var acts = [detailBtn(x)].concat(isAdmin() ? taskActions(x) : []);
@@ -3208,6 +3210,8 @@
               h('div', { style: 'width:' + pct + '%' }, [])
             ]),
             x.total, x.success, x.failed,
+            (x.created_by || '-') +
+              (state.user && x.created_by === state.user.Username ? '（我）' : ''),
             h('div', { class: 'row-actions' }, acts)];
         }),
       state.tasks.length === 0
