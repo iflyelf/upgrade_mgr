@@ -50,7 +50,9 @@ func main() {
 		uninstallCmd()
 	case "watchdog":
 		watchdogCmd()
-	case "self-update", "upgrade", "status":
+	case "status":
+		statusCmd()
+	case "self-update", "upgrade":
 		fmt.Printf("子命令 %s 将在后续版本实现\n", os.Args[1])
 		os.Exit(1)
 	default:
@@ -156,9 +158,9 @@ func usage() {
   install      安装为服务（Linux systemd/upstart、Windows SCM）并注册
   uninstall    卸载
   watchdog     保活看门狗（cron / 计划任务调用）
+  status       打印连接地址、备用列表、最近切换原因等排查信息
   self-update  自升级（P3）
   upgrade      单机升级指定组件（P3）
-  status       打印本机 OS/init/服务/版本（P3）
   version      显示版本
 `)
 }
@@ -226,4 +228,27 @@ func splitServers(raw string) []string {
 		return []string{""}
 	}
 	return out
+}
+
+// statusCmd 输出 Agent 当前连接状态，便于现场排查地址/隧道切换问题。
+//
+// 只读取 state 与本地探测，不访问服务端，因此离线也能用。
+func statusCmd() {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	statePath := fs.String("state", agentpath.StatePath(), "状态文件路径")
+	asJSON := fs.Bool("json", false, "以 JSON 输出（便于脚本采集）")
+	fs.Parse(os.Args[2:])
+
+	st, err := agentrun.BuildStatus(*statePath, version, variant)
+	if err != nil {
+		log.Fatalf("读取状态失败: %v", err)
+	}
+	if *asJSON {
+		fmt.Println(st.FormatJSON())
+		return
+	}
+	fmt.Print(st.FormatText())
+	if !st.Registered {
+		os.Exit(2)
+	}
 }

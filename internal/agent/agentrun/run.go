@@ -63,6 +63,14 @@ type Config struct {
 	TLSCA   string `json:"tls_ca,omitempty"`
 	TLSCert string `json:"tls_cert,omitempty"`
 	TLSKey  string `json:"tls_key,omitempty"`
+	// AppliedOverride 当前生效的「连接地址覆盖」；用于 status 判断地址来源。
+	// 服务端清空覆盖、覆盖地址失败回退时清空。
+	AppliedOverride string `json:"applied_override,omitempty"`
+	// ---- 最近一次连接地址切换（供 `upgrade-agent status` 现场排查）----
+	// 持久化在 state.json，跨进程可见；不包含任何凭据。
+	LastSwitchFrom   string    `json:"last_switch_from,omitempty"`
+	LastSwitchReason string    `json:"last_switch_reason,omitempty"`
+	LastSwitchAt     time.Time `json:"last_switch_at,omitempty"`
 }
 
 // Agent 主体
@@ -787,9 +795,12 @@ func (a *Agent) handleConnectFailure() {
 			return
 		}
 		log.Printf("⚠️ 连接地址连续 %d 次心跳失败，回退默认地址 %s", a.connectFailures, a.cfg.DefaultServerURL)
-		a.tunnelFailURL = a.cfg.ServerURL
+		from := a.cfg.ServerURL
+		a.recordSwitch(from, fmt.Sprintf("覆盖地址连续 %d 次心跳失败，回退默认地址", a.connectFailures))
+		a.tunnelFailURL = from
 		a.tunnelFailAt = time.Now()
 		a.cfg.ServerURL = a.cfg.DefaultServerURL
+		a.cfg.AppliedOverride = ""
 		a.connectFailures = 0
 		if err := a.saveState(); err != nil {
 			log.Printf("⚠️ 保存回退地址失败: %v", err)
@@ -807,10 +818,20 @@ func (a *Agent) handleConnectFailure() {
 		return
 	}
 	log.Printf("🔁 默认地址不可达，切换备用地址: %s -> %s", a.cfg.ServerURL, next)
+	from := a.cfg.ServerURL
+	a.recordSwitch(from, "默认地址连续 2 次心跳失败，切换备用地址")
 	a.cfg.ServerURL = next
+	a.cfg.AppliedOverride = ""
 	if err := a.saveState(); err != nil {
 		log.Printf("⚠️ 保存备用地址失败: %v", err)
 	}
+}
+
+// recordSwitch 记录最近一次连接地址切换，随 state 持久化供 status 展示。
+func (a *Agent) recordSwitch(from, reason string) {
+	a.cfg.LastSwitchFrom = from
+	a.cfg.LastSwitchReason = reason
+	a.cfg.LastSwitchAt = time.Now()
 }
 
 // nextServerURL 返回备用地址列表中的下一个地址（循环）。
@@ -868,7 +889,18 @@ func (a *Agent) applyServerURL(raw string) bool {
 		return false
 	}
 	log.Printf("🔗 切换服务端地址: %s -> %s", a.cfg.ServerURL, next)
+	from := a.cfg.ServerURL
+	reason := "服务端下发连接地址覆盖"
+	if strings.TrimSpace(raw) == "" {
+		reason = "服务端清空覆盖，回退默认地址"
+	}
+	a.recordSwitch(from, reason)
 	a.cfg.ServerURL = next
+	if strings.TrimSpace(raw) == "" {
+		a.cfg.AppliedOverride = ""
+	} else {
+		a.cfg.AppliedOverride = next
+	}
 	a.connectFailures = 0
 	return true
 }
