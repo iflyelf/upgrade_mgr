@@ -179,6 +179,8 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SaveExternalBinaries(sc))))
 	mux.HandleFunc("POST /api/external/binaries/test",
 		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestExternalBinary(sc))))
+	mux.HandleFunc("POST /api/external/binaries/refresh",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RefreshExternalBinary(sc))))
 
 	// 组件管理
 	mux.HandleFunc("GET /api/components", middleware.RequireAuth(auth, handler.ComponentList(sc)))

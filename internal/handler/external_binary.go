@@ -9,12 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/keyedlock"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/safepath"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
@@ -145,17 +145,14 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 
 		ttl := effectiveExternalTTL(cfg)
 		if !freshFile(target, ttl) {
-			// 同一文件并发请求只下载一次，其余等待后直接命中缓存。
-			unlock := lockExternalTarget(target)
-			defer unlock()
-			if !freshFile(target, ttl) {
-				if fetchErr := fetchExternalBinary(r.Context(), asset.URL, target, asset.Script,
-					effectiveExternalHosts(cfg), externalAllowRule(cfg)); fetchErr != nil {
-					log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
-					httpx.Fail(w, http.StatusBadGateway,
-						"控制台下载外部文件失败（请确认控制台能访问该地址）: "+fetchErr.Error())
-					return
-				}
+			// 同一文件并发请求只下载一次：锁只覆盖下载阶段，拿到后立即释放，
+			// 后续 ServeContent 流式输出不持锁（否则大文件会阻塞同文件的其它请求）。
+			if fetchErr := downloadWithLock(r.Context(), target, *asset,
+				effectiveExternalHosts(cfg), externalAllowRule(cfg), ttl); fetchErr != nil {
+				log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
+				httpx.Fail(w, http.StatusBadGateway,
+					"控制台下载外部文件失败（请确认控制台能访问该地址）: "+fetchErr.Error())
+				return
 			}
 		}
 
@@ -189,6 +186,19 @@ func freshFile(path string, ttl time.Duration) bool {
 	return time.Since(info.ModTime()) < ttl
 }
 
+// downloadWithLock 在文件锁内确认缓存并下载；锁仅覆盖下载阶段。
+//
+// 拿到锁后必须重新检查缓存：可能已有其它请求刚刚下载完成。
+func downloadWithLock(ctx context.Context, target string, asset extbin.Entry,
+	hosts []string, rule extbin.AllowRule, ttl time.Duration) error {
+	unlock := lockExternalTarget(target)
+	defer unlock()
+	if freshFile(target, ttl) {
+		return nil
+	}
+	return fetchExternalBinary(ctx, asset.URL, target, asset.Script, hosts, rule)
+}
+
 // fetchExternalBinary 下载到临时文件再原子替换，避免并发/中断留下半个文件。
 //
 // hosts 是允许的上游域名白名单；下载前同时校验域名与目标 IP（拒绝内网），
@@ -209,7 +219,21 @@ func fetchExternalBinary(ctx context.Context, source, target string, script bool
 		return err
 	}
 	req.Header.Set("User-Agent", "upgrade-mgr/external-binary-cache")
-	resp, err := externalBinaryClient.Do(req)
+	// 每一跳重定向都重新校验：白名单域名可能 302 到内网地址（SSRF 绕过）。
+	client := &http.Client{
+		Timeout:   externalBinaryClient.Timeout,
+		Transport: externalBinaryClient.Transport,
+		CheckRedirect: func(next *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("重定向次数过多")
+			}
+			if err := extbin.CheckHost(next.URL.String(), hosts, rule); err != nil {
+				return fmt.Errorf("重定向目标被拒绝: %w", err)
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -270,12 +294,9 @@ func validateExternalContent(path string, script bool) error {
 }
 
 // externalCacheMu 串行化同一文件的并发下载，避免重复拉取与半成品覆盖。
-var externalCacheMu sync.Map // target -> *sync.Mutex
+//
+// 使用 keyedlock 而非 sync.Map：key 用完自动清理，长期运行不会累积。
+var externalCacheMu = keyedlock.New()
 
 // lockExternalTarget 返回目标文件的下载锁。
-func lockExternalTarget(target string) func() {
-	v, _ := externalCacheMu.LoadOrStore(target, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
-}
+func lockExternalTarget(target string) func() { return externalCacheMu.Lock(target) }

@@ -43,7 +43,7 @@
     // 外部文件白名单表格（页面增删行）
     extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
-    extbinAllowPrivate: null, extbinCIDRs: null };
+    extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1 };
 
   function h(tag, attrs, children) {
     var el = document.createElement(tag);
@@ -1253,6 +1253,7 @@
     state.extbinTTL = null;
     state.extbinAllowPrivate = null;
     state.extbinCIDRs = null;
+    state.extbinPage = 1;
     api('/api/external/binaries')
       .then(function (d) { state.extbin = d; state.extbinBusy = false; render(); })
       .catch(function (e) {
@@ -1311,13 +1312,41 @@
       oninput: function () { state.extbinCIDRs = cidrsEl.value; }
     }, []);
 
-    var rows = draft.map(function (row, idx) {
+    // 搜索 + 分页（前端过滤：白名单通常几十条，避免额外接口）
+    var qEl = h('input', {
+      id: 'extbin-q', value: state.extbinQuery || '', placeholder: '按名称 / 上游地址过滤',
+      oninput: function () {
+        state.extbinQuery = qEl.value;
+        state.extbinPage = 1;
+        state.focusId = 'extbin-q';
+        render();
+      }
+    }, []);
+
+    var q = (state.extbinQuery || '').trim().toLowerCase();
+    var filtered = draft.map(function (row, idx) { return { row: row, idx: idx }; })
+      .filter(function (x) {
+        if (!q) return true;
+        return (x.row.name || '').toLowerCase().indexOf(q) >= 0 ||
+          (x.row.url || '').toLowerCase().indexOf(q) >= 0;
+      });
+
+    var pageSize = 20;
+    var pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    var page = Math.min(state.extbinPage || 1, pages);
+    state.extbinPage = page;
+    var pageRows = filtered.slice((page - 1) * pageSize, page * pageSize);
+
+    var rows = pageRows.map(function (item) {
+      var row = item.row, idx = item.idx;
+      var nameId = 'extbin-name-' + idx;
+      var urlId = 'extbin-url-' + idx;
       var nameEl = h('input', {
-        value: row.name || '', placeholder: '如 custom-tool',
+        id: nameId, value: row.name || '', placeholder: '如 custom-tool',
         oninput: function () { row.name = nameEl.value; }
       }, []);
       var urlEl = h('input', {
-        value: row.url || '', placeholder: 'https://github.com/.../tool.exe',
+        id: urlId, value: row.url || '', placeholder: 'https://github.com/.../tool.exe',
         oninput: function () { row.url = urlEl.value; }
       }, []);
       var scriptEl = h('input', {
@@ -1325,12 +1354,13 @@
         onchange: function () { row.script = scriptEl.checked; }
       }, []);
       var testOut = h('div', { class: 'muted' }, []);
+      var platformURL = row.platform_url || ('/api/external/binary/' + (row.name || '<name>'));
 
       return h('tr', {}, [
         h('td', {}, [nameEl]),
         h('td', {}, [urlEl]),
         h('td', {}, [h('label', { class: 'check' }, [scriptEl, ' 脚本'])]),
-        h('td', {}, [h('div', { class: 'muted' }, [row.platform_url || ('/api/external/binary/' + (row.name || '<name>'))])]),
+        h('td', {}, [h('div', { class: 'muted' }, [platformURL])]),
         h('td', {}, [row.cached
           ? h('span', { class: 'tag status-success' }, ['已缓存 ' + fmtBytes(row.cached_size)])
           : h('span', { class: 'muted' }, ['未缓存'])]),
@@ -1340,7 +1370,7 @@
               testOut.textContent = '测试中…';
               api('/api/external/binaries/test', {
                 method: 'POST',
-                body: JSON.stringify({ name: nameEl.value.trim(), url: urlEl.value.trim(), force: true })
+                body: JSON.stringify({ name: (nameEl.value || '').trim(), url: (urlEl.value || '').trim() })
               }).then(function (r) {
                 testOut.textContent = '';
                 if (r.ok) {
@@ -1357,6 +1387,38 @@
               });
             }
           }, ['测试']),
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              var text = (nameEl.value || '').trim()
+                ? (window.location.origin + platformURL)
+                : platformURL;
+              copyText(text, this);
+            }
+          }, ['复制地址']),
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              if (!(nameEl.value || '').trim()) {
+                alert('请先填写名称，并先点「保存」再刷新缓存');
+                return;
+              }
+              if (!confirm('强制重新下载 ' + nameEl.value.trim() + ' 的缓存？上游更新后主机将立即拿到新文件。')) return;
+              testOut.textContent = '重新下载中…';
+              api('/api/external/binaries/refresh', {
+                method: 'POST',
+                body: JSON.stringify({ name: (nameEl.value || '').trim() })
+              }).then(function (r) {
+                testOut.textContent = '';
+                testOut.appendChild(h('span', { class: 'tag tunnel-ok' }, [
+                  '✓ 已刷新 ' + fmtBytes(r.size) + '（' + r.elapsed_ms + 'ms）']));
+                state.extbin = null;
+                state.extbinDraft = null;
+                loadExternalBinaries();
+              }).catch(function (e) {
+                testOut.textContent = '';
+                testOut.appendChild(h('span', { class: 'tag tunnel-fail' }, ['✗ ' + e.message]));
+              });
+            }
+          }, ['刷新缓存']),
           h('button', {
             class: 'btn danger small', onclick: function () {
               draft.splice(idx, 1);
@@ -1396,6 +1458,21 @@
         });
     };
 
+    var pager = null;
+    if (pages > 1) {
+      pager = h('div', { class: 'pager' }, [
+        h('button', {
+          class: 'btn ghost small', disabled: page <= 1 ? 'disabled' : null,
+          onclick: function () { state.extbinPage = page - 1; render(); }
+        }, ['上一页']),
+        h('span', { class: 'muted' }, ['第 ' + page + ' / ' + pages + ' 页，共 ' + filtered.length + ' 条']),
+        h('button', {
+          class: 'btn ghost small', disabled: page >= pages ? 'disabled' : null,
+          onclick: function () { state.extbinPage = page + 1; render(); }
+        }, ['下一页'])
+      ]);
+    }
+
     return h('div', {}, [
       h('div', { class: 'card' }, [
         h('h3', {}, ['外部文件代缓存']),
@@ -1413,13 +1490,17 @@
           h('button', {
             class: 'btn', onclick: function () {
               state.extbinDraft = draft.concat([{ name: '', url: '', script: false }]);
+              state.extbinQuery = '';
+              state.extbinPage = 1;
               render();
             }
           }, ['新增一行']),
           h('button', {
             class: 'btn', disabled: state.extbinBusy ? 'disabled' : null, onclick: doSave
           }, [state.extbinBusy ? '保存中…' : '保存']),
-          h('span', { class: 'muted' }, ['共 ' + draft.length + ' 条']),
+          qEl,
+          h('span', { class: 'muted' }, ['共 ' + draft.length + ' 条' +
+            (q ? '（匹配 ' + filtered.length + ' 条）' : '')]),
           h('span', { class: 'muted' }, ['保存后立即生效（热加载）'])
         ]),
         h('div', { class: 'table-wrap' }, [h('table', {}, [
@@ -1429,7 +1510,10 @@
           ])]),
           h('tbody', {}, rows)
         ])]),
-        draft.length === 0 ? h('div', { class: 'muted empty' }, ['还没有条目，点「新增一行」添加。']) : null
+        draft.length === 0 ? h('div', { class: 'muted empty' }, ['还没有条目，点「新增一行」添加。']) : null,
+        draft.length > 0 && filtered.length === 0
+          ? h('div', { class: 'muted empty' }, ['没有匹配的条目。']) : null,
+        pager
       ]),
       h('div', { class: 'card' }, [
         h('h3', {}, ['安全设置']),
@@ -2570,6 +2654,15 @@
       body = h('div', {}, [guide(), body]);
     }
     app.appendChild(h('div', { class: 'container' }, [tabs(), body]));
+    // 手工触发的局部刷新（如搜索框输入）会重建 DOM，按 id 还原焦点与光标。
+    if (state.focusId) {
+      var focusEl = document.getElementById(state.focusId);
+      state.focusId = '';
+      if (focusEl && focusEl.focus) {
+        focusEl.focus();
+        try { focusEl.setSelectionRange(focusEl.value.length, focusEl.value.length); } catch (e) {}
+      }
+    }
     if (state.taskDetailId) {
       app.appendChild(taskDetailModal());
       // 自动刷新会重建 DOM，恢复用户原来的滚动位置。

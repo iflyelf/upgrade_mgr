@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
+
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/config"
@@ -180,5 +184,96 @@ func TestTestExternalBinaryRejectsInternal(t *testing.T) {
 	}
 	if !strings.Contains(out.Data.Hint, "放行") {
 		t.Fatalf("应提示如何放行: %q", out.Data.Hint)
+	}
+}
+
+// TestRefreshExternalBinary 强制重下：删除旧缓存并重新落盘。
+func TestRefreshExternalBinary(t *testing.T) {
+	dir := t.TempDir()
+	sc, cfg := newExtbinContext(t, dir)
+
+	// 用本地 httptest 作为上游，并把它加进域名白名单（127.0.0.1 需要内网放行）。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("MZfresh-binary"))
+	}))
+	defer srv.Close()
+	cfg.Server.ExternalBinaries = map[string]string{"local-tool": srv.URL + "/tool.exe"}
+	cfg.Server.ExternalBinaryHosts = []string{"127.0.0.1"}
+	cfg.Server.ExternalBinaryAllowPrivate = true
+
+	// 预置旧缓存
+	cache := filepath.Join(dir, ".external-cache")
+	os.MkdirAll(cache, 0755)
+	oldPath := filepath.Join(cache, "local-tool.exe")
+	os.WriteFile(oldPath, []byte("MZold"), 0644)
+
+	req := httptest.NewRequest("POST", "/api/external/binaries/refresh",
+		strings.NewReader(`{"name":"local-tool"}`))
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec := httptest.NewRecorder()
+	RefreshExternalBinary(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("刷新失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	got, err := os.ReadFile(oldPath)
+	if err != nil || string(got) != "MZfresh-binary" {
+		t.Fatalf("缓存未更新: %q err=%v", string(got), err)
+	}
+
+	// 不存在的名称 → 404
+	req = httptest.NewRequest("POST", "/api/external/binaries/refresh",
+		strings.NewReader(`{"name":"missing"}`))
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec = httptest.NewRecorder()
+	RefreshExternalBinary(sc)(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("不存在名称应 404，实际 %d", rec.Code)
+	}
+}
+
+// TestRefreshRejectsInternalWithoutAllow 未放行内网时，刷新应失败且不写缓存。
+func TestRefreshRejectsInternalWithoutAllow(t *testing.T) {
+	dir := t.TempDir()
+	sc, cfg := newExtbinContext(t, dir)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("MZx"))
+	}))
+	defer srv.Close()
+	cfg.Server.ExternalBinaries = map[string]string{"local-tool": srv.URL + "/t.exe"}
+	cfg.Server.ExternalBinaryHosts = []string{"127.0.0.1"}
+	cfg.Server.ExternalBinaryAllowPrivate = false
+
+	req := httptest.NewRequest("POST", "/api/external/binaries/refresh",
+		strings.NewReader(`{"name":"local-tool"}`))
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec := httptest.NewRecorder()
+	RefreshExternalBinary(sc)(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("应拒绝内网上游，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".external-cache", "local-tool.exe")); err == nil {
+		t.Fatal("失败时不应留下缓存文件")
+	}
+}
+
+// TestProbeElapsed 耗时必须在返回值里（命名返回值 + defer 的经典坑）。
+func TestProbeElapsed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = w.Write([]byte("MZpayload"))
+	}))
+	defer srv.Close()
+
+	res := probeExternalBinary(context.Background(),
+		extbin.Entry{Name: "x", URL: srv.URL}, []string{"127.0.0.1"},
+		extbin.AllowRule{AllowPrivate: true})
+	if !res.OK {
+		t.Fatalf("应探测成功: %+v", res)
+	}
+	if res.ElapsedMS < 15 {
+		t.Fatalf("耗时未写回返回值: %dms", res.ElapsedMS)
+	}
+	if res.StatusCode != http.StatusOK || res.Size == 0 {
+		t.Fatalf("状态/大小不符: %+v", res)
 	}
 }
