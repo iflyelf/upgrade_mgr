@@ -20,6 +20,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/agent/osinfo"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/selfupdate"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/svcmgr"
+	"github.com/iflyelf/upgrade_mgr/internal/agent/tlsclient"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/netinfo"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/signer"
@@ -50,6 +51,12 @@ type Config struct {
 	PendingReports map[string]protocol.ReportRequest `json:"pending_reports,omitempty"`
 	// ExitIP 最近一次成功探测到的本机出口 IP，用于心跳上报。
 	ExitIP string `json:"exit_ip,omitempty"`
+	// ---- 可选 TLS / 双向 TLS ----
+	// TLSCA 校验服务端证书的 CA（PEM 路径）；TLSCert/TLSKey 为客户端证书，
+	// 服务端开启 tls_client_auth=require 时必须配置。
+	TLSCA   string `json:"tls_ca,omitempty"`
+	TLSCert string `json:"tls_cert,omitempty"`
+	TLSKey  string `json:"tls_key,omitempty"`
 }
 
 // Agent 主体
@@ -99,11 +106,21 @@ func New(cfg Config) *Agent {
 	if cfg.PendingReports == nil {
 		cfg.PendingReports = map[string]protocol.ReportRequest{}
 	}
+	client, err := tlsclient.New(tlsclient.Config{
+		CAFile: cfg.TLSCA, CertFile: cfg.TLSCert, KeyFile: cfg.TLSKey,
+	})
+	if err != nil {
+		// TLS 配置错误不应静默降级为明文：记录后由首次请求失败暴露问题。
+		log.Printf("⚠️ TLS 客户端配置失败（将无法建立 TLS 连接）: %v", err)
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
 	return &Agent{
 		cfg:       cfg,
 		info:      info,
 		svcMgr:    svcmgr.New(info.Init),
-		client:    &http.Client{Timeout: 60 * time.Second},
+		client:    client,
 		buildHash: executableSHA256(),
 		executed:  map[string]time.Time{},
 	}

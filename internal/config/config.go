@@ -55,6 +55,17 @@ type ServerConfig struct {
 	MetricsToken string `yaml:"metrics_token"`
 	// AgentBinaryDir Agent 二进制目录，供 GET /api/agent/binary/{name} 下载（默认 ./dist）。
 	AgentBinaryDir string `yaml:"agent_binary_dir"`
+	// ---- 可选 HTTPS / 双向 TLS ----
+	//
+	// 留空 TLSCert/TLSKey 时以 HTTP 提供服务（与历史行为一致）。
+	// 配置后控制台直接以 HTTPS 监听；若要求 Agent 持客户端证书，再配置
+	// TLSClientCA + TLSClientAuth=require，即构成双向 TLS（mTLS）。
+	TLSCert string `yaml:"tls_cert"` // 服务端证书 PEM
+	TLSKey  string `yaml:"tls_key"`  // 服务端私钥 PEM
+	// TLSClientCA 客户端 CA（PEM）；启用双向 TLS 时用于校验 Agent 客户端证书。
+	TLSClientCA string `yaml:"tls_client_ca"`
+	// TLSClientAuth 客户端证书策略：none（默认）/ request（可选校验）/ require（强制）。
+	TLSClientAuth string `yaml:"tls_client_auth"`
 }
 
 // DatabaseConfig PostgreSQL（必填）。
@@ -274,6 +285,13 @@ func (c *Config) applyEnv() {
 	if c.Server.Port == 0 {
 		c.Server.Port = 8090
 	}
+	setStr(&c.Server.TLSCert, "SERVER_TLS_CERT")
+	setStr(&c.Server.TLSKey, "SERVER_TLS_KEY")
+	setStr(&c.Server.TLSClientCA, "SERVER_TLS_CLIENT_CA")
+	setStr(&c.Server.TLSClientAuth, "SERVER_TLS_CLIENT_AUTH")
+	if c.Server.TLSClientAuth == "" {
+		c.Server.TLSClientAuth = "none"
+	}
 }
 
 // DSN 返回数据库连接串（优先 DATABASE_URL，否则分项拼装）。
@@ -295,6 +313,18 @@ func (c *Config) ValidateRequired() error {
 	case "builtin", "casdoor":
 	default:
 		return fmt.Errorf("未知认证方式 %q（应为 builtin 或 casdoor）", c.Auth.Provider)
+	}
+	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
+		return fmt.Errorf("tls_cert 与 tls_key 必须同时配置")
+	}
+	switch c.Server.TLSClientAuth {
+	case "", "none":
+	case "request", "require":
+		if c.Server.TLSClientCA == "" {
+			return fmt.Errorf("tls_client_auth=%s 时需配置 tls_client_ca", c.Server.TLSClientAuth)
+		}
+	default:
+		return fmt.Errorf("tls_client_auth 只能是 none/request/require")
 	}
 	return nil
 }

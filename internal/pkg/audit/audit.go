@@ -100,6 +100,7 @@ const (
 	ActionComponentDelete = "component.delete"
 	ActionHostUpdate      = "host.update"
 	ActionHostDelete      = "host.delete"
+	ActionHostTunnelTest  = "host.tunnel_test"
 	ActionTaskStart       = "task.start"
 	ActionTaskPause       = "task.pause"
 	ActionTaskPromote     = "task.promote"

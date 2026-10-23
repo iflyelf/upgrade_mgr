@@ -35,6 +35,10 @@ type Options struct {
 	StatePath   string
 	InstallCron bool // 是否安装看门狗兜底（Linux cron / Windows 计划任务）
 	Force       bool // 强制重新注册：忽略已有 state 中的凭据并覆盖
+	// 可选 TLS / 双向 TLS：仅写入 state，由 Agent 启动时读取。
+	TLSCA   string
+	TLSCert string
+	TLSKey  string
 }
 
 // Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选看门狗。
@@ -67,7 +71,7 @@ func Install(opts Options) error {
 	}
 	// 服务启动时只带 --server/--state，不带 --enroll-token；必须先把注册信息
 	// 写入 0600 的 state，否则 Agent 每次启动都会用空令牌注册并返回 401。
-	if err := writeInitialState(opts.StatePath, opts.ServerURL, opts.EnrollToken, opts.Force); err != nil {
+	if err := writeInitialState(opts); err != nil {
 		return fmt.Errorf("写入 Agent 注册状态失败: %w", err)
 	}
 	if opts.EnrollToken == "" {
@@ -104,13 +108,18 @@ type persistedState struct {
 	Token            string
 	Secret           string
 	StatePath        string
+	// 可选 TLS / 双向 TLS。
+	TLSCA   string `json:",omitempty"`
+	TLSCert string `json:",omitempty"`
+	TLSKey  string `json:",omitempty"`
 }
 
 // writeInitialState 在服务启动前写入 ServerURL/EnrollToken。
 //
 // 默认情况下，已注册且凭据完整的 state 不会被覆盖，避免重装二进制时丢失
 // Agent 身份；force=true 时忽略旧凭据并重新注册（需同时提供 enrollToken）。
-func writeInitialState(path, serverURL, enrollToken string, force bool) error {
+func writeInitialState(opts Options) error {
+	path := opts.StatePath
 	if path == "" {
 		return nil
 	}
@@ -120,18 +129,26 @@ func writeInitialState(path, serverURL, enrollToken string, force bool) error {
 	}
 	hardenStateDir(dir)
 
-	if !force {
+	if !opts.Force {
 		if b, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(b)) > 0 {
 			var existing persistedState
 			if json.Unmarshal(b, &existing) == nil &&
 				existing.AgentID != "" && existing.Token != "" && existing.Secret != "" {
+				// 已注册：保留凭据，但允许本次安装更新 TLS 参数（重装时补证书）。
+				if opts.TLSCA != "" || opts.TLSCert != "" || opts.TLSKey != "" {
+					existing.TLSCA = firstNonEmpty(opts.TLSCA, existing.TLSCA)
+					existing.TLSCert = firstNonEmpty(opts.TLSCert, existing.TLSCert)
+					existing.TLSKey = firstNonEmpty(opts.TLSKey, existing.TLSKey)
+					return writeStateAtomic(path, existing)
+				}
 				return nil
 			}
 		}
 	}
 	return writeStateAtomic(path, persistedState{
-		ServerURL: serverURL, DefaultServerURL: serverURL,
-		EnrollToken: enrollToken, StatePath: path,
+		ServerURL: opts.ServerURL, DefaultServerURL: opts.ServerURL,
+		EnrollToken: opts.EnrollToken, StatePath: path,
+		TLSCA: opts.TLSCA, TLSCert: opts.TLSCert, TLSKey: opts.TLSKey,
 	})
 }
 
@@ -154,6 +171,16 @@ func writeStateAtomic(path string, v any) error {
 		return err
 	}
 	return nil
+}
+
+// firstNonEmpty 返回第一个非空值。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func render(name string, data any) ([]byte, error) {
