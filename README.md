@@ -1959,6 +1959,31 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-24 FlyIAM 组织树同步
+
+**FlyIAM 侧（同仓库 `flyiam`，提交 `5b44d6f`）**新增服务间接口：
+
+| 接口 | 说明 |
+|------|------|
+| `GET /api/users/export?page=&pageSize=` | 分页导出用户（`X-Total-Count` 为总数） |
+| `GET /api/departments/export` | 从用户 `deptIdLv0/1/2`、`deptNameLv0/1/2` 推导组织树，含人数 |
+
+**upgrade_mgr 侧**：
+
+- `internal/pkg/flyiam`：`FetchUsers` 改为分页拉取并按用户名去重（兼容不支持分页的旧实现）；
+  新增 `FetchDepartments`。
+- 迁移 `025`：`org_departments` 组织快照表（`dept_id` 唯一、父级/层级/路径/人数）。
+- `POST /api/flyiam/sync-departments`（管理员）：拉取上游组织树并**整体替换**本地快照
+  （事务内先清空后写入，上游删除的部门不会残留）。上游返回空组织时**保留本地快照**
+  并返回 502，避免数据源字段映射缺失导致页面被清空。
+- `GET /api/org/departments`（管理员）：按完整路径返回，供页面展示。
+- 前端「人员组织 → 组织架构」：缩进展示部门树、人数、完整路径与部门 ID，
+  提供「从 FlyIAM 同步组织」按钮。
+- 同时修复 `loadOrg` 的任务下标错位：组件已加载时会把 host-groups 误当组件列表。
+- 单测：客户端分页/组织解析、组织快照替换与排序、同步接口落库。
+
+> 前置条件：FlyIAM 需部署包含上述两个导出接口的版本（否则同步返回 404）。
+
 ### 2026-10-24 任务详情可见性、updated_by 与 Windows 真机回归
 
 - **任务详情/日志可见性**：仅创建者、同团队成员、管理员可见；列表返回 `can_view`，

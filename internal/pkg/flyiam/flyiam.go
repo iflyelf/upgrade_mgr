@@ -1,10 +1,12 @@
-// Package flyiam 对接 FlyIAM 服务间接口：应用凭据与用户字段定义同步。
+// Package flyiam 对接 FlyIAM 服务间接口：应用凭据、用户字段、用户与组织同步。
 //
 // 与 consul_mgr 保持同一协议，便于两个系统复用同一 FlyIAM 部署：
 //   - GET /api/casdoor/app-credentials  自动获取 Casdoor 应用凭据（X-Service-Token）
 //   - GET /api/user-fields/export       拉取「用户字段定义」，用于本系统字段列表同步
+//   - GET /api/users/export             分页拉取用户（X-Total-Count）
+//   - GET /api/departments/export       拉取组织树（由用户部门属性推导）
 //
-// 设计取舍：只做「定义同步」与「凭据获取」，不做用户数据双向写回，
+// 设计取舍：只做「定义/组织同步」与「凭据获取」，不做用户数据双向写回，
 // 用户的增删改仍以 Casdoor 为准，避免两套系统互相覆盖。
 package flyiam
 
@@ -23,6 +25,7 @@ const (
 	appCredentialsPath   = "/api/casdoor/app-credentials"
 	userFieldsExportPath = "/api/user-fields/export"
 	usersPath            = "/api/users/export"
+	departmentsPath      = "/api/departments/export"
 )
 
 // AppCredentials Casdoor 应用连接凭据。
@@ -146,16 +149,60 @@ type RemoteUser struct {
 	Properties  map[string]string `json:"properties"`
 }
 
-// FetchUsers 拉取用户列表（只读；用于「人员组织」页与本地账号对照）。
+// Department FlyIAM 导出的组织节点。
+type Department struct {
+	DeptID    string `json:"deptId"`
+	DeptName  string `json:"deptName"`
+	ParentID  string `json:"parentId"`
+	Level     int    `json:"level"`
+	FullPath  string `json:"fullPath"`
+	UserCount int    `json:"userCount"`
+}
+
+// FetchUsers 分页拉取全部用户（只读；用于人员页对照、一键开通与组织同步）。
+//
+// 服务端按 X-Total-Count 返回总数，这里以「本页不足 pageSize」或
+// 「本页没有新增用户」作为结束条件，兼容不支持分页的旧实现。
 func (c *Client) FetchUsers(ctx context.Context) ([]RemoteUser, error) {
 	if c == nil {
 		return nil, fmt.Errorf("未配置 FlyIAM 地址或服务令牌")
 	}
-	var users []RemoteUser
-	if err := c.do(ctx, usersPath, &users); err != nil {
+	const pageSize = 500
+	seen := map[string]bool{}
+	all := make([]RemoteUser, 0, pageSize)
+	for page := 1; page <= 400; page++ {
+		var batch []RemoteUser
+		path := fmt.Sprintf("%s?page=%d&pageSize=%d", usersPath, page, pageSize)
+		if err := c.do(ctx, path, &batch); err != nil {
+			return nil, err
+		}
+		added := 0
+		for _, u := range batch {
+			u.Username = strings.TrimSpace(u.Username)
+			if u.Username == "" || seen[u.Username] {
+				continue
+			}
+			seen[u.Username] = true
+			all = append(all, u)
+			added++
+		}
+		if len(batch) < pageSize || added == 0 {
+			break
+		}
+	}
+	return all, nil
+}
+
+// FetchDepartments 拉取组织树（节点按 fullPath 排序，人数为最深一级部门的用户数）。
+func (c *Client) FetchDepartments(ctx context.Context) ([]Department, error) {
+	if c == nil {
+		return nil, fmt.Errorf("未配置 FlyIAM 地址或服务令牌")
+	}
+	var deps []Department
+	if err := c.do(ctx, departmentsPath, &deps); err != nil {
 		return nil, err
 	}
-	return users, nil
+	return deps, nil
 }
 
 // HealthCheck 探测 FlyIAM 可用性（用于设置页「测试连接」）。

@@ -1657,20 +1657,28 @@
       api('/api/users/fields'),
       api('/api/roles'),
       api('/api/teams'),
-      api('/api/service-groups')
+      api('/api/service-groups'),
+      api('/api/host-groups')
     ];
-    if (!(state.components || []).length) jobs.push(api('/api/components'));
-    jobs.push(api('/api/host-groups'));
+    // 用显式下标，避免「组件已加载/未加载」时后续任务错位。
+    var compIdx = -1;
+    if (!(state.components || []).length) {
+      compIdx = jobs.length;
+      jobs.push(api('/api/components'));
+    }
+    var deptIdx = jobs.length;
+    jobs.push(api('/api/org/departments'));
     Promise.all(jobs).then(function (res) {
-      if (res.length > 4) state.components = res[4] || [];
-      if (res.length > 5) state.hostGroupOptions = (res[5] && res[5].groups) || [];
+      if (compIdx >= 0) state.components = res[compIdx] || [];
+      state.hostGroupOptions = (res[4] && res[4].groups) || [];
       state.org = {
         users: res[0].users || [],
         userDefs: res[0].defs || [],
         userValues: res[0].values || {},
         roles: res[1] || [],
         teams: res[2] || [],
-        groups: res[3] || []
+        groups: res[3] || [],
+        depts: res[deptIdx] || []
       };
       render();
     }).catch(function (e) {
@@ -1680,8 +1688,8 @@
   }
 
   function orgTabs() {
-    var tabs = [['users', '人员信息'], ['fields', '用户字段'], ['roles', '角色'],
-      ['teams', '团队'], ['groups', '服务组'], ['flyiam', 'FlyIAM 人员']];
+    var tabs = [['users', '人员信息'], ['depts', '组织架构'], ['fields', '用户字段'],
+      ['roles', '角色'], ['teams', '团队'], ['groups', '服务组'], ['flyiam', 'FlyIAM 人员']];
     return h('div', { class: 'tabs', style: 'margin-bottom:12px' }, tabs.map(function (t) {
       return h('div', {
         class: 'tab' + (state.orgTab === t[0] ? ' active' : ''),
@@ -1697,6 +1705,7 @@
     }
     var body;
     if (state.orgTab === 'users') body = orgUsers(o);
+    else if (state.orgTab === 'depts') body = orgDepts(o);
     else if (state.orgTab === 'fields') body = orgUserFields(o);
     else if (state.orgTab === 'roles') body = orgRoles(o);
     else if (state.orgTab === 'teams') body = orgTeams(o);
@@ -1707,7 +1716,8 @@
       h('div', { class: 'card' }, [
         h('h3', {}, ['人员组织']),
         hint('用户来自 Casdoor / 内置账号；扩展字段（人事信息）可在「用户字段」自定义并在此编辑。' +
-          '团队按「服务组」授权，服务组是组件集合。已启用 FlyIAM 时可在「设置」页同步字段定义。'),
+          '团队按「服务组」授权，服务组是组件集合。已启用 FlyIAM 时可在「设置 → FlyIAM」或' +
+          '「组织架构」页同步字段定义与组织树。'),
         state.orgErr ? h('div', { class: 'err field', role: 'alert' }, [state.orgErr]) : null
       ]),
       orgTabs(),
@@ -2050,6 +2060,47 @@
       ]),
       getValues: function () { add(inputEl.value); return values.slice(); }
     };
+  }
+
+  // 组织架构：FlyIAM 组织树快照（由用户部门属性推导）。
+  function orgDepts(o) {
+    var deps = o.depts || [];
+    var syncedAt = deps.length && deps[0].synced_at
+      ? String(deps[0].synced_at).replace('T', ' ').slice(0, 19) : '';
+
+    var rows = deps.map(function (d) {
+      var indent = new Array((d.level || 0) + 1).join('　');
+      return [
+        indent + (d.dept_name || d.dept_id),
+        (d.level || 0) + 1,
+        d.user_count || 0,
+        d.full_path || '-',
+        d.dept_id
+      ];
+    });
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['组织架构']),
+      hint('组织数据来自 FlyIAM，由其用户属性（deptIdLv0/1/2、deptNameLv0/1/2）推导。' +
+        '每次同步整体替换本地快照；人数按用户最深一级部门统计。'),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn', onclick: function () {
+            if (!confirm('从 FlyIAM 拉取最新组织架构并整体替换本地快照？')) return;
+            api('/api/flyiam/sync-departments', { method: 'POST', body: '{}' })
+              .then(function (r) { alert('同步完成：' + r.total + ' 个部门'); loadOrg(); })
+              .catch(function (e) { alert('同步失败: ' + e.message); });
+          }
+        }, ['从 FlyIAM 同步组织']),
+        h('span', { class: 'muted' }, deps.length
+          ? ('共 ' + deps.length + ' 个部门' + (syncedAt ? '；上次同步 ' + syncedAt : ''))
+          : '尚未同步')
+      ]),
+      deps.length
+        ? simpleTable(['部门', '层级', '人数', '完整路径', '部门 ID'], deps,
+            function (d, i) { return rows[i]; })
+        : h('div', { class: 'muted empty' }, ['还没有组织数据，点击「从 FlyIAM 同步组织」拉取。'])
+    ]);
   }
 
   // 角色管理。
