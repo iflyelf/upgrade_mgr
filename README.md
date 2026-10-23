@@ -185,9 +185,11 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 - install.ps1 支持 install / update / uninstall / status；安装到 C:\Program Files\windows_exporter，服务名 windows_exporter，端口 16666，自动创建防火墙规则。
 - textfile 采集目录：C:\monitor\windows_exporter\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。
 - 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把 .ps1 转为 UTF-8 BOM + CRLF，避免中文脚本乱码/语法错误。
+- Windows 10 / Server 2016 及以上自动使用 latest；Windows 7 / Server 2008 R2 ~ 2012 R2 自动切换 legacy（基于官方 v0.23.1 + Go 1.20，含 hardware_info 移植），也可用 -Flavor latest|legacy 强制。
 - 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl。
-- 平台也无法出网（控制台请求 GitHub 502）时：在「外部文件」为 windows-exporter-`<arch>` 点「上传离线文件」，脚本会自动优先从平台获取；exe 与脚本都可离线上传。
-- 2008 R2 上脚本只探测平台「本地/缓存」接口（?local=1），未上传时几秒内报错并提示上传，不会等待平台现场下载；平台能出网时可先在外部文件页「刷新缓存」预下载。
+- 平台也无法出网（控制台请求 GitHub 502）时：在「外部文件」为 windows-exporter-`<arch>`（旧系统为 windows-exporter-`<arch>`-legacy）点「上传离线文件」，脚本会自动优先从平台获取；exe 与脚本都可离线上传。
+- 2008 R2 上脚本只探测对应通道的平台「本地/缓存」接口（?local=1），未上传时几秒内报错并提示上传，不会等待平台现场下载；平台能出网时可先在外部文件页「刷新缓存」预下载。
+- legacy 默认不启用 hardware_info；需要时在 config.yaml 的 collectors.enabled 追加 hardware_info（仅本仓库 legacy 资产包含该采集器）。
 - 低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\LocalService"（或域账户 + -ServicePassword）。
 - 更新示例先备份 windows_exporter.exe.bak，启动失败自动回滚；卸载示例不带 health/version 检查。
 
@@ -315,9 +317,11 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<console
 - install.ps1 supports install / update / uninstall / status. It installs to C:\Program Files\windows_exporter, service windows_exporter, port 16666 and creates a firewall rule.
 - Textfile collector directory: C:\monitor\windows_exporter\textfile_inputs; use -ConfigPath for a custom config.
 - PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites .ps1 to UTF-8 BOM + CRLF to avoid encoding issues.
+- Windows 10 / Server 2016 and newer use latest automatically; Windows 7 / Server 2008 R2 – 2012 R2 switch to legacy (based on official v0.23.1 + Go 1.20, with a ported hardware_info collector). Force it with -Flavor latest|legacy.
 - On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl.
-- If the console also cannot reach GitHub (502), upload the exe under External files → windows-exporter-`<arch>` → Upload offline file; the script then prefers the platform copy. Both exe and scripts can be uploaded offline.
-- On 2008 R2 the script only probes the platform local/cache endpoint (?local=1); if nothing is uploaded it fails within seconds with an upload hint instead of waiting for the console to fetch from GitHub. If the console has outbound access, use Refresh cache beforehand to pre-download.
+- If the console also cannot reach GitHub (502), upload the exe under External files → windows-exporter-`<arch>` (legacy systems: windows-exporter-`<arch>`-legacy) → Upload offline file; the script then prefers the platform copy. Both exe and scripts can be uploaded offline.
+- On 2008 R2 the script only probes the selected channel's platform local/cache endpoint (?local=1); if nothing is uploaded it fails within seconds with an upload hint instead of waiting for the console to fetch from GitHub. If the console has outbound access, use Refresh cache beforehand to pre-download.
+- hardware_info is disabled by default in legacy; add it to collectors.enabled in config.yaml when needed (only the legacy asset from this repository includes it).
 - Low privilege: install.ps1 -ServiceAccount "NT AUTHORITY\LocalService" (or a domain account with -ServicePassword).
 - Update backs up windows_exporter.exe.bak and rolls back on startup failure; uninstall omits health/version checks.
 
@@ -636,7 +640,7 @@ Agent 只依赖标准库，所以用独立 modfile `build/agent-legacy.mod`（`g
 Windows 的支持下限是 **Windows Server 2008 R2**，因此使用 Go 1.20（最后一个仍支持该系统的
 Go 版本）配合独立 modfile `build/agent-windows.mod` 编译。单套二进制同时覆盖
 Server 2008 R2 / 2012 / 2012 R2 / 2016 / 2019 / 2022 与 Windows 7 / 8.1 / 10 / 11，
-**不需要** Windows legacy 变体。
+**不需要** Windows legacy 变体（组件 windows_exporter 另有 legacy 通道，见 5.1）。
 
 - 支持架构：`amd64`、`arm64`（Windows on ARM）
 - 产物：`dist/upgrade-agent-windows-{amd64,arm64}.exe`，静态链接、无 CGO
@@ -1233,26 +1237,42 @@ $f = Join-Path $env:TEMP 'windows_exporter-install.ps1'
 & $f install -NoFirewall                       # 不创建防火墙规则
 ```
 
-> `-Version latest` 默认取 `iflyelf/windows_exporter` 的 latest；固定版本时传
-> `-Version v0.32.0` 形式（需该 tag 已发布对应资产）。
-> 也可用环境变量覆盖：`WINDOWS_EXPORTER_VERSION`、`WINDOWS_EXPORTER_PROXY`、
-> `WINDOWS_EXPORTER_BASE`、`WINDOWS_EXPORTER_LISTEN_PORT`。
+> `-Version latest` 默认取 `iflyelf/windows_exporter` 的 latest；`-Flavor legacy`
+> 固定取该仓库的 `windows_exporter-<arch>-legacy.exe`（v0.23.1 + Go 1.20）。
+> 也可用环境变量覆盖：`WINDOWS_EXPORTER_VERSION`、`WINDOWS_EXPORTER_FLAVOR`、
+> `WINDOWS_EXPORTER_PROXY`、`WINDOWS_EXPORTER_BASE`、`WINDOWS_EXPORTER_LISTEN_PORT`。
 
 #### 5.1 平台/目标机都无法出网（Server 2008 R2 常见）
 
 Server 2008 R2 的 PowerShell 2.0/CLR 2.0 不支持 TLS 1.2，无法直连 GitHub；
-如果控制台所在网络也不能访问 GitHub，平台代缓存会返回 **502**。此时在页面上传离线文件即可：
+且 Go 1.21 起构建的 windows_exporter 不再支持 Server 2008 R2。`install.ps1`
+会按系统版本自动选择通道：
 
-1. 在一台可上网的机器下载 `windows_exporter-amd64.exe`（或 `arm64`）；
-2. 控制台 →「外部文件」→ 找到 `windows-exporter-amd64`（或 `windows-exporter-arm64`）
-   → 点「上传离线文件」，选择下载好的 exe；
-3. 直接重跑组件安装/任务。`install.ps1` 在不支持 TLS 1.2 时先请求
-   `http://<控制台>/api/external/binary/windows-exporter-amd64?local=1`：
+- Windows 10 / Server 2016+ → `latest`：`windows-exporter-amd64` / `-arm64`；
+- Windows 7 / 8 / 8.1 / Server 2008 R2 / 2012 / 2012 R2 → `legacy`：
+  `windows-exporter-amd64-legacy` / `-arm64-legacy`（官方 v0.23.1 + Go 1.20，
+  并包含本仓库移植的 `hardware_info` 采集器）。
+
+如果控制台所在网络也不能访问 GitHub，平台代缓存会返回 **502**。此时在页面上传
+对应通道的离线文件即可：
+
+1. 在一台可上网的机器下载：
+   - 旧系统：`windows_exporter-amd64-legacy.exe`
+     （`https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64-legacy.exe`）；
+   - 新系统：`windows_exporter-amd64.exe`（或 `arm64`）。
+2. 控制台 →「外部文件」→ 找到 `windows-exporter-amd64-legacy`（旧系统）或
+   `windows-exporter-amd64`（新系统）→ 点「上传离线文件」，选择下载好的 exe。
+   升级后的服务端会在已有基础条目旁自动补 legacy 条目（迁移 028）。
+3. 直接重跑组件安装/任务。`install.ps1` 会请求对应通道的
+   `http://<控制台>/api/external/binary/<asset>?local=1`：
    - 已上传：立即返回本地文件，**不需要平台出网**；
    - 未上传：几秒内返回 404，脚本报错并提示上传，不会再等平台现场下载 GitHub；
    - 也可先在外部文件页点「刷新缓存」让平台预下载（平台能出网时），之后 `?local=1` 直接命中缓存。
 4. 如需离线 `install.ps1` 本身，可把脚本上传到 `windows-exporter-install.ps1` 同名条目，
    或继续作为组件制品上传。
+5. `legacy` 默认不启用 `hardware_info`；需要时编辑
+   `C:\Program Files\windows_exporter\config.yaml` 的 `collectors.enabled`，
+   追加 `hardware_info` 后重启服务。
 
 列表「本地离线」列会显示已上传大小；「清除离线文件」后回退到平台缓存/上游下载。
 
@@ -2355,6 +2375,22 @@ MIT © iflyelf
   未上传时快速失败并提示上传，避免 WebClient 约 100 秒超时；直连仅在有 TLS 1.2 时尝试。
 - `/api/external/binary/{name}?local=1`：只读本地/缓存，绝不触发上游下载。
 - 新增单测：离线上传/优先下载/删除、HTML 伪脚本拒绝、默认重定向域名、代理回退。
+
+### 2026-10-24 Windows Server 2008 R2 legacy 通道
+
+- **根因**：`iflyelf/windows_exporter` latest 基于上游 v0.32 / Go 1.27，Go 1.21 起
+  不再支持 Windows 7 / Server 2008 R2；服务能注册但启动即失败。
+- `iflyelf/windows_exporter` 新增 `.github/workflows/legacy.yml`：基于官方 v0.23.1 +
+  Go 1.20.14 构建 `windows_exporter-{amd64,arm64}-legacy.exe`，并移植
+  `hardware_info` 采集器（WMI，指标名一致）。
+- `install.ps1` 按系统版本自动选通道（`-Flavor auto|latest|legacy`）：
+  Windows 10 / Server 2016+ 用 latest；Win7 / 2008 R2 ~ 2012 R2 用 legacy。
+- 修正最新版 CLI：textfile 参数为 `--collector.textfile.directories`（legacy 为
+  `--collector.textfile.directory`）；两套默认配置分别使用 `include` / `services-where`。
+- 服务启动失败时自动输出事件日志、`sc qc`、`--version` 和前台运行输出，避免只有
+  「服务无法启动」而无从排查。
+- 外部文件默认白名单新增 `windows-exporter-{amd64,arm64}-legacy`（指向 iflyelf 仓库）；
+  迁移 028 为已有白名单自动补条目，页面可上传离线 legacy exe。
 
 ### 2026-10-24 安全与运维补强（审计 / 多租户 / 索引 / 探针）
 
