@@ -29,6 +29,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/consul"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbinprobe"
 	"github.com/iflyelf/upgrade_mgr/internal/rbac"
 	"github.com/iflyelf/upgrade_mgr/internal/setting"
 	"github.com/iflyelf/upgrade_mgr/internal/storage"
@@ -150,6 +151,27 @@ func (s *ServiceContext) StartOrchestrator(ctx context.Context) {
 func (s *ServiceContext) StartMetrics(ctx context.Context) {
 	go s.Metrics.Start(ctx)
 	log.Println("✅ Prometheus 指标采集已启动")
+}
+
+// StartExtbinProbe 启动外部文件可用性探测（默认每分钟）。
+//
+// provider 由调用方注入（避免 svc 反过来依赖 handler）。
+// 探测结果写入 Prometheus 指标：up / probe_seconds / cached / cached_bytes。
+func (s *ServiceContext) StartExtbinProbe(ctx context.Context, provider extbinprobe.Provider, interval time.Duration) {
+	if provider == nil {
+		return
+	}
+	prober := extbinprobe.New(provider, interval)
+	go prober.Run(ctx)
+	log.Printf("✅ 外部文件可用性探测已启动（间隔 %s）", intervalOrDefault(interval))
+}
+
+// intervalOrDefault 仅用于日志展示。
+func intervalOrDefault(d time.Duration) time.Duration {
+	if d <= 0 {
+		return extbinprobe.DefaultInterval
+	}
+	return d
 }
 
 // StartMaintenance 启动数据库自动维护（每日凌晨 2 点）。

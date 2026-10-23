@@ -277,3 +277,92 @@ func TestProbeElapsed(t *testing.T) {
 		t.Fatalf("状态/大小不符: %+v", res)
 	}
 }
+
+// TestListExternalBinariesPagination 服务端分页 + 搜索。
+func TestListExternalBinariesPagination(t *testing.T) {
+	dir := t.TempDir()
+	sc, cfg := newExtbinContext(t, dir)
+	items := map[string]string{}
+	for _, n := range []string{"alpha", "beta", "gamma", "delta", "epsilon"} {
+		items[n] = "https://github.com/example/" + n + ".exe"
+	}
+	cfg.Server.ExternalBinaries = items
+
+	call := func(query string) externalBinaryListResponse {
+		req := httptest.NewRequest("GET", "/api/external/binaries?"+query, nil)
+		req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+		rec := httptest.NewRecorder()
+		ListExternalBinaries(sc)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("查询失败 %d: %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Data externalBinaryListResponse `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("解析: %v", err)
+		}
+		return out.Data
+	}
+
+	// 第 1 页 size=2：total=5, pages=3
+	page1 := call("page=1&size=2")
+	if page1.Total != 5 || page1.Pages != 3 || len(page1.Items) != 2 {
+		t.Fatalf("分页错误: total=%d pages=%d items=%d", page1.Total, page1.Pages, len(page1.Items))
+	}
+	// 名称排序：alpha/beta
+	if page1.Items[0].Name != "alpha" || page1.Items[1].Name != "beta" {
+		t.Fatalf("排序不符: %+v", page1.Items)
+	}
+	// 越界页夹紧到最后一页
+	last := call("page=99&size=2")
+	if last.Page != 3 || len(last.Items) != 1 {
+		t.Fatalf("越界页应夹紧: page=%d items=%d", last.Page, len(last.Items))
+	}
+	// 搜索：匹配 gamma
+	searched := call("q=gam")
+	if searched.Total != 1 || searched.Items[0].Name != "gamma" {
+		t.Fatalf("搜索错误: %+v", searched.Items)
+	}
+	// 不传分页参数 → 返回全部（兼容旧行为）
+	all := call("")
+	if len(all.Items) != 5 || all.Page != 0 {
+		t.Fatalf("未分页应返回全部: items=%d page=%d", len(all.Items), all.Page)
+	}
+}
+
+// TestSaveExternalBinariesMerge 分页场景下保存不能清空其它页。
+func TestSaveExternalBinariesMerge(t *testing.T) {
+	dir := t.TempDir()
+	sc, cfg := newExtbinContext(t, dir)
+	cfg.Server.ExternalBinaries = map[string]string{
+		"keep-a":  "https://github.com/example/a.exe",
+		"keep-b":  "https://github.com/example/b.exe",
+		"drop-me": "https://github.com/example/c.exe",
+	}
+	// 保存当前页（只含 keep-a 修改）+ 删除 drop-me
+	body := `{"merge":true,
+	  "items":[{"name":"keep-a","url":"https://github.com/example/a2.exe","script":false}],
+	  "deleted":["drop-me"],
+	  "hosts":["github.com"],"ttl":"24h"}`
+	req := httptest.NewRequest("PUT", "/api/external/binaries", strings.NewReader(body))
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec := httptest.NewRecorder()
+	SaveExternalBinaries(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("保存失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	snap := sc.Settings.Snapshot()
+	if len(snap.Server.ExternalBinaries) != 2 {
+		t.Fatalf("应保留 2 条（keep-a/keep-b），实际 %v", snap.Server.ExternalBinaries)
+	}
+	if _, ok := snap.Server.ExternalBinaries["keep-b"]; !ok {
+		t.Fatal("其它页条目被清空（merge 未生效）")
+	}
+	if _, ok := snap.Server.ExternalBinaries["drop-me"]; ok {
+		t.Fatal("deleted 未生效")
+	}
+	if snap.Server.ExternalBinaries["keep-a"] != "https://github.com/example/a2.exe" {
+		t.Fatalf("upsert 未生效: %q", snap.Server.ExternalBinaries["keep-a"])
+	}
+}

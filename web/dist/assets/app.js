@@ -1253,14 +1253,33 @@
     state.extbinTTL = null;
     state.extbinAllowPrivate = null;
     state.extbinCIDRs = null;
-    state.extbinPage = 1;
-    api('/api/external/binaries')
-      .then(function (d) { state.extbin = d; state.extbinBusy = false; render(); })
+
+    var page = state.extbinPage || 1;
+    var q = encodeURIComponent(state.extbinQuery || '');
+    api('/api/external/binaries?page=' + page + '&size=20&q=' + q)
+      .then(function (d) {
+        state.extbin = d;
+        // 服务端分页：草稿只含当前页条目；其余页面不参与保存。
+        state.extbinDraft = (d.items || []).map(function (x) {
+          return { name: x.name, url: x.url, script: !!x.script, saved: true,
+            cached: x.cached, cached_size: x.cached_size, platform_url: x.platform_url };
+        });
+        state.extbinDeleted = [];
+        state.extbinBusy = false;
+        render();
+      })
       .catch(function (e) {
         state.extbinErr = e.message;
         state.extbinBusy = false;
         render();
       });
+  }
+
+  // extbinReloadPage 保持搜索词重载当前页。
+  function extbinReloadPage(page) {
+    state.extbinPage = page || 1;
+    state.extbinDraft = null;
+    loadExternalBinaries();
   }
 
   function fmtBytes(n) {
@@ -1314,31 +1333,38 @@
 
     // 搜索 + 分页（前端过滤：白名单通常几十条，避免额外接口）
     var qEl = h('input', {
-      id: 'extbin-q', value: state.extbinQuery || '', placeholder: '按名称 / 上游地址过滤',
-      oninput: function () {
-        state.extbinQuery = qEl.value;
-        state.extbinPage = 1;
-        state.focusId = 'extbin-q';
-        render();
+      id: 'extbin-q', value: state.extbinQuery || '', placeholder: '按名称 / 上游地址过滤（回车搜索）',
+      onkeydown: function (ev) {
+        if (ev.key === 'Enter') {
+          state.extbinQuery = qEl.value;
+          state.focusId = 'extbin-q';
+          extbinReloadPage(1);
+        }
       }
     }, []);
+    var searchBtn = h('button', {
+      class: 'btn ghost', onclick: function () {
+        state.extbinQuery = qEl.value;
+        extbinReloadPage(1);
+      }
+    }, ['搜索']);
+    if (state.extbinQuery) {
+      searchBtn = h('button', {
+        class: 'btn ghost', onclick: function () {
+          state.extbinQuery = '';
+          qEl.value = '';
+          extbinReloadPage(1);
+        }
+      }, ['清除']);
+    }
 
-    var q = (state.extbinQuery || '').trim().toLowerCase();
-    var filtered = draft.map(function (row, idx) { return { row: row, idx: idx }; })
-      .filter(function (x) {
-        if (!q) return true;
-        return (x.row.name || '').toLowerCase().indexOf(q) >= 0 ||
-          (x.row.url || '').toLowerCase().indexOf(q) >= 0;
-      });
+    // 服务端已分页，draft 即当前页；下标用于删除定位。
+    var page = (d && d.page) || 1;
+    var pages = (d && d.pages) || 1;
+    var total = (d && d.total) || draft.length;
+    var q = (state.extbinQuery || '').trim();
 
-    var pageSize = 20;
-    var pages = Math.max(1, Math.ceil(filtered.length / pageSize));
-    var page = Math.min(state.extbinPage || 1, pages);
-    state.extbinPage = page;
-    var pageRows = filtered.slice((page - 1) * pageSize, page * pageSize);
-
-    var rows = pageRows.map(function (item) {
-      var row = item.row, idx = item.idx;
+    var rows = draft.map(function (row, idx) {
       var nameId = 'extbin-name-' + idx;
       var urlId = 'extbin-url-' + idx;
       var nameEl = h('input', {
@@ -1421,6 +1447,11 @@
           }, ['刷新缓存']),
           h('button', {
             class: 'btn danger small', onclick: function () {
+              var nm = (row.name || '').trim();
+              if (nm && row.saved) {
+                // 已保存过的条目：记录下来，保存时从白名单删除。
+                state.extbinDeleted = (state.extbinDeleted || []).concat([nm]);
+              }
               draft.splice(idx, 1);
               render();
             }
@@ -1431,9 +1462,12 @@
 
     var doSave = function () {
       var payload = {
+        // merge：只把当前页改动合并进白名单，不会清空其它页。
+        merge: true,
         items: draft.map(function (r) {
           return { name: (r.name || '').trim(), url: (r.url || '').trim(), script: !!r.script };
-        }).filter(function (x) { return x.name || x.url; }),
+        }).filter(function (x) { return x.name && x.url; }),
+        deleted: state.extbinDeleted || [],
         hosts: hostsEl.value.split(',').map(function (x) { return x.trim(); })
           .filter(function (x) { return x; }),
         ttl: ttlEl.value.trim(),
@@ -1459,16 +1493,16 @@
     };
 
     var pager = null;
-    if (pages > 1) {
+    if (pages > 1 || total > 0) {
       pager = h('div', { class: 'pager' }, [
         h('button', {
           class: 'btn ghost small', disabled: page <= 1 ? 'disabled' : null,
-          onclick: function () { state.extbinPage = page - 1; render(); }
+          onclick: function () { extbinReloadPage(page - 1); }
         }, ['上一页']),
-        h('span', { class: 'muted' }, ['第 ' + page + ' / ' + pages + ' 页，共 ' + filtered.length + ' 条']),
+        h('span', { class: 'muted' }, ['第 ' + page + ' / ' + pages + ' 页，共 ' + total + ' 条']),
         h('button', {
           class: 'btn ghost small', disabled: page >= pages ? 'disabled' : null,
-          onclick: function () { state.extbinPage = page + 1; render(); }
+          onclick: function () { extbinReloadPage(page + 1); }
         }, ['下一页'])
       ]);
     }
@@ -1489,9 +1523,8 @@
         h('div', { class: 'toolbar' }, [
           h('button', {
             class: 'btn', onclick: function () {
-              state.extbinDraft = draft.concat([{ name: '', url: '', script: false }]);
-              state.extbinQuery = '';
-              state.extbinPage = 1;
+              // 仅在当前页追加（不重置搜索/页码），保存时按 merge 合并。
+              state.extbinDraft = draft.concat([{ name: '', url: '', script: false, saved: false }]);
               render();
             }
           }, ['新增一行']),
@@ -1499,8 +1532,28 @@
             class: 'btn', disabled: state.extbinBusy ? 'disabled' : null, onclick: doSave
           }, [state.extbinBusy ? '保存中…' : '保存']),
           qEl,
-          h('span', { class: 'muted' }, ['共 ' + draft.length + ' 条' +
-            (q ? '（匹配 ' + filtered.length + ' 条）' : '')]),
+          searchBtn,
+          h('button', {
+            class: 'btn ghost', onclick: function () {
+              if (!confirm('重新下载全部条目的缓存？条目较多时耗时较长。')) return;
+              state.extbinBusy = true;
+              render();
+              api('/api/external/binaries/refresh-all', { method: 'POST', body: '{}' })
+                .then(function (r) {
+                  state.extbinBusy = false;
+                  alert('批量刷新完成：成功 ' + r.ok + ' 条，失败 ' + r.failed + ' 条' +
+                    (r.failed ? '\n\n' + (r.items || []).filter(function (x) { return !x.ok; })
+                      .slice(0, 8).map(function (x) { return x.name + '：' + x.error; }).join('\n') : ''));
+                  extbinReloadPage(page);
+                })
+                .catch(function (e) {
+                  state.extbinBusy = false;
+                  alert('批量刷新失败: ' + e.message);
+                  render();
+                });
+            }
+          }, ['批量刷新']),
+          h('span', { class: 'muted' }, ['共 ' + total + ' 条' + (q ? '（搜索：' + q + '）' : '')]),
           h('span', { class: 'muted' }, ['保存后立即生效（热加载）'])
         ]),
         h('div', { class: 'table-wrap' }, [h('table', {}, [
@@ -1511,7 +1564,7 @@
           h('tbody', {}, rows)
         ])]),
         draft.length === 0 ? h('div', { class: 'muted empty' }, ['还没有条目，点「新增一行」添加。']) : null,
-        draft.length > 0 && filtered.length === 0
+        draft.length === 0 && q
           ? h('div', { class: 'muted empty' }, ['没有匹配的条目。']) : null,
         pager
       ]),
