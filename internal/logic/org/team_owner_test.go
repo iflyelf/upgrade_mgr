@@ -135,3 +135,46 @@ func TestUpdateTeamOwnerPolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestCanShareTasks 同一 off 团队成员可互相操作任务；on 团队不算。
+func TestCanShareTasks(t *testing.T) {
+	db := setupDB(t)
+	s := NewService(db)
+	ctx := context.Background()
+	sfx := time.Now().UnixNano()
+	alice := fmt.Sprintf("alice-%d", sfx)
+	bob := fmt.Sprintf("bob-%d", sfx)
+	carol := fmt.Sprintf("carol-%d", sfx)
+
+	offID, err := s.CreateTeamWithPolicy(ctx, fmt.Sprintf("share-off-%d", sfx), "", "",
+		[]string{alice, bob}, "tester", "off")
+	if err != nil {
+		t.Fatalf("创建 off 团队失败: %v", err)
+	}
+	t.Cleanup(func() { s.DeleteTeam(ctx, offID) })
+
+	ok, err := s.CanShareTasks(ctx, bob, alice)
+	if err != nil || !ok {
+		t.Fatalf("同 off 团队应允许: ok=%v err=%v", ok, err)
+	}
+	ok, err = s.CanShareTasks(ctx, carol, alice)
+	if err != nil || ok {
+		t.Fatalf("非团队成员不应允许: ok=%v err=%v", ok, err)
+	}
+	ok, _ = s.CanShareTasks(ctx, alice, alice)
+	if !ok {
+		t.Fatal("本人应允许")
+	}
+
+	// on 团队不产生共享
+	onID, err := s.CreateTeamWithPolicy(ctx, fmt.Sprintf("share-on-%d", sfx), "", "",
+		[]string{alice, carol}, "tester", "on")
+	if err != nil {
+		t.Fatalf("创建 on 团队失败: %v", err)
+	}
+	t.Cleanup(func() { s.DeleteTeam(ctx, onID) })
+	ok, err = s.CanShareTasks(ctx, carol, alice)
+	if err != nil || ok {
+		t.Fatalf("on 团队不应共享: ok=%v err=%v", ok, err)
+	}
+}

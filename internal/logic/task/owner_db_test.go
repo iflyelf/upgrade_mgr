@@ -11,6 +11,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
@@ -131,4 +132,102 @@ func TestCreatedByWritten(t *testing.T) {
 		t.Fatalf("created_by=%q updated_by=%q", created, updated)
 	}
 	_ = pq.Array
+}
+
+// TestTaskOwnerOffTeamShare 团队策略 off：同团队成员可操作，其他人仍拒绝。
+func TestTaskOwnerOffTeamShare(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sfx := time.Now().UnixNano()
+
+	var taskID int64
+	if err := db.QueryRow(`
+		INSERT INTO upgrade_tasks (name, version, kind, status, created_by, updated_by, tenant_id)
+		VALUES ($1,'v1','command','draft','alice','alice',1) RETURNING id`,
+		fmt.Sprintf("off_share_%d", sfx)).Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM upgrade_tasks WHERE id=$1`, taskID) })
+
+	var teamID int64
+	if err := db.QueryRow(`
+		INSERT INTO teams (name, owner_only) VALUES ($1,'off') RETURNING id`,
+		fmt.Sprintf("task-off-%d", sfx)).Scan(&teamID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM teams WHERE id=$1`, teamID) })
+	if _, err := db.Exec(`
+		INSERT INTO team_members (team_id, user_id) VALUES ($1,'alice'), ($1,'bob')`, teamID); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewService(db, nil, nil, nil)
+	sc := scope.New(1, false)
+	s.SetOwnerOnlyPolicy(func() bool { return true }) // 全局限制
+	s.SetOwnerPolicyResolver(func(context.Context, string) (string, error) { return "off", nil })
+	orgSvc := org.NewService(db)
+	s.SetOwnerShareChecker(orgSvc.CanShareTasks)
+
+	bobCtx := auth.WithUser(ctx, &auth.User{Username: "bob", TenantID: 1})
+	if err := s.checkTaskOwner(bobCtx, sc, taskID); err != nil {
+		t.Fatalf("同团队成员应可操作: %v", err)
+	}
+	carolCtx := auth.WithUser(ctx, &auth.User{Username: "carol", TenantID: 1})
+	if err := s.checkTaskOwner(carolCtx, sc, taskID); err == nil {
+		t.Fatal("非团队成员不应可操作")
+	}
+}
+
+// TestTaskDeployRecheck 非管理员再次操作命令任务时被拒绝；管理员放行。
+func TestTaskDeployRecheck(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sfx := time.Now().UnixNano()
+
+	var taskID int64
+	if err := db.QueryRow(`
+		INSERT INTO upgrade_tasks (name, version, kind, status, created_by, updated_by, tenant_id)
+		VALUES ($1,'command','command','draft','bob','bob',1) RETURNING id`,
+		fmt.Sprintf("recheck_%d", sfx)).Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM upgrade_tasks WHERE id=$1`, taskID) })
+
+	s := NewService(db, nil, nil, nil)
+	sc := scope.New(1, false)
+
+	bobCtx := auth.WithUser(ctx, &auth.User{Username: "bob", TenantID: 1})
+	if err := s.checkTaskDeploy(bobCtx, sc, taskID); err == nil {
+		t.Fatal("非管理员操作命令任务应被拒绝")
+	}
+	adminCtx := auth.WithUser(ctx, &auth.User{Username: "admin", TenantID: 1, IsAdmin: true})
+	if err := s.checkTaskDeploy(adminCtx, sc, taskID); err != nil {
+		t.Fatalf("管理员应放行: %v", err)
+	}
+	// 无 actor（内部调用）放行
+	if err := s.checkTaskDeploy(ctx, sc, taskID); err != nil {
+		t.Fatalf("内部调用应放行: %v", err)
+	}
 }

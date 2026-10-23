@@ -18,6 +18,9 @@ func (s *Service) Start(ctx context.Context, sc scope.Scope, taskID int64) error
 	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
 		return err
 	}
+	if err := s.checkTaskDeploy(ctx, sc, taskID); err != nil {
+		return err
+	}
 	tCond, tArgs := sc.Where("", 2)
 	var status string
 	var componentID sql.NullInt64

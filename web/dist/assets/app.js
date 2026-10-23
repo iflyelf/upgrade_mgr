@@ -112,6 +112,9 @@
     return h('div', { class: 'code-wrap' }, [btn, h('pre', { class: 'code' }, [text])]);
   }
   function isAdmin() { return !!(state.user && state.user.IsAdmin); }
+  function isSuperAdmin() {
+    return !!(state.user && (state.user.Roles || []).indexOf('superadmin') >= 0);
+  }
 
   var TASK_STATUS = {
     draft: '待启动', running: '运行中', paused: '已暂停',
@@ -180,8 +183,13 @@
   }
 
   function tabs() {
-    var items = [['hosts', '主机'], ['components', '组件'], ['artifacts', '制品'], ['tasks', '任务'],
-      ['org', '人员组织'], ['extbin', '外部文件'], ['settings', '设置']];
+    var items = [['hosts', '主机'], ['components', '组件'], ['artifacts', '制品'], ['tasks', '任务']];
+    if (isAdmin() || isSuperAdmin()) {
+      items.push(['org', '人员组织'], ['extbin', '外部文件']);
+    }
+    if (isSuperAdmin()) {
+      items.push(['settings', '设置']);
+    }
     return h('div', { class: 'tabs' }, items.map(function (it) {
       return h('div', {
         class: 'tab' + (state.view === it[0] ? ' active' : ''),
@@ -744,6 +752,8 @@
       })
         .then(function (u) {
           state.user = u;
+          state.myPerms = undefined;
+          state.taskForm = null;
           state.loginBusy = false;
           state.loginName = '';
           state.err = '';
@@ -2790,7 +2800,7 @@
 
     var title = '任务详情' + (d && d.id ? ' #' + d.id : (state.taskDetailId ? ' #' + state.taskDetailId : ''));
     if (d && d.name) title += ' · ' + d.name;
-    var actions = d ? taskActions(d, function () {
+    var actions = (d && d.can_operate !== false) ? taskActions(d, function () {
       loadTaskDetail(d.id, state.taskDetailPage, true);
     }) : [];
     modal.appendChild(h('div', { class: 'modal-head' }, [
@@ -2943,6 +2953,19 @@
     var compMap = {};
     state.components.forEach(function (c) { compMap[c.id] = c; });
 
+    // 非管理员：加载有效权限，仅展示有 deploy 权限的组件（服务端仍会复核）。
+    if (!isAdmin() && state.myPerms === undefined) {
+      state.myPerms = null;
+      api('/api/my/permissions')
+        .then(function (p) { state.myPerms = p || { components: {} }; render(); })
+        .catch(function () { state.myPerms = { components: {} }; render(); });
+    }
+    var deployComps = isAdmin() ? state.components : state.components.filter(function (c) {
+      var perms = (state.myPerms && state.myPerms.components) || {};
+      var set = perms[c.name] || {};
+      return !!set.deploy;
+    });
+
     // 表单值放在 state.taskForm 里：预览会触发 render，靠它保留用户输入。
     var f = state.taskForm || (state.taskForm = {
       kind: 'upgrade', name: '', component_id: '', version: '', ip_expr: '',
@@ -2950,6 +2973,7 @@
       mode: 'count', batch_size: '10', canary_count: '1', auto_promote: true
     });
     if (!f.kind) f.kind = 'upgrade';
+    if (!isAdmin() && f.kind === 'command') f.kind = 'upgrade';
 
     function versionsFor(cid) {
       var out = [];
@@ -2971,7 +2995,7 @@
         render();
       }
     }, [h('option', { value: '' }, ['请选择组件'])].concat(
-      state.components.map(function (c) {
+      deployComps.map(function (c) {
         return h('option', { value: c.id }, [c.name + (c.display_name ? '（' + c.display_name + '）' : '')]);
       })
     ));
@@ -3007,9 +3031,8 @@
       value: f.kind,
       onchange: function () { f.kind = kindEl.value; state.preview = null; render(); }
     }, [
-      h('option', { value: 'upgrade' }, ['组件（upgrade）']),
-      h('option', { value: 'command' }, ['执行命令/脚本（command）'])
-    ]);
+      h('option', { value: 'upgrade' }, ['组件（upgrade）'])
+    ].concat(isAdmin() ? [h('option', { value: 'command' }, ['执行命令/脚本（command）'])] : []));
     var scriptEl = h('textarea', {
       rows: '8',
       placeholder: '#!/bin/bash\n# Linux 示例：\nset -e\nurl="https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh"\nf=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)\ncurl -fsSL "$url" -o "$f"\nbash "$f" uninstall\nrm -f "$f"\n\n# Windows 示例（解释器填 powershell）：\n# Stop-Service node_exporter -ErrorAction SilentlyContinue\n# exit 0\n',
@@ -3340,7 +3363,7 @@
         loadTasks();
       }
     }, [h('option', { value: '' }, ['全部组件'])].concat(
-      state.components.map(function (c) {
+      deployComps.map(function (c) {
         return h('option', { value: String(c.id) }, [c.name + (c.display_name ? '（' + c.display_name + '）' : '')]);
       })
     ));
@@ -3379,7 +3402,7 @@
       simpleTable(['ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '创建者', '操作'], state.tasks,
         function (x) {
           var c = compMap[x.component_id];
-          var acts = [detailBtn(x)].concat(isAdmin() ? taskActions(x) : []);
+          var acts = [detailBtn(x)].concat(x.can_operate === false ? [] : taskActions(x));
           var pct = x.total ? Math.round(x.success * 100 / x.total) : 0;
           var isCmd = x.kind === 'command';
           return [x.id,
@@ -3408,10 +3431,17 @@
     ]);
 
     return h('div', {}, [
-      isAdmin() ? form : h('div', { class: 'card' }, [
-        h('h3', {}, ['创建任务']),
-        hint('当前账号不是管理员，只能查看任务列表；创建、启动、暂停等操作需要管理员权限。')
-      ]),
+      !isAdmin() ? hint('当前账号可为已授权（deploy）的组件创建任务；' +
+        '命令任务与授权范围外的操作仍需管理员。任务操作按钮按 owner 策略显示。') : null,
+      !isAdmin() && state.myPerms === null
+        ? h('div', { class: 'card' }, [h('h3', {}, ['创建任务']), hint('正在加载组件权限…')])
+        : (!isAdmin() && !deployComps.length
+          ? h('div', { class: 'card' }, [
+              h('h3', {}, ['暂无组件任务权限']),
+              hint('你还没有任何组件的 deploy 权限。请联系管理员在「人员组织 → 团队」中，' +
+                '通过服务组为你所在的团队授予 deploy 权限。命令任务仅管理员可创建。')
+            ])
+          : form),
       list
     ]);
   }
@@ -3894,6 +3924,8 @@
     stopAutoRefresh();
     api('/api/auth/logout', { method: 'POST' }).then(function () {
       state.user = null;
+      state.myPerms = undefined;
+      state.taskForm = null;
       state.taskDetailId = null;
       state.taskDetail = null;
       state.hostsSig = '';

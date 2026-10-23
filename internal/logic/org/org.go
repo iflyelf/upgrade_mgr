@@ -839,6 +839,31 @@ func (s *Service) TeamOwnerPolicy(ctx context.Context, username string) (string,
 	return "", nil
 }
 
+// CanShareTasks 判断 actor 能否操作 creator 创建的任务。
+//
+// 规则：二者同属至少一个 owner_only='off' 的团队时允许。
+// 仅当 actor 的生效策略为 off 时由任务服务调用。
+func (s *Service) CanShareTasks(ctx context.Context, actor, creator string) (bool, error) {
+	actor = strings.TrimSpace(actor)
+	creator = strings.TrimSpace(creator)
+	if actor == "" || creator == "" {
+		return false, nil
+	}
+	if actor == creator {
+		return true, nil
+	}
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM team_members a
+			  JOIN teams t ON t.id = a.team_id
+			  JOIN team_members b ON b.team_id = a.team_id
+			 WHERE a.user_id = $1 AND b.user_id = $2 AND t.owner_only = 'off'
+		)`, actor, creator).Scan(&ok)
+	return ok, err
+}
+
 // ---- 辅助 ----
 
 func isUnique(err error) bool {

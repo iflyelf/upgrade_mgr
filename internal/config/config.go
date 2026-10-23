@@ -229,6 +229,9 @@ func Default() *Config {
 		Agent: AgentConfig{
 			PollHold: 20, LeaseMax: "1h", ClockSkew: "5m",
 			EnrollTokenTTL: "15m", RequireEnrollToken: true, AllowExecMode: true,
+			// 默认开启任务 owner 校验：非管理员只能操作自己创建的任务。
+			// 管理员不受影响；团队可用 owner_only=off 在团队内放开。
+			TaskOwnerOnly: true,
 		},
 		Log: LogConfig{Level: "info"},
 	}

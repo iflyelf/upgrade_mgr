@@ -201,22 +201,23 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	// 制品下载：Agent 专用（Bearer 认证 + 租户作用域），防匿名拖取二进制
 	mux.Handle("GET /api/artifacts/{id}/download", agentAuth(http.HandlerFunc(handler.ArtifactDownload(sc))))
 
-	// 升级任务（管理员权限）
+	// 升级任务：登录即可访问；组件 deploy 权限、主机分组范围与 owner 策略由服务层校验。
 	mux.HandleFunc("GET /api/tasks", middleware.RequireAuth(auth, handler.TaskList(sc)))
 	mux.HandleFunc("GET /api/tasks/{id}", middleware.RequireAuth(auth, handler.TaskDetail(sc)))
-	mux.HandleFunc("POST /api/tasks/preview", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskPreview(sc))))
-	mux.HandleFunc("POST /api/tasks", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskCreate(sc))))
-	mux.HandleFunc("POST /api/tasks/{id}/start", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskStart(sc))))
-	mux.HandleFunc("POST /api/tasks/{id}/pause", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskPause(sc))))
-	mux.HandleFunc("POST /api/tasks/{id}/promote", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskPromote(sc))))
-	mux.HandleFunc("POST /api/tasks/{id}/cancel", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskCancel(sc))))
-	mux.HandleFunc("POST /api/tasks/{id}/retry", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskRetry(sc))))
-	mux.HandleFunc("DELETE /api/tasks/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TaskDelete(sc))))
+	mux.HandleFunc("POST /api/tasks/preview", middleware.RequireAuth(auth, handler.TaskPreview(sc)))
+	mux.HandleFunc("POST /api/tasks", middleware.RequireAuth(auth, handler.TaskCreate(sc)))
+	mux.HandleFunc("POST /api/tasks/{id}/start", middleware.RequireAuth(auth, handler.TaskStart(sc)))
+	mux.HandleFunc("POST /api/tasks/{id}/pause", middleware.RequireAuth(auth, handler.TaskPause(sc)))
+	mux.HandleFunc("POST /api/tasks/{id}/promote", middleware.RequireAuth(auth, handler.TaskPromote(sc)))
+	mux.HandleFunc("POST /api/tasks/{id}/cancel", middleware.RequireAuth(auth, handler.TaskCancel(sc)))
+	mux.HandleFunc("POST /api/tasks/{id}/retry", middleware.RequireAuth(auth, handler.TaskRetry(sc)))
+	mux.HandleFunc("DELETE /api/tasks/{id}", middleware.RequireAuth(auth, handler.TaskDelete(sc)))
 
 	// 主机
 	mux.HandleFunc("GET /api/hosts/{ip}/upgrade-history", middleware.RequireAuth(auth, handler.HostUpgradeHistory(sc)))
 
 	// 用户与租户管理（管理员）：多租户可用性的必要入口
+	mux.HandleFunc("GET /api/my/permissions", middleware.RequireAuth(auth, handler.MyPermissions(sc)))
 	mux.HandleFunc("GET /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserList(sc))))
 	mux.HandleFunc("POST /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCreate(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/tenant-roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetTenantRoles(sc))))

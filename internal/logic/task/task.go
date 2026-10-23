@@ -112,6 +112,9 @@ type Service struct {
 	//   ""        → 未加入任何团队，回退全局设置
 	// 为 nil 时只使用全局开关。
 	ownerPolicy func(ctx context.Context, username string) (string, error)
+	// shareAllowed 判断 actor 能否操作 creator 创建的任务（同属 off 团队）。
+	// 仅在生效策略为 off 时调用；为 nil 时不做共享校验（保守拒绝）。
+	shareAllowed func(ctx context.Context, actor, creator string) (bool, error)
 }
 
 // SetAuthorizer 注入组件级权限校验（由服务端启动时设置）。
@@ -132,25 +135,42 @@ func (s *Service) SetOwnerPolicyResolver(fn func(context.Context, string) (strin
 	s.ownerPolicy = fn
 }
 
-// ownerOnlyFor 综合团队策略与全局开关，判断该用户是否受限。
-func (s *Service) ownerOnlyFor(ctx context.Context, username string) bool {
-	global := s.allowTaskOwnerOnly != nil && s.allowTaskOwnerOnly()
+// SetOwnerShareChecker 注入「同团队成员可互相操作任务」校验（由服务端启动时设置）。
+func (s *Service) SetOwnerShareChecker(fn func(context.Context, string, string) (bool, error)) {
+	s.shareAllowed = fn
+}
+
+// ownerModeFor 综合团队策略与全局开关，返回该用户的生效策略：
+//
+//	"on"      → 仅本人可操作
+//	"off"     → 同团队（owner_only=off）成员可互相操作
+//	"inherit" → 不受限（全局开关关闭，或未加入团队且全局关闭）
+func (s *Service) ownerModeFor(ctx context.Context, username string) string {
+	globalOn := s.allowTaskOwnerOnly != nil && s.allowTaskOwnerOnly()
+	globalMode := "inherit"
+	if globalOn {
+		globalMode = "on"
+	}
 	if s.ownerPolicy == nil {
-		return global
+		return globalMode
 	}
 	policy, err := s.ownerPolicy(ctx, username)
 	if err != nil {
 		// 查询失败时保守处理：按全局设置（不因为权限查询故障而放宽）。
-		return global
+		return globalMode
 	}
 	switch policy {
-	case "on":
-		return true
-	case "off":
-		return false
+	case "on", "off":
+		return policy
 	default: // inherit / 未加入团队
-		return global
+		return globalMode
 	}
+}
+
+// AccessMode 返回用户的任务操作策略（on/off/inherit），
+// 供前端决定是否展示操作按钮（写操作仍以服务端校验为准）。
+func (s *Service) AccessMode(ctx context.Context, username string) string {
+	return s.ownerModeFor(ctx, username)
 }
 
 // checkTaskOwner 校验非管理员是否可操作指定任务。
@@ -166,7 +186,8 @@ func (s *Service) checkTaskOwner(ctx context.Context, sc scope.Scope, taskID int
 	if actor == nil || actor.IsAdmin || actor.IsSuperAdmin() || actor.HasRole(auth.RoleAdmin) {
 		return nil
 	}
-	if !s.ownerOnlyFor(ctx, actor.Username) {
+	mode := s.ownerModeFor(ctx, actor.Username)
+	if mode == "inherit" {
 		return nil
 	}
 	tCond, tArgs := sc.Where("", 2)
@@ -177,10 +198,18 @@ func (s *Service) checkTaskOwner(ctx context.Context, sc scope.Scope, taskID int
 	if err != nil {
 		return fmt.Errorf("任务不存在或无权访问")
 	}
-	if createdBy != "" && createdBy != actor.Username {
-		return fmt.Errorf("该任务由 %s 创建，仅创建者或管理员可操作", createdBy)
+	if createdBy == "" || createdBy == actor.Username {
+		return nil
 	}
-	return nil
+	if mode == "off" && s.shareAllowed != nil {
+		if ok, shareErr := s.shareAllowed(ctx, actor.Username, createdBy); shareErr == nil && ok {
+			return nil
+		}
+	}
+	if mode == "off" {
+		return fmt.Errorf("该任务由 %s 创建，仅创建者、同团队成员或管理员可操作", createdBy)
+	}
+	return fmt.Errorf("该任务由 %s 创建，仅创建者或管理员可操作", createdBy)
 }
 
 // NewService 创建任务服务。allowExecMode 为 nil 时视为禁止。
@@ -206,6 +235,11 @@ type PreviewResult struct {
 // SetActor 注入当前操作者（供权限校验，不支持从 JSON 伪造）。
 func (r *CreateRequest) SetActor(u *auth.User) { r.actor = u }
 
+// isPrivilegedActor 判断操作者是否管理员；nil 表示内部调用（后台/测试），视为特权。
+func isPrivilegedActor(actor *auth.User) bool {
+	return actor == nil || actor.IsAdmin || actor.IsSuperAdmin() || actor.HasRole(auth.RoleAdmin)
+}
+
 // checkDeploy 校验操作者对该组件是否有 deploy 权限。
 //
 // 规则：
@@ -217,6 +251,30 @@ func (s *Service) checkDeploy(ctx context.Context, actor *auth.User, componentID
 		return nil
 	}
 	return s.authorize(ctx, actor, componentID, name)
+}
+
+// checkTaskDeploy 非管理员操作任务前再次校验组件 deploy 权限，
+// 避免授权被回收后仍可启动/重试既有任务；命令任务仅管理员可操作。
+func (s *Service) checkTaskDeploy(ctx context.Context, sc scope.Scope, taskID int64) error {
+	actor, _ := auth.FromContext(ctx)
+	if isPrivilegedActor(actor) {
+		return nil
+	}
+	tCond, tArgs := sc.Where("", 2)
+	var cid sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT component_id FROM upgrade_tasks WHERE id=$1 AND `+tCond,
+		append([]any{taskID}, tArgs...)...).Scan(&cid); err != nil {
+		return fmt.Errorf("任务不存在或无权访问")
+	}
+	if !cid.Valid {
+		return fmt.Errorf("命令任务仅管理员可操作")
+	}
+	comp, err := s.compRepo.Get(ctx, sc, cid.Int64)
+	if err != nil {
+		return err
+	}
+	return s.checkDeploy(ctx, actor, comp.ID, comp.Name)
 }
 
 // checkHostGroups 校验目标主机是否落在授权的主机分组内。
@@ -252,7 +310,27 @@ func (s *Service) checkHostGroups(ctx context.Context, actor *auth.User, compone
 }
 
 // Preview 解析目标并计算分批，不落库。
+//
+// 与 Create 相同的权限边界：命令任务仅管理员可预览；组件任务需要 deploy 权限。
 func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest) (*PreviewResult, error) {
+	kind := req.Kind
+	if kind == "" {
+		kind = KindUpgrade
+	}
+	if kind == KindCommand {
+		if !isPrivilegedActor(req.actor) {
+			return nil, fmt.Errorf("命令任务仅管理员可预览")
+		}
+	} else if kind == KindUpgrade && req.ComponentID != 0 {
+		comp, err := s.compRepo.Get(ctx, sc, req.ComponentID)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.checkDeploy(ctx, req.actor, comp.ID, comp.Name); err != nil {
+			return nil, err
+		}
+	}
+
 	hosts, err := s.matchHosts(ctx, sc, req.Selector)
 	if err != nil {
 		return nil, err
@@ -298,6 +376,11 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 		}
 		compName = comp.Name
 	} else {
+		// 命令任务没有组件，无法用组件 deploy 权限约束；仅管理员可创建，
+		// 避免获得任意主机写入权限的普通用户执行任意脚本。
+		if !isPrivilegedActor(req.actor) {
+			return 0, fmt.Errorf("命令任务仅管理员可创建")
+		}
 		// 命令任务：脚本不能为空；版本仅作展示，统一记录为 command。
 		if !s.allowExecMode() {
 			return 0, fmt.Errorf("服务端已禁用命令执行（agent.allow_exec_mode=false）")
