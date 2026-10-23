@@ -1601,8 +1601,10 @@
       api('/api/service-groups')
     ];
     if (!(state.components || []).length) jobs.push(api('/api/components'));
+    jobs.push(api('/api/host-groups'));
     Promise.all(jobs).then(function (res) {
       if (res.length > 4) state.components = res[4] || [];
+      if (res.length > 5) state.hostGroupOptions = (res[5] && res[5].groups) || [];
       state.org = {
         users: res[0].users || [],
         userDefs: res[0].defs || [],
@@ -1620,7 +1622,7 @@
 
   function orgTabs() {
     var tabs = [['users', '人员信息'], ['fields', '用户字段'], ['roles', '角色'],
-      ['teams', '团队'], ['groups', '服务组']];
+      ['teams', '团队'], ['groups', '服务组'], ['flyiam', 'FlyIAM 人员']];
     return h('div', { class: 'tabs', style: 'margin-bottom:12px' }, tabs.map(function (t) {
       return h('div', {
         class: 'tab' + (state.orgTab === t[0] ? ' active' : ''),
@@ -1639,6 +1641,7 @@
     else if (state.orgTab === 'fields') body = orgUserFields(o);
     else if (state.orgTab === 'roles') body = orgRoles(o);
     else if (state.orgTab === 'teams') body = orgTeams(o);
+    else if (state.orgTab === 'flyiam') body = orgFlyIAMUsers(o);
     else body = orgGroups(o);
 
     return h('div', {}, [
@@ -1772,21 +1775,7 @@
                 })
                 .catch(function (e) { alert('同步失败: ' + e.message); });
             }
-          }, ['从 FlyIAM 同步字段']),
-          h('button', {
-            class: 'btn ghost', onclick: function () {
-              api('/api/flyiam/users')
-                .then(function (r) {
-                  var lines = (r.users || []).slice(0, 30).map(function (u) {
-                    return (u.username || '-') + ' / ' + (u.displayName || '-') +
-                      (u.email ? ' / ' + u.email : '');
-                  });
-                  alert('FlyIAM 用户共 ' + r.total + ' 人（只读）：\n\n' +
-                    lines.join('\n') + (r.total > 30 ? '\n…' : ''));
-                })
-                .catch(function (e) { alert('读取 FlyIAM 用户失败: ' + e.message); });
-            }
-          }, ['查看 FlyIAM 用户'])
+          }, ['从 FlyIAM 同步字段'])
         ]),
         simpleTable(['键', '名称', '类型', '列表显示', '表单显示', '来源', '操作'], defs, function (d, i) {
           return rows[i];
@@ -1851,6 +1840,74 @@
           class: 'btn ghost', onclick: function () { state.orgNewField = null; render(); }
         }, ['取消'])
       ])
+    ]);
+  }
+
+  // FlyIAM 人员（只读）：与本地账号对照「已接入 / 未接入」。
+  function orgFlyIAMUsers(o) {
+    var data = state.flyiamUsers;
+    var q = (state.flyiamQuery || '').trim().toLowerCase();
+
+    var reload = function () {
+      state.flyiamErr = '';
+      api('/api/flyiam/users')
+        .then(function (r) { state.flyiamUsers = r; render(); })
+        .catch(function (e) { state.flyiamErr = e.message; state.flyiamUsers = null; render(); });
+    };
+
+    var qEl = h('input', {
+      id: 'flyiam-q', value: state.flyiamQuery || '', placeholder: '按用户名 / 姓名 / 邮箱过滤',
+      oninput: function () { state.flyiamQuery = qEl.value; state.focusId = 'flyiam-q'; render(); }
+    }, []);
+
+    if (!data && !state.flyiamErr) {
+      return h('div', { class: 'card' }, [
+        h('h3', {}, ['FlyIAM 人员']),
+        hint('只读展示 FlyIAM 中的用户，并与本系统已接入账号对照。用户增删改仍以 Casdoor / FlyIAM 为准。'),
+        h('div', { class: 'toolbar' }, [
+          h('button', { class: 'btn', onclick: reload }, ['加载 FlyIAM 用户'])
+        ]),
+        state.flyiamErr ? h('div', { class: 'err field', role: 'alert' }, [state.flyiamErr]) : null
+      ]);
+    }
+
+    var localSet = {};
+    (o.users || []).forEach(function (u) { localSet[u.username] = true; });
+    var all = (data && data.users) || [];
+    var filtered = all.filter(function (u) {
+      if (!q) return true;
+      return (u.username || '').toLowerCase().indexOf(q) >= 0 ||
+        (u.displayName || '').toLowerCase().indexOf(q) >= 0 ||
+        (u.email || '').toLowerCase().indexOf(q) >= 0;
+    });
+
+    var rows = filtered.slice(0, 200).map(function (u) {
+      return [
+        u.username || '-',
+        u.displayName || '-',
+        u.email || '-',
+        localSet[u.username] ? h('span', { class: 'tag status-success' }, ['已接入'])
+          : h('span', { class: 'muted' }, ['未接入']),
+        (u.properties && u.properties.empCode) || '-'
+      ];
+    });
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['FlyIAM 人员（只读）']),
+      hint('数据来自 FlyIAM（/api/users/export）。「已接入」表示本平台已有同名账号；' +
+        '未接入的用户需先在 FlyIAM/Casdoor 授权后登录，或由管理员在「设置 → 用户」创建。'),
+      state.flyiamErr ? h('div', { class: 'err field', role: 'alert' }, [state.flyiamErr]) : null,
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn ghost', onclick: reload }, ['刷新']),
+        qEl,
+        h('span', { class: 'muted' }, ['共 ' + all.length + ' 人' +
+          (q ? '（匹配 ' + filtered.length + '）' : '') +
+          '，已接入 ' + all.filter(function (u) { return localSet[u.username]; }).length + ' 人'])
+      ]),
+      simpleTable(['用户名', '姓名', '邮箱', '本平台', '工号'], filtered.slice(0, 200), function (u, i) {
+        return rows[i];
+      }),
+      filtered.length > 200 ? h('div', { class: 'muted' }, ['仅显示前 200 条，请用搜索缩小范围']) : null
     ]);
   }
 
@@ -2016,7 +2073,12 @@
     var permEl = h('input', { value: 'read', placeholder: 'read,write,delete,deploy' }, []);
     var roleEl = h('input', { placeholder: '角色 ID，逗号分隔（可空）' }, []);
     var svcEl = h('input', { value: '*', placeholder: '* 表示组内全部组件' }, []);
-    var hgEl = h('input', { value: '', placeholder: 'app_code / biz_group，逗号分隔；留空不限主机' }, []);
+    var hgEl = h('input', {
+      value: '', list: 'host-group-options',
+      placeholder: '从下拉选择或手填 app_code / biz_group，逗号分隔；留空不限'
+    }, []);
+    var hgList = h('datalist', { id: 'host-group-options' },
+      (state.hostGroupOptions || []).map(function (g) { return h('option', { value: g }, []); }));
     return h('div', { class: 'card' }, [
       h('h3', {}, ['设置授权']),
       h('div', { class: 'grid2' }, [
@@ -2028,6 +2090,7 @@
         field('授权服务', svcEl, '* 或组件名，逗号分隔')
       ]),
       field('主机分组范围', hgEl, '限定可操作的主机（按 app_code / biz_group 匹配，逗号分隔；留空表示不限）。超出范围的主机会拒绝创建任务。'),
+      hgList,
       h('div', { class: 'toolbar' }, [
         h('button', {
           class: 'btn', onclick: function () {

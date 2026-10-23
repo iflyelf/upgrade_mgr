@@ -1959,6 +1959,19 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 任务 owner 校验、主机分组下拉与 FlyIAM 独立页面
+
+- **任务操作 owner 校验**：新增设置 `agent.task_owner_only`（默认 false，页面可改）。
+  开启后，非管理员只能「启动/暂停/推进/取消/重试/删除」自己创建的任务；
+  管理员与 superadmin 豁免；匿名内部调用（后台编排）不受影响。actor 从请求 context 读取。
+- 迁移 `022`：`upgrade_tasks.updated_by` + `created_by` 索引；创建任务时两者同时写入。
+- **主机分组下拉多选**：`GET /api/host-groups` 从 `hosts.app_code` / `biz_group`
+  聚合去重，授权表单改用 `datalist` 提示，避免手填错。
+- **FlyIAM 人员独立页面**：「人员组织 → FlyIAM 人员」表格展示用户名/姓名/邮箱/工号，
+  并与本地账号对照标记「已接入 / 未接入」，支持搜索（不再用弹窗摘要）。
+- 新增单测：owner 校验（创建者/他人/管理员/匿名/开关关闭）、created_by 写入、
+  主机分组聚合去重。
+
 ### 2026-10-23 任务权限校验、主机分组范围与 FlyIAM 用户只读
 
 - **任务权限校验（deploy）**：`task.Service` 增加 `SetAuthorizer`，由 `org.DeployAuthorizer`

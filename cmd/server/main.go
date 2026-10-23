@@ -251,6 +251,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/teams/{id}/permissions", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissions(sc))))
 	mux.HandleFunc("PUT /api/teams/{id}/permissions", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissionSet(sc))))
 	mux.HandleFunc("DELETE /api/teams/{id}/permissions/{group}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TeamPermissionDelete(sc))))
+	mux.HandleFunc("GET /api/host-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostGroupOptions(sc))))
 	mux.HandleFunc("GET /api/service-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupList(sc))))
 	mux.HandleFunc("POST /api/service-groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupCreate(sc))))
 	mux.HandleFunc("PUT /api/service-groups/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GroupUpdate(sc))))

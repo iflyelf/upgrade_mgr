@@ -51,6 +51,9 @@ func activeCommandStatuses() string {
 // 版本再升级/回滚一遍。
 func (s *Service) Retry(ctx context.Context, sc scope.Scope, taskID int64, req RetryRequest) (RetryResult, error) {
 	res := RetryResult{Skipped: []RetrySkip{}}
+	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
+		return res, err
+	}
 	if len(req.TaskHostIDs) > 5000 {
 		return res, fmt.Errorf("单次最多重新执行 5000 台主机")
 	}
