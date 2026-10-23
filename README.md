@@ -535,6 +535,62 @@ status upgrade-agent            # upstart
 > `/tmp/upgrade-agent install --server '<url>' --enroll-token '<新令牌>' --force`。
 > `--force` 必须同时提供 `--enroll-token`；普通重装请勿勾选，否则会生成新的 Agent 身份。
 
+#### 隧道连通性测试
+
+主机页「编辑」→ 填「平台侧隧道地址」→ 点「测试隧道连通性」，服务端会按顺序执行
+DNS 解析 → TCP 连接 → TLS 握手（https）→ `GET /health`，并逐步返回结果。
+
+- 通过：目标地址上的服务自报 `upgrade_mgr`，说明地址、端口、反向代理与证书都没问题。
+- 失败：直接给出对应阶段的错误与排查建议（端口未放行、TLS 证书不匹配、反向代理指向了别的服务等）。
+- 可以测试尚未保存的候选地址：先改输入框再点测试，结果满意后保存。
+- **注意**：这是从平台侧发起的拨测，只证明平台所在环境能到达该地址；目标主机能否
+  通过隧道访问仍需以 Agent 心跳为准（保存后约 30 秒自动切换）。
+
+接口：`POST /api/hosts/{id}/tunnel-test`（管理员，租户隔离，审计 `host.tunnel_test`）
+
+```json
+// 请求（body 可省略，省略时测试已保存的 server_tunnel_url）
+{"target": "10.8.0.5:8090", "timeout_seconds": 5}
+```
+
+#### 可选 HTTPS 与双向 TLS（mTLS）
+
+控制台默认以 HTTP 提供服务；需要加密或要求 Agent 持有客户端证书时，配置：
+
+```yaml
+server:
+  tls_cert: /etc/upgrade-mgr/server.crt       # 服务端证书
+  tls_key:  /etc/upgrade-mgr/server.key       # 服务端私钥
+  tls_client_ca: /etc/upgrade-mgr/agent-ca.crt # 可选：Agent 客户端证书的 CA
+  tls_client_auth: require                      # none（默认）/ request / require
+```
+
+对应环境变量：`SERVER_TLS_CERT`、`SERVER_TLS_KEY`、`SERVER_TLS_CLIENT_CA`、
+`SERVER_TLS_CLIENT_AUTH`。`tls_client_auth=require` 时只有持受信客户端证书的 Agent
+能建立连接，构成双向 TLS。
+
+Agent 侧：
+
+```bash
+# 私有 CA（服务端证书不是公共 CA 签发时必须指定）
+upgrade-agent install --server https://mgr.example.com --enroll-token <token> \
+  --tls-ca /etc/upgrade-mgr/agent-ca.crt
+
+# 双向 TLS：再加上客户端证书
+upgrade-agent install --server https://mgr.example.com --enroll-token <token> \
+  --tls-ca /etc/upgrade-mgr/agent-ca.crt \
+  --tls-cert /etc/upgrade-mgr/agent.crt \
+  --tls-key  /etc/upgrade-mgr/agent.key
+```
+
+证书路径会保存到 `state.json`，服务重启后继续生效；`run` 子命令也支持同样参数，
+命令行优先于 state 中的值。配置后 Agent 的心跳、取指令、制品与自升级下载统一使用
+该 TLS 客户端。
+
+> ⚠️ 最低 TLS 1.2。Windows Server 2008 R2 默认未启用 TLS 1.2，需先安装
+> KB3140245 并开启 `SchUseStrongCrypto`，或继续使用 HTTP（建议配合内网/隧道）。
+> ⚠️ 开启 `require` 前请先在单台主机验证证书链，否则已在运行的 Agent 会立即断连。
+
 #### 多网卡出口 IP 与隧道地址
 
 Agent 用「向服务端地址发起一次 UDP connect」让内核按路由表选出出口网卡（不发包），
@@ -1417,6 +1473,18 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
+
+### 2026-10-23 隧道拨测与可选双向 TLS
+
+- 新增 `POST /api/hosts/{id}/tunnel-test`（管理员、租户隔离、审计 `host.tunnel_test`）：
+  从平台侧按 DNS → TCP → TLS → `GET /health` 逐步拨测隧道地址，识别端口不通、证书不匹配、
+  反向代理指向错误服务等问题；支持测试尚未保存的候选地址。
+- 新增 `internal/pkg/tunnelprobe`（拨测实现）与主机编辑页「测试隧道连通性」按钮，
+  结果逐阶段展示耗时、详情、证书签发者/到期时间与排查提示。
+- 可选 HTTPS / 双向 TLS：控制台配置 `server.tls_cert/tls_key/tls_client_ca/tls_client_auth`
+  后以 HTTPS 监听，`require` 时强制校验 Agent 客户端证书。
+- Agent 新增 `--tls-ca/--tls-cert/--tls-key`（install/run 均支持，写入 state 持久化），
+  TLS 客户端同时用于心跳、取指令、制品与自升级下载；最低 TLS 1.2。
 
 ### 2026-10-23 多网卡出口 IP 与隧道地址
 

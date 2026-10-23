@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/agent/agentrun"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/binswap"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/installer"
+	"github.com/iflyelf/upgrade_mgr/internal/agent/tlsclient"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/watchdog"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/winsvc"
 )
@@ -64,6 +66,9 @@ func runCmd() {
 	statePath := fs.String("state", agentpath.StatePath(), "状态文件路径")
 	// --service 由 Windows 安装器写入服务命令行；Linux 上忽略。
 	_ = fs.Bool("service", false, "由 Windows SCM 启动（服务模式）")
+	tlsCA := fs.String("tls-ca", "", "可选：校验服务端证书的 CA 文件（PEM）")
+	tlsCert := fs.String("tls-cert", "", "可选：客户端证书（双向 TLS）")
+	tlsKey := fs.String("tls-key", "", "可选：客户端私钥（双向 TLS）")
 	fs.Parse(os.Args[2:])
 
 	cfg, err := agentrun.LoadState(*statePath)
@@ -85,6 +90,25 @@ func runCmd() {
 	cfg.StatePath = *statePath
 	cfg.Version = version
 	cfg.Variant = variant
+	// 命令行参数优先于 state 中保存的值（便于临时调试/切换证书）。
+	if *tlsCA != "" {
+		cfg.TLSCA = *tlsCA
+	}
+	if *tlsCert != "" {
+		cfg.TLSCert = *tlsCert
+	}
+	if *tlsKey != "" {
+		cfg.TLSKey = *tlsKey
+	}
+	// 制品下载走 downloader 的 http.DefaultClient；配置了 TLS 时统一替换，
+	// 保证自升级/组件下载同样使用客户端证书与私有 CA。
+	if client, err := tlsclient.New(tlsclient.Config{
+		CAFile: cfg.TLSCA, CertFile: cfg.TLSCert, KeyFile: cfg.TLSKey,
+	}); err != nil {
+		log.Printf("⚠️ TLS 客户端配置失败: %v", err)
+	} else if client != nil {
+		http.DefaultClient = client
+	}
 
 	run := func(ctx context.Context) error {
 		agent := agentrun.New(cfg)
@@ -142,6 +166,9 @@ func installCmd() {
 	statePath := fs.String("state", agentpath.StatePath(), "状态文件路径")
 	installCron := fs.Bool("cron", true, "安装看门狗兜底（Linux cron / Windows 计划任务）")
 	force := fs.Bool("force", false, "强制重新注册：覆盖已有 state 凭据（需 --enroll-token）")
+	tlsCA := fs.String("tls-ca", "", "可选：校验服务端证书的 CA 文件（PEM）")
+	tlsCert := fs.String("tls-cert", "", "可选：客户端证书（双向 TLS）")
+	tlsKey := fs.String("tls-key", "", "可选：客户端私钥（双向 TLS）")
 	fs.Parse(os.Args[2:])
 	if *serverURL == "" {
 		fmt.Fprintln(os.Stderr, "错误: --server 必填")
@@ -150,7 +177,7 @@ func installCmd() {
 	opts := installer.Options{
 		ServerURL: *serverURL, EnrollToken: *enrollToken,
 		BinPath: *binPath, StatePath: *statePath, InstallCron: *installCron,
-		Force: *force,
+		Force: *force, TLSCA: *tlsCA, TLSCert: *tlsCert, TLSKey: *tlsKey,
 	}
 	if err := installer.Install(opts); err != nil {
 		log.Fatalf("安装失败: %v", err)

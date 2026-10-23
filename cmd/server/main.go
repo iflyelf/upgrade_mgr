@@ -60,15 +60,35 @@ func main() {
 	root = middleware.LimitBody(1<<20, "POST /api/artifacts")(root)
 	root = middleware.AccessLog(root)
 
+	// 可选 HTTPS / 双向 TLS：未配置证书时保持原有 HTTP 行为。
+	tlsCfg, err := c.Server.ServerTLSConfig()
+	if err != nil {
+		log.Fatalf("TLS 配置错误: %v", err)
+	}
+
 	addr := fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: root,
 		// 不设置全局 WriteTimeout，避免打断 Agent 长轮询；读超时保留。
 		ReadHeaderTimeout: 15 * time.Second,
+		TLSConfig:         tlsCfg,
 	}
 
 	go func() {
+		if tlsCfg != nil {
+			scheme := "https"
+			mode := "单向 TLS"
+			if c.Server.TLSClientAuth == "require" {
+				mode = "双向 TLS（要求 Agent 客户端证书）"
+			}
+			log.Printf("🚀 upgrade-mgr %s 监听 %s://%s（%s）", version, scheme, addr, mode)
+			// 证书已在 tlsCfg 中，无需再次传文件路径。
+			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("服务启动失败: %v", err)
+			}
+			return
+		}
 		log.Printf("🚀 upgrade-mgr %s 监听 http://%s", version, addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("服务启动失败: %v", err)
@@ -130,6 +150,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, handler.SyncHosts(sc)))
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
+	mux.HandleFunc("POST /api/hosts/{id}/tunnel-test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostTunnelTest(sc))))
 	// Agent 自升级：管理员触发 + 查看最近状态；自动升级由 agent.auto_update 设置控制。
 	mux.HandleFunc("POST /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdate(sc))))
 	mux.HandleFunc("GET /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdateStatus(sc))))

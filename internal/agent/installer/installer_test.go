@@ -9,7 +9,7 @@ import (
 
 func TestWriteInitialStateWritesServerAndToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	if err := writeInitialState(path, "https://mgr.example.com", "tok-123", false); err != nil {
+	if err := writeInitialState(Options{StatePath: path, ServerURL: "https://mgr.example.com", EnrollToken: "tok-123", Force: false}); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
 	}
 
@@ -44,7 +44,7 @@ func TestWriteInitialStateOverwritesEmptyFile(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeInitialState(path, "https://mgr.example.com", "tok-456", false); err != nil {
+	if err := writeInitialState(Options{StatePath: path, ServerURL: "https://mgr.example.com", EnrollToken: "tok-456", Force: false}); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
 	}
 
@@ -65,7 +65,7 @@ func TestWriteInitialStateKeepsRegisteredCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeInitialState(path, "https://new.example.com", "new-token", false); err != nil {
+	if err := writeInitialState(Options{StatePath: path, ServerURL: "https://new.example.com", EnrollToken: "new-token", Force: false}); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestWriteInitialStateForceOverwritesCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeInitialState(path, "https://new.example.com", "new-token", true); err != nil {
+	if err := writeInitialState(Options{StatePath: path, ServerURL: "https://new.example.com", EnrollToken: "new-token", Force: true}); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
 	}
 

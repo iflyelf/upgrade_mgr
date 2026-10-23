@@ -33,6 +33,7 @@
     hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
     agentTargetVersion: '', agentAutoUpdate: false,
     guideOpen: null, enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
+    tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
     taskDetailOpenLogs: {},
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
@@ -753,6 +754,7 @@
             class: 'btn ghost small', onclick: function () {
               state.editingHost = Object.assign({}, x);
               state.hostErr = '';
+              state.tunnelTest = null;
               render();
             }
           }, ['编辑']),
@@ -909,6 +911,34 @@
     return strip(a) === strip(b);
   }
 
+  // tunnelTestBlock 渲染隧道拨测结果：逐步展示 DNS / TCP / TLS / HTTP 阶段。
+  function tunnelTestBlock() {
+    var t = state.tunnelTest;
+    if (!t) return null;
+    if (t.err) return h('div', { class: 'err field', role: 'alert' }, ['拨测失败: ' + t.err]);
+    if (!t.result) return h('div', { class: 'hint' }, ['正在拨测 ' + (t.target || '已保存地址') + '…']);
+    var r = t.result;
+    return h('div', { class: 'card' }, [
+      h('h3', {}, [r.ok ? '✅ 隧道拨测通过' : '❌ 隧道拨测未通过']),
+      hint('拨测地址：' + (r.url || t.target) + ' · 耗时 ' + (r.latency_ms || 0) + ' ms'),
+      h('div', { class: 'table-wrap' }, [h('table', {}, [
+        h('thead', {}, [h('tr', {}, [h('th', {}, ['阶段']), h('th', {}, ['结果']), h('th', {}, ['耗时']), h('th', {}, ['详情'])])]),
+        h('tbody', {}, (r.stages || []).map(function (st) {
+          return h('tr', {}, [
+            h('td', {}, [st.name]),
+            h('td', {}, [st.ok ? '✅' : '❌']),
+            h('td', {}, [st.latency_ms + ' ms']),
+            h('td', {}, [st.detail || '-'])
+          ]);
+        }))
+      ])]),
+      r.tls ? hint('TLS 证书：' + (r.tls.subject || '-') + '；签发者 ' + (r.tls.issuer || '-') +
+        '；到期 ' + (r.tls.not_after || '-') + (r.tls.verified ? '' : '；校验失败：' + (r.tls.verify_error || ''))) : null,
+      r.hint ? hint('💡 ' + r.hint) : null,
+      hint('说明：这是从平台侧发起的拨测，只能证明平台所在环境能到达该地址；目标主机是否能通过隧道访问仍需看 Agent 心跳（约 30 秒内自动切换）。')
+    ]);
+  }
+
   // hostForm 编辑主机可人工维护字段；IP/OS/ARCH/Agent 状态保持 Agent 上报值。
   function hostForm() {
     var host = state.editingHost;
@@ -928,6 +958,26 @@
       value: host.server_tunnel_url || '',
       placeholder: '如 10.8.0.5、10.8.0.5:8090 或 https://tunnel.example.com'
     }, []);
+
+    // testTunnel 从平台侧拨测候选隧道地址；结果保留在 state.tunnelTest，
+    // 便于在保存前确认端口/证书是否正常。
+    var testTunnel = function () {
+      var target = (serverTunnelEl.value || '').trim();
+      state.tunnelTest = { target: target, loading: true, result: null, err: '' };
+      render();
+      api('/api/hosts/' + host.id + '/tunnel-test', {
+        method: 'POST',
+        body: JSON.stringify({ target: target })
+      })
+        .then(function (d) {
+          state.tunnelTest = { target: target, loading: false, result: d.result, err: '' };
+          render();
+        })
+        .catch(function (e) {
+          state.tunnelTest = { target: target, loading: false, result: null, err: e.message };
+          render();
+        });
+    };
 
     var save = function () {
       var payload = {
@@ -980,8 +1030,11 @@
       ]),
       (host.exit_ip ? hint('Agent 上报的出口 IP：' + host.exit_ip + '（多网卡时用于确认实际出口网卡）') : null),
       (host.agent_server_url ? hint('Agent 当前连接地址：' + host.agent_server_url) : null),
+      tunnelTestBlock(),
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn', onclick: save }, ['保存']),
+        h('button', { class: 'btn ghost', onclick: testTunnel, disabled: (state.tunnelTest && state.tunnelTest.loading) ? 'disabled' : null },
+          [(state.tunnelTest && state.tunnelTest.loading) ? '拨测中…' : '测试隧道连通性']),
         h('button', {
           class: 'btn ghost', onclick: function () {
             state.editingHost = null;
