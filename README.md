@@ -1959,6 +1959,12 @@ MIT © iflyelf
 - 前端主机编辑改为「连接地址覆盖 (server_url_override)」，提示中明确隧道由隧道软件负责；
   列表标签改为「连接覆盖 / 已连接到覆盖地址」。
 
+### 2026-10-23 任务创建者展示与 owner 策略完善
+
+- 任务列表返回 `created_by`，前端新增「创建者」列并标注「（我）」，便于判断 owner 限制。
+- 移除 `task.Service` 上无用的空 `SetActor`（actor 统一从请求 context 读取）。
+- owner 策略相关单测覆盖：创建者/他人/管理员/superadmin/匿名/策略关闭。
+
 ### 2026-10-23 任务 owner 校验、主机分组下拉与 FlyIAM 独立页面
 
 - **任务操作 owner 校验**：新增设置 `agent.task_owner_only`（默认 false，页面可改）。
