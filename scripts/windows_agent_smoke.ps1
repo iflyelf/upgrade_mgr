@@ -1,4 +1,4 @@
-# Windows Agent 冒烟脚本（PowerShell 2.0 兼容，Server 2008 R2 起可用）
+﻿# Windows Agent 冒烟脚本（PowerShell 2.0 兼容，Server 2008 R2 起可用）
 #
 # 用途：CI 在真实 Windows 主机上验证 Agent 可启动、状态读取与诊断输出。
 # 用法：
