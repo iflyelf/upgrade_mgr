@@ -12,6 +12,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/middleware"
+	"github.com/iflyelf/upgrade_mgr/internal/setting"
 )
 
 func TestBuildInstallCommandRemovesStaleBinary(t *testing.T) {
@@ -195,6 +196,7 @@ func TestAgentHeartbeatUpdatesSignatureModes(t *testing.T) {
 	db, sc := setupHostDB(t)
 	sc.Config = config.Default()
 	sc.AgentGW = agentgw.New(db)
+	sc.Settings = setting.NewService(db, sc.Config)
 
 	agentID := fmt.Sprintf("hb-sig-mode-%d", time.Now().UnixNano())
 	token := "hb-sig-token"
