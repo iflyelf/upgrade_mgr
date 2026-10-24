@@ -1,4 +1,4 @@
-# 构建 Windows Agent MSI（WiX Toolset v3）
+﻿# 构建 Windows Agent MSI（WiX Toolset v3）
 #
 # 依赖：candle.exe / light.exe（CI: choco install wixtoolset -y）
 # 用法：

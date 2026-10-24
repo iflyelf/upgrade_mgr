@@ -1,4 +1,4 @@
-# Windows 自托管 Runner 初始化（Server 2008 R2 / Windows 10+ / arm64）
+﻿# Windows 自托管 Runner 初始化（Server 2008 R2 / Windows 10+ / arm64）
 #
 # 用途：在真实 Windows 机器上准备 Go 1.20 + GitHub Actions Runner，
 # 供 .github/workflows/windows-e2e.yml 的 2008 R2 / arm64 真机回归使用。
