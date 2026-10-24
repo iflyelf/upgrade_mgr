@@ -2390,6 +2390,19 @@ MIT © iflyelf
 - `/api/external/binary/{name}?local=1`：只读本地/缓存，绝不触发上游下载。
 - 新增单测：离线上传/优先下载/删除、HTML 伪脚本拒绝、默认重定向域名、代理回退。
 
+### 2026-10-24 修复 Windows 命令任务下载 install.ps1 超时 / 双扩展名
+
+- 命令示例不再依赖 `WebClient.DownloadFile`（2008 R2 默认 100 秒超时）：
+  - 先请求平台 `?local=1`（20 秒，只读本地/缓存）；
+  - 未命中再请求平台代下载（180 秒，平台自身上限 10 分钟）；
+  - 仅当本机支持 TLS 1.2 时才回退 `proxy.xiaonuo.live`；
+  - `UPGRADE_AGENT_SERVER_URL` 为空时用控制台页面地址兜底；
+  - 下载后校验非 HTML，并确保 UTF-8 BOM。
+- 子进程 `powershell.exe -File` 执行并透传退出码，避免下载/解析失败仍标记成功。
+- **Agent 修复**：`prepareScriptPath` 对已是 `.ps1` 的文件原地规范化，不再生成
+  `run-command-xxx.ps1.ps1`；无扩展名的下载制品仍生成 `.ps1` 副本。
+- 新增 Windows E2E 断言：`.ps1` 原地处理、无扩展名生成副本。
+
 ### 2026-10-24 修复 2008 R2 执行 install.ps1 语法错误（UnexpectedToken）
 
 - **根因**：PowerShell 2.0 对**无 BOM** 的 `.ps1` 按系统 ANSI（简体中文为 GBK）解码。

@@ -114,11 +114,18 @@ func prepareScriptPath(scriptPath string) (string, func(), error) {
 	normalized := bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
 	normalized = bytes.ReplaceAll(normalized, []byte("\n"), []byte("\r\n"))
 
-	dstPath := scriptPath + ".ps1"
+	// 已经是 .ps1/.psm1 时原地规范化，避免生成 xxx.ps1.ps1；
+	// 无扩展名/其它扩展名的下载制品才另存为 .ps1 副本。
+	dstPath := scriptPath
+	cleanup := func() {}
+	if ext != ".ps1" && ext != ".psm1" {
+		dstPath = scriptPath + ".ps1"
+		cleanup = func() { _ = os.Remove(dstPath) }
+	}
 	if err := os.WriteFile(dstPath, append([]byte{0xEF, 0xBB, 0xBF}, normalized...), 0600); err != nil {
 		return "", nil, fmt.Errorf("准备 PowerShell 脚本失败: %w", err)
 	}
-	return dstPath, func() { _ = os.Remove(dstPath) }, nil
+	return dstPath, cleanup, nil
 }
 
 // commandScriptExt 一次性命令脚本的扩展名，随解释器而定。
