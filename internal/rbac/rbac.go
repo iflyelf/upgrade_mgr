@@ -259,3 +259,116 @@ func containsRole(roles []string, want string) bool {
 	}
 	return false
 }
+
+// Delete 删除用户（管理员）。
+//
+// 约束：
+//   - 不能删除当前登录账号；
+//   - 非 superadmin 只能删除本租户、且不能删除 admin/superadmin 账号；
+//   - 清理团队成员关系与扩展字段值，审计日志保留（仅记录 username）。
+func (s *Service) Delete(ctx context.Context, actor *auth.User, username string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("username 必填")
+	}
+	if actor != nil && actor.Username == username {
+		return fmt.Errorf("不能删除当前登录账号")
+	}
+	var tenantID int64
+	var roles pq.StringArray
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(tenant_id,1), COALESCE(roles, ARRAY['user']::text[])
+		   FROM local_users WHERE username=$1`, username).Scan(&tenantID, &roles)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("用户不存在")
+	}
+	if err != nil {
+		return err
+	}
+	if actor == nil || !actor.IsSuperAdmin() {
+		tid := int64(-1)
+		if actor != nil {
+			tid = actor.TenantID
+		}
+		if tenantID != tid {
+			return fmt.Errorf("无权删除其他租户的用户")
+		}
+		for _, r := range roles {
+			if r == auth.RoleAdmin || r == auth.RoleSuperAdmin {
+				return fmt.Errorf("仅 superadmin 可删除管理员账号")
+			}
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM team_members WHERE user_id=$1`, username); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_field_values WHERE user_id=$1`, username); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM local_users WHERE username=$1`, username)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("用户不存在")
+	}
+	return tx.Commit()
+}
+
+// ResetPassword 管理员重置指定用户密码（无需旧密码）。
+//
+// 非 superadmin 仅能重置本租户普通用户；不能重置其他管理员密码。
+// updated_at 会更新，从而让该用户旧会话立即失效。
+func (s *Service) ResetPassword(ctx context.Context, actor *auth.User, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("username 必填")
+	}
+	if err := auth.ValidatePassword("", password); err != nil {
+		return err
+	}
+	var tenantID int64
+	var roles pq.StringArray
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(tenant_id,1), COALESCE(roles, ARRAY['user']::text[])
+		   FROM local_users WHERE username=$1`, username).Scan(&tenantID, &roles)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("用户不存在")
+	}
+	if err != nil {
+		return err
+	}
+	if actor == nil || !actor.IsSuperAdmin() {
+		tid := int64(-1)
+		if actor != nil {
+			tid = actor.TenantID
+		}
+		if tenantID != tid {
+			return fmt.Errorf("无权重置其他租户用户的密码")
+		}
+		for _, r := range roles {
+			if r == auth.RoleAdmin || r == auth.RoleSuperAdmin {
+				return fmt.Errorf("仅 superadmin 可重置管理员密码")
+			}
+		}
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE local_users SET password_hash=$2, updated_at=NOW() WHERE username=$1`,
+		username, string(hash))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("用户不存在")
+	}
+	return nil
+}

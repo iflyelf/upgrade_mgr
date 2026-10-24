@@ -36,6 +36,9 @@ func UserList(s *svc.ServiceContext) http.HandlerFunc {
 }
 
 // UserCreate 创建用户。
+//
+// 密码留空时生成一次性随机密码并在响应中返回（仅本次可见），
+// 避免为了"快速加人"设置弱口令或默认密码。
 func UserCreate(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req rbac.CreateRequest
@@ -43,13 +46,22 @@ func UserCreate(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
+		initialPassword := ""
+		if req.Password == "" {
+			initialPassword, _ = generatePassword(16)
+			req.Password = initialPassword
+		}
 		id, err := s.RBAC.Create(r.Context(), actorOf(r), req)
 		auditOp(s, r, audit.ActionUserCreate, "user", req.Username, req.Username, err)
 		if err != nil {
 			httpx.FailErr(w, http.StatusBadRequest, err)
 			return
 		}
-		httpx.OK(w, map[string]any{"id": id})
+		resp := map[string]any{"id": id}
+		if initialPassword != "" {
+			resp["initial_password"] = initialPassword
+		}
+		httpx.OK(w, resp)
 	}
 }
 
@@ -158,5 +170,40 @@ func TenantCreate(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		httpx.OK(w, map[string]any{"id": id})
+	}
+}
+
+// UserDelete 删除用户（管理员）。
+func UserDelete(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := r.PathValue("username")
+		err := s.RBAC.Delete(r.Context(), actorOf(r), username)
+		auditOp(s, r, audit.ActionUserDelete, "user", username, username, err)
+		if err != nil {
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		httpx.OK(w, nil)
+	}
+}
+
+// UserResetPassword 管理员重置用户密码。
+func UserResetPassword(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := r.PathValue("username")
+		var req struct {
+			Password string `json:"password"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		err := s.RBAC.ResetPassword(r.Context(), actorOf(r), username, req.Password)
+		auditOp(s, r, audit.ActionUserUpdate, "user", username, "reset-password", err)
+		if err != nil {
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		httpx.OK(w, nil)
 	}
 }

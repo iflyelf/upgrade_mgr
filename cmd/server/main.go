@@ -57,9 +57,17 @@ func main() {
 	mux := http.NewServeMux()
 	limiters := registerRoutes(mux, sc)
 
-	// 安全响应头（全局）→ 请求体限制（JSON 默认 1MB，制品上传除外）→ 访问日志
-	var root http.Handler = middleware.SecurityHeaders(mux)
+	// 访问日志 → 安全响应头 → 请求体限制 → Redis 缓存 → 业务路由。
+	// 缓存放在安全头内侧：命中缓存时仍会经过 SecurityHeaders / LimitBody，
+	// 不会出现「命中 Redis 就缺少安全头」的问题。
+	var root http.Handler = mux
+	// 始终挂载：Redis 未启用/不可用时中间件原样透传，设置页启用后无需重启。
+	root = middleware.Cache(sc.GetCache)(root)
+	if c := sc.GetCache(); c != nil && c.Enabled() {
+		log.Printf("✅ Redis HTTP 缓存已挂载（TTL %s，前缀 %s）", c.TTL(), c.Status().Prefix)
+	}
 	root = middleware.LimitBody(1<<20, "POST /api/artifacts")(root)
+	root = middleware.SecurityHeaders(root)
 	root = middleware.AccessLog(root)
 
 	// 可选 HTTPS / 双向 TLS：未配置证书时保持原有 HTTP 行为。
@@ -229,10 +237,16 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/audit-logs/export", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AuditLogExport(sc))))
 	mux.HandleFunc("GET /api/quickstart", middleware.RequireAuth(auth, handler.Quickstart()))
 	mux.HandleFunc("GET /api/my/permissions", middleware.RequireAuth(auth, handler.MyPermissions(sc)))
+	// Redis 缓存：状态/自检/清理（管理员）
+	mux.HandleFunc("GET /api/cache/status", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CacheStatus(sc))))
+	mux.HandleFunc("POST /api/cache/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CacheTest(sc))))
+	mux.HandleFunc("POST /api/cache/flush", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CacheFlush(sc))))
 	mux.HandleFunc("GET /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserList(sc))))
 	mux.HandleFunc("POST /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCreate(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/tenant-roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetTenantRoles(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/disabled", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetDisabled(sc))))
+	mux.HandleFunc("DELETE /api/users/{username}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserDelete(sc))))
+	mux.HandleFunc("POST /api/users/{username}/reset-password", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserResetPassword(sc))))
 	// 字段自定义（用户/主机扩展字段定义）
 	mux.HandleFunc("GET /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListFieldDefs(sc))))
 	mux.HandleFunc("POST /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CreateFieldDef(sc))))

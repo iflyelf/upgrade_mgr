@@ -153,14 +153,29 @@ type CasdoorConfig struct {
 	RedirectURI string `yaml:"redirect_uri"`
 }
 
-// RedisConfig 可选：缓存。
+// RedisConfig 可选：缓存（单点 / 集群 / 哨兵）。
+//
+// Mode：
+//   - single（默认）：Host:Port；
+//   - cluster：Addrs 或 Hosts（逗号分隔）为种子节点，由客户端自动发现；
+//   - sentinel：Addrs/Hosts 为哨兵地址，MasterName 必填。
+//
+// 所有模式共享 Password / DB / TTL / Prefix。Redis 不可用时自动降级为不缓存，
+// 不影响主流程（与 consul_mgr 的 cache 包设计一致）。
 type RedisConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Password string `yaml:"password"`
-	DB       int    `yaml:"db"`
-	TTL      int    `yaml:"ttl"`
+	Enabled bool   `yaml:"enabled"`
+	Mode    string `yaml:"mode"` // single / cluster / sentinel
+	Host    string `yaml:"host"`
+	Port    int    `yaml:"port"`
+	// Hosts 多节点地址（host:port 或 host，逗号分隔）；为空时由 Host/Port 推导。
+	Hosts      []string `yaml:"hosts"`
+	MasterName string   `yaml:"master_name"`
+	Password   string   `yaml:"password"`
+	DB         int      `yaml:"db"`
+	// TTL 只读列表缓存秒数（默认 10，上限 30）。
+	TTL int `yaml:"ttl"`
+	// Prefix 键前缀，默认 upgrade_mgr:。
+	Prefix string `yaml:"prefix"`
 }
 
 // ArtifactConfig 制品本地磁盘存储。
@@ -231,9 +246,12 @@ func Default() *Config {
 			Host: "localhost", Port: 5432, User: "postgres", DBName: "upgrade_mgr",
 			SSLMode: "disable", MaxOpenConns: 50, MaxIdleConns: 10, ConnMaxLifetime: 3600,
 		},
-		Auth:     AuthConfig{Provider: "builtin", AdminUsername: "admin"},
-		Consul:   ConsulConfig{Timeout: 10, Concurrency: 16, CleanupMissing: true},
-		Redis:    RedisConfig{Enabled: false, Host: "localhost", Port: 6379, TTL: 300},
+		Auth:   AuthConfig{Provider: "builtin", AdminUsername: "admin"},
+		Consul: ConsulConfig{Timeout: 10, Concurrency: 16, CleanupMissing: true},
+		Redis: RedisConfig{
+			Enabled: false, Mode: "single", Host: "localhost", Port: 6379,
+			TTL: 10, Prefix: "upgrade_mgr:",
+		},
 		Artifact: ArtifactConfig{Dir: "/var/lib/upgrade_mgr/artifacts"},
 		Agent: AgentConfig{
 			PollHold: 20, LeaseMax: "1h", ClockSkew: "5m",
@@ -345,9 +363,17 @@ func (c *Config) applyEnv() {
 	setStr(&c.Casdoor.ApplicationName, "CASDOOR_APPLICATION")
 
 	setBool(&c.Redis.Enabled, "REDIS_ENABLED")
+	setStr(&c.Redis.Mode, "REDIS_MODE")
 	setStr(&c.Redis.Host, "REDIS_HOST")
 	setInt(&c.Redis.Port, "REDIS_PORT")
+	setStr(&c.Redis.MasterName, "REDIS_MASTER_NAME")
+	setStr(&c.Redis.Prefix, "REDIS_PREFIX")
+	setInt(&c.Redis.DB, "REDIS_DB")
+	setInt(&c.Redis.TTL, "REDIS_CACHE_TTL")
 	setStr(&c.Redis.Password, "REDIS_PASSWORD")
+	if v := os.Getenv("REDIS_ADDRS"); v != "" {
+		c.Redis.Hosts = splitTrim(v)
+	}
 
 	setStr(&c.Artifact.Dir, "ARTIFACT_DIR")
 	setStr(&c.Artifact.StorageType, "ARTIFACT_STORAGE_TYPE")

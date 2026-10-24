@@ -143,6 +143,7 @@ const (
 	ActionSettingUpdate   = "setting.update"
 	ActionUserCreate      = "user.create"
 	ActionUserUpdate      = "user.update"
+	ActionUserDelete      = "user.delete"
 	ActionTenantCreate    = "tenant.create"
 	ActionLogin           = "auth.login"
 	ActionLogout          = "auth.logout"

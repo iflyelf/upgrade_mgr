@@ -78,13 +78,17 @@ casdoor:                      # 可选：与 consul_mgr 共用 FlyIAM 实现 SSO
   application: flyiam
   redirect_uri: ""            # 留空按 server.external_url + /api/auth/callback 推导
 
-redis:                        # 可选：缓存
-  enabled: false
-  host: localhost
-  port: 6379
-  password: ""
-  db: 0
-  ttl: 300
+redis:                        # 可选：页面响应缓存（只读 API），不可用时自动降级
+  enabled: false              # 也可在「设置 → Redis 缓存」启用（env REDIS_ENABLED）
+  mode: single                # single / cluster / sentinel（env REDIS_MODE）
+  host: localhost             # 单点地址（env REDIS_HOST）；可写成 host:port
+  port: 6379                  # env REDIS_PORT
+  hosts: []                   # 多地址：集群种子节点 / 哨兵地址（env REDIS_ADDRS，逗号分隔）
+  master_name: ""             # 哨兵模式必填（env REDIS_MASTER_NAME）
+  password: ""                # env REDIS_PASSWORD（页面设置保存后加密占位显示）
+  db: 0                       # env REDIS_DB；集群固定 0；超出 servers 范围自动回退并提示
+  ttl: 10                     # 只读列表缓存秒数，上限 30（env REDIS_CACHE_TTL）
+  prefix: "upgrade_mgr:"      # 键前缀，与同实例其它系统隔离（env REDIS_PREFIX）
 
 artifact:
   dir: /var/lib/upgrade_mgr/artifacts

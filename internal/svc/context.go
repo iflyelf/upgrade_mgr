@@ -29,6 +29,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/metrics"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/cache"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/consul"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbinprobe"
 	"github.com/iflyelf/upgrade_mgr/internal/rbac"
@@ -53,6 +54,9 @@ type ServiceContext struct {
 	Maintainer *maintenance.Maintainer
 	RBAC       *rbac.Service
 	Audit      *audit.Logger // 审计日志
+	// cacheRef 可选 Redis 缓存（单点/集群/哨兵）；未启用时所有读写自动降级。
+	// 用原子指针保存，设置页保存后热替换不会与请求读取产生数据竞争。
+	cacheRef atomic.Pointer[cache.Cache]
 
 	// consulRef 原子指针：页面修改 Consul 配置后可热重载；可能为 nil（未启用/不可用）。
 	consulRef atomic.Pointer[consul.Client]
@@ -117,6 +121,8 @@ func New(c *config.Config) *ServiceContext {
 		RBAC:       rbac.NewService(db),
 		Audit:      audit.NewLogger(db), // 审计日志
 	}
+	// 可选：Redis（不可用仅降级，不阻塞启动）
+	svc.cacheRef.Store(buildCache(&c.Redis))
 
 	// 认证提供方（按配置选择，可切换）
 	svc.Auth = buildAuth(c, db)
@@ -125,6 +131,38 @@ func New(c *config.Config) *ServiceContext {
 	svc.ReloadConsul()
 
 	return svc
+}
+
+// buildCache 按配置创建 Redis 缓存；失败仅禁用缓存。
+func buildCache(c *config.RedisConfig) *cache.Cache {
+	ttl := time.Duration(c.TTL) * time.Second
+	if ttl <= 0 {
+		ttl = 10 * time.Second
+	}
+	return cache.New(cache.Options{
+		Enabled: c.Enabled, Mode: c.Mode, Host: c.Host, Port: c.Port,
+		Addrs: c.Hosts, MasterName: c.MasterName, Password: c.Password,
+		DB: c.DB, TTL: ttl, Prefix: c.Prefix,
+	})
+}
+
+// ReloadCache 依当前配置重建 Redis 连接（设置页保存后调用）。
+func (s *ServiceContext) ReloadCache() {
+	if s.Settings == nil {
+		return
+	}
+	snap := s.Settings.Snapshot()
+	if old := s.cacheRef.Swap(buildCache(&snap.Redis)); old != nil {
+		old.Close()
+	}
+}
+
+// GetCache 返回当前缓存实例（可能为 nil，调用方需判空）。
+func (s *ServiceContext) GetCache() *cache.Cache {
+	if s == nil {
+		return nil
+	}
+	return s.cacheRef.Load()
 }
 
 // Consul 返回当前 Consul 客户端（可能为 nil）。
