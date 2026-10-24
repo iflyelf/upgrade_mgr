@@ -53,10 +53,10 @@ jobs:
       GOTOOLCHAIN: local
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: 安装 Go 1.20
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7.0.0
         with:
           go-version: '1.20.14'
 
@@ -92,7 +92,7 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File scripts/build_windows_msi.ps1 -AgentExe dist\upgrade-agent.exe -Version 0.1.0
 
       - name: 上传 Agent 产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: upgrade-agent-windows-e2e
           path: |
@@ -109,7 +109,7 @@ jobs:
       GOPROXY: https://goproxy.cn,direct
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: 校验 Go 1.20
         shell: powershell
@@ -151,7 +151,7 @@ jobs:
       GOPROXY: https://goproxy.cn,direct
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: 校验 Go 1.20
         shell: powershell
