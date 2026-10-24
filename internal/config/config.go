@@ -249,8 +249,8 @@ type ConsulMgrConfig struct {
 	ServiceToken string `yaml:"service_token"`
 	// Timeout 请求超时秒数（默认 30）；主机多时适当放大。
 	Timeout int `yaml:"timeout"`
-	// GroupID 只同步指定服务组；0 表示全部启用的组。
-	GroupID int64 `yaml:"group_id"`
+	// 服务组不在此配置：同步时由页面下拉选择（候选来自 consul_mgr 的
+	// /api/service/groups），避免配置写死后与页面选择产生歧义。
 }
 
 // LogConfig 日志。
@@ -420,11 +420,6 @@ func (c *Config) applyEnv() {
 	setStr(&c.ConsulMgr.Endpoint, "CONSUL_MGR_ENDPOINT")
 	setStr(&c.ConsulMgr.ServiceToken, "CONSUL_MGR_SERVICE_TOKEN")
 	setInt(&c.ConsulMgr.Timeout, "CONSUL_MGR_TIMEOUT")
-	if v := strings.TrimSpace(os.Getenv("CONSUL_MGR_GROUP_ID")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			c.ConsulMgr.GroupID = n
-		}
-	}
 	setStr(&c.Log.Level, "LOG_LEVEL")
 
 	if c.Server.Host == "" {

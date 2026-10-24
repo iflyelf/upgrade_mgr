@@ -19,7 +19,8 @@ import (
 // 与 /api/hosts/sync（直连 Consul）并存：两者来源不同、锁不同，可分别触发。
 // consul_mgr 覆盖多个服务组（多套 Consul），适合统一纳管的环境。
 //
-// group_id 查询参数可临时只同步某个服务组；缺省用设置里的 consul_mgr.group_id。
+// group_id 查询参数指定只同步某个服务组；缺省（或传 0）同步全部启用的服务组。
+// 服务组由页面下拉选择（GET /api/consul-mgr/groups），不在配置文件里写死。
 func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cli := s.ConsulMgr()
@@ -29,7 +30,8 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 
-		groupID := s.ConsulMgrGroupID()
+		// 0 表示全部服务组，与 consul_mgr 导出接口的语义一致。
+		var groupID int64
 		if v := strings.TrimSpace(r.URL.Query().Get("group_id")); v != "" {
 			n, err := strconv.ParseInt(v, 10, 64)
 			if err != nil || n < 0 {
@@ -64,6 +66,34 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
+// ListConsulMgrGroups 列出 consul_mgr 的服务组（管理员）。
+//
+// 用途：主机页的「同步 consul_mgr」支持下拉选择服务组，不必在配置文件里写死
+// group_id。同时回传设置里的默认值，页面据此预选。
+//
+// 未配置地址/令牌时返回 503，页面提示先去设置页填写。
+func ListConsulMgrGroups(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cli := s.ConsulMgr()
+		if cli == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable,
+				"未配置 consul_mgr 地址与服务令牌，请先到「设置 → consul_mgr 对接」填写")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+
+		groups, err := cli.FetchGroups(ctx)
+		if err != nil {
+			httpx.FailErrf(w, http.StatusBadGateway, "读取 consul_mgr 服务组失败", err)
+			return
+		}
+		httpx.OK(w, map[string]any{
+			"groups": groups, "endpoint": cli.Endpoint(),
+		})
+	}
+}
+
 // TestConsulMgr 测试 consul_mgr 连通性与令牌（管理员）。
 //
 // 不返回主机明细，只回报可达性、主机/服务组数量与耗时，便于配置时自检。
@@ -79,7 +109,9 @@ func TestConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 		defer cancel()
 
 		start := time.Now()
-		res, err := cli.FetchHosts(ctx, s.ConsulMgrGroupID())
+		// 连通性自检覆盖全部服务组：用户此时还没选组，
+		// 而「哪个组连不上」正是需要在这里暴露的信息。
+		res, err := cli.FetchHosts(ctx, 0)
 		elapsed := time.Since(start).Milliseconds()
 		if err != nil {
 			httpx.OK(w, map[string]any{

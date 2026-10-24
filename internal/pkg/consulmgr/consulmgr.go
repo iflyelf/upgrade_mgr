@@ -115,15 +115,44 @@ func (c *Client) FetchHosts(ctx context.Context, groupID int64) (*ExportResult, 
 	return &out, nil
 }
 
-// Ping 校验地址可达与令牌有效（拉取清单的轻量版本：只看是否报错）。
+// Group consul_mgr 中一个可同步的服务组。
 //
-// consul_mgr 没有专门的服务间健康检查接口，这里复用主机导出：
-// 令牌错误会返回 401，未配置令牌返回 503，均能明确区分。
+// 不含 consul_address / consul_token：那是 consul_mgr 侧的凭据，
+// 导出接口不返回，本结构也不保留。
+type Group struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Code       string `json:"code"`
+	Datacenter string `json:"datacenter"`
+}
+
+// FetchGroups 拉取可同步的服务组列表（供页面下拉选择）。
+//
+// 只返回 consul_mgr 侧「启用且已配置 Consul 地址」的组，
+// 与 FetchHosts 的筛选口径一致：能选到的组同步时一定会被处理。
+func (c *Client) FetchGroups(ctx context.Context) ([]Group, error) {
+	if c == nil {
+		return nil, fmt.Errorf("consul_mgr 未配置")
+	}
+	var out struct {
+		Groups []Group `json:"groups"`
+	}
+	if err := c.getJSON(ctx, c.endpoint+"/api/service/groups", &out); err != nil {
+		return nil, err
+	}
+	return out.Groups, nil
+}
+
+// Ping 校验地址可达与令牌有效。
+//
+// consul_mgr 没有专门的服务间健康检查接口，这里复用服务组列表：
+// 它只查一次数据库、不触碰 Consul，比拉取全量主机轻得多。
+// 令牌错误返回 401，未配置令牌返回 503，均能明确区分。
 func (c *Client) Ping(ctx context.Context) error {
 	if c == nil {
 		return fmt.Errorf("consul_mgr 未配置")
 	}
-	_, err := c.FetchHosts(ctx, 0)
+	_, err := c.FetchGroups(ctx)
 	return err
 }
 

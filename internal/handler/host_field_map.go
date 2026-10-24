@@ -150,7 +150,17 @@ func ScanHostFieldKeys(s *svc.ServiceContext) http.HandlerFunc {
 					"未配置 consul_mgr 地址与服务令牌，请先到「设置 → consul_mgr 对接」填写")
 				return
 			}
-			res, err := cli.FetchHosts(r.Context(), s.ConsulMgrGroupID())
+			// 扫描范围可按服务组收窄；缺省扫全部，便于一次看全所有键。
+			var groupID int64
+			if v := strings.TrimSpace(r.URL.Query().Get("group_id")); v != "" {
+				n, convErr := strconv.ParseInt(v, 10, 64)
+				if convErr != nil || n < 0 {
+					httpx.Fail(w, http.StatusBadRequest, "group_id 无效")
+					return
+				}
+				groupID = n
+			}
+			res, err := cli.FetchHosts(r.Context(), groupID)
 			if err != nil {
 				httpx.FailErrf(w, http.StatusBadGateway, "读取 consul_mgr 失败", err)
 				return
