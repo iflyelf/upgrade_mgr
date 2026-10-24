@@ -17,6 +17,10 @@
 - IP 段表达式解析：`10.1.255.24-26,10.1.255.38,10.1.255.0/24,10.1.26.5-10.1.26.7`（含排除、展开上限）
 - 直接 exec 命令执行器（无 shell，防注入）；HMAC 指令签名；sd_notify 僵死检测（供 Agent 保活）
 - 三主题（🌞暖沙米/🌊冷蓝/🌙暗黑）+ Mac 圆角 + H5 自适应，前端 `go:embed` 内嵌单二进制
+- **顶栏菜单布局**（对齐 consul_mgr）：一级菜单 + 下拉（人员组织/运维/帮助），
+  窄屏自动切换为横向页签；「接入主机示例」收敛到「帮助」菜单
+- **Redis 页面缓存**：支持单点 / 集群 / 哨兵，页面可配置、热加载、失败自动降级；
+  只读 API 命中缓存返回 `X-Cache: HIT`，写操作自动失效
 - **Linux / Windows 双示例快速上手（中英双语）**：页面内可切换系统与语言，
   覆盖主机接入 → 组件 → 制品 → 任务；文案由 `web/quickstart.yaml` 统一生成
 
@@ -55,7 +59,7 @@
 
 ## 技术栈
 
-Go 1.26（`CGO_ENABLED=0`，交叉编译 linux/amd64、arm64、arm）· 标准库 net/http（Go 1.22 路由）· PostgreSQL(`lib/pq`) · hashicorp/consul/api · Prometheus · 前端原生内嵌（后续可替换为 Vue3 构建产物）
+Go 1.26（`CGO_ENABLED=0`，交叉编译 linux/amd64、arm64、arm）· 标准库 net/http（Go 1.22 路由）· PostgreSQL(`lib/pq`) · hashicorp/consul/api · redis/go-redis v9（单点/集群/哨兵）· Prometheus · 前端原生内嵌（后续可替换为 Vue3 构建产物）
 
 Agent 构建矩阵：Linux 普通构建（Go 1.26）、Linux legacy（Go 1.23，CentOS 6）、
 Windows（Go 1.20，Server 2008 R2 ~ Windows 11，amd64/arm64，依赖 `golang.org/x/sys`）。
@@ -454,6 +458,20 @@ artifact:
   dir: /data/artifacts
   storage_type: local
 
+# 可选：Redis 页面缓存（只读 API），也可在「设置 → Redis 缓存」启用并热加载
+# 不可用时自动降级为直连 PostgreSQL，不影响启动与业务
+redis:
+  enabled: true
+  mode: single              # single / cluster / sentinel
+  host: 127.0.0.1
+  port: 6379
+  hosts: []                 # cluster：种子节点；sentinel：哨兵地址（host:port）
+  master_name: ""           # mode=sentinel 必填
+  password: "请替换为实际密码"
+  db: 0                     # cluster 固定 0；超出服务器 databases 范围会自动回退并提示
+  ttl: 10                   # 只读列表缓存秒数（上限 30，写操作立即失效）
+  prefix: "upgrade_mgr:"    # 与同实例其它系统隔离
+
 agent:
   poll_hold: 20
   require_enroll_token: true
@@ -462,6 +480,14 @@ agent:
   # 自动升级旧 Agent（默认 false）；灰度比例 0-100，按 agent_id 稳定哈希
   auto_update: false
   auto_update_percent: 100
+
+# Redis 三种模式示例（环境变量写法见下）：
+#   单点：   mode=single   host=10.1.230.44 port=7000
+#   集群：   mode=cluster  hosts=["10.1.230.44:7000","10.1.230.45:7000","10.1.230.46:7000"]
+#   哨兵：   mode=sentinel hosts=["10.1.230.50:26379"] master_name=mymaster
+# 环境变量：REDIS_ENABLED / REDIS_MODE / REDIS_HOST / REDIS_PORT / REDIS_ADDRS /
+#          REDIS_MASTER_NAME / REDIS_PASSWORD / REDIS_DB / REDIS_CACHE_TTL / REDIS_PREFIX
+# 页面「设置 → Redis 缓存」可查看实际连接的 DB、TTL、前缀与最近错误，并测试/清空缓存。
 
 # 可选：FlyIAM 集成（人员对照、字段同步、组织树同步）
 # flyiam:
@@ -2857,3 +2883,32 @@ MIT © iflyelf
   不输出任何凭据；未注册时退出码为 2。
 - Agent 在切换连接地址时把原因/时间写入 state（`applied_override`、`last_switch_*`），
   跨进程可见，重启后仍能追溯。
+
+### 2026-10-24 顶栏菜单 + 人员组织对齐 + Redis 缓存
+
+- **页面布局对齐 consul_mgr**：顶栏改为一级菜单 + 下拉（主机/组件/制品/任务、
+  人员组织、运维、帮助），右侧主题/语言/用户头像菜单；窄屏自动切换为横向页签。
+- **「接入主机示例」移入「帮助」菜单**：主机页不再占用大块空间；帮助弹窗内可在
+  「快速上手」与「接入主机示例」间切换，支持移动端。
+- **表格与弹窗排版修复**：任务详情摘要改为自适应网格，状态/时间等短值不换行；
+  长文本列自动换行，操作列固定 nowrap；弹窗 z-index 高于顶栏，关闭按钮不再被遮挡。
+- **人员组织对齐 consul_mgr**：用户管理改为「搜索 + 新增用户 + 刷新」工具栏与
+  编辑弹窗，支持编辑显示名/角色/租户、重置密码、启用/禁用、删除；后端新增
+  `DELETE /api/users/{username}` 与 `POST /api/users/{username}/reset-password`。
+  创建用户密码留空时生成一次性随机密码（仅响应中返回一次）。
+- **Redis 缓存（单点 / 集群 / 哨兵）**：
+  - 新增 `internal/pkg/cache`：统一键前缀、默认 TTL、JSON 读写、按前缀清理；
+    Redis 不可用自动降级为直连数据库，不阻塞启动。
+  - 新增只读 API 缓存中间件：`/api/hosts`、`/api/tasks`、`/api/components`、
+    `/api/artifacts`、`/api/settings`、人员组织等命中缓存返回 `X-Cache: HIT`；
+    任意写请求自动失效缓存；键按会话隔离，不会串租户数据。
+  - 设置页新增「Redis 缓存」卡片：展示连接状态/模式/实际 DB/TTL/前缀/最近错误，
+    支持「测试连接」「清空缓存」；保存 `redis.*` 设置后即时重建连接，无需重启。
+  - 新增 `GET /api/cache/status`、`POST /api/cache/test`、`POST /api/cache/flush`。
+  - 配置项：`redis.enabled/mode/host/port/hosts/master_name/password/db/ttl/prefix`，
+    环境变量 `REDIS_ENABLED/REDIS_MODE/REDIS_HOST/REDIS_PORT/REDIS_ADDRS/
+    REDIS_MASTER_NAME/REDIS_PASSWORD/REDIS_DB/REDIS_CACHE_TTL/REDIS_PREFIX`。
+  - 兼容性：Redis Cluster 固定 DB 0；单点/哨兵若配置的 DB 超出 `databases`
+    范围，自动回退到最大可用 DB 并在状态/日志中提示；键前缀仍保证逻辑隔离。
+- **E2E**：Playwright 用例更新为顶栏下拉交互，并新增「帮助菜单」「人员组织」
+  「英文切换」断言，7/7 通过。

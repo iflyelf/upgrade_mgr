@@ -175,7 +175,9 @@ pre.code {
 
 /* 任务详情弹窗 */
 .modal-mask {
-  position: fixed; inset: 0; z-index: 100;
+  /* 必须高于 sticky 顶栏（z-index 200）与下拉菜单（300），否则弹窗标题栏
+     会被顶栏盖住，关闭按钮无法点击。 */
+  position: fixed; inset: 0; z-index: 500;
   background: rgba(0, 0, 0, .45);
   overflow: auto; padding: 24px 16px;
 }
@@ -273,3 +275,186 @@ th { position: relative; }
   .btn, .tab { min-height: 36px; }
   table { font-size: 12px; }
 }
+
+/* ============================================================
+   顶栏菜单布局（对齐 consul_mgr：一级菜单 + 下拉子菜单）
+   ============================================================ */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 20px;
+  min-height: 56px;
+  background: color-mix(in srgb, var(--card-bg) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  box-shadow: var(--shadow);
+}
+.brand {
+  display: flex; align-items: center; gap: 9px;
+  flex-shrink: 0; font-weight: 700; font-size: 17px;
+  color: var(--primary-color); white-space: nowrap;
+}
+.brand-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 9px;
+  background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+  font-size: 17px;
+}
+.main-nav {
+  display: flex; align-items: center; gap: 2px;
+  flex: 1; min-width: 0; overflow-x: auto;
+  scrollbar-width: none;
+}
+.main-nav::-webkit-scrollbar { display: none; }
+.nav-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 8px 14px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-color);
+  font-size: 14px; font-weight: 500; font-family: inherit;
+  cursor: pointer; white-space: nowrap;
+  transition: background .18s, color .18s;
+}
+.nav-link:hover { background: color-mix(in srgb, var(--primary-color) 11%, transparent); }
+.nav-link.active { background: var(--primary-color); color: #fffaf3; }
+.caret { font-size: 10px; opacity: .75; margin-left: 1px; }
+
+.nav-dropdown { position: relative; display: inline-flex; }
+.nav-menu {
+  display: none;
+  position: absolute; top: calc(100% + 8px); left: 0;
+  min-width: 200px; padding: 6px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  z-index: 300;
+}
+.nav-menu.right { left: auto; right: 0; }
+.nav-dropdown.open > .nav-menu { display: block; }
+.nav-menu-item {
+  display: flex; align-items: center; width: 100%;
+  padding: 9px 12px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-color);
+  font-size: 14px; font-family: inherit; text-align: left;
+  cursor: pointer; white-space: nowrap;
+}
+.nav-menu-item:hover { background: color-mix(in srgb, var(--primary-color) 12%, transparent); }
+.nav-menu-item.active { color: var(--primary-color); font-weight: 600; background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
+.nav-menu-item.danger { color: var(--err-color); }
+.nav-menu-head { padding: 8px 12px 10px; border-bottom: 1px solid var(--border-color); margin-bottom: 4px; }
+.nav-menu-head .user-name { font-weight: 600; }
+
+.topbar-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.icon-btn {
+  min-width: 38px; height: 34px; padding: 0 10px;
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm);
+  background: var(--panel-bg); color: var(--text-color);
+  font-size: 13px; cursor: pointer;
+}
+.icon-btn:hover { border-color: var(--primary-color); color: var(--primary-color); }
+.user-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 10px 4px 4px;
+  border: 1px solid var(--border-color); border-radius: 999px;
+  background: var(--panel-bg); color: var(--text-color);
+  font-family: inherit; font-size: 13px; cursor: pointer;
+}
+.user-chip:hover { border-color: var(--primary-color); }
+.avatar {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 999px;
+  background: var(--primary-color); color: #fffaf3;
+  font-size: 13px; font-weight: 600;
+}
+.user-chip .user-name { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-chip .caret { color: var(--text-secondary); }
+
+/* 移动端页签：桌面隐藏，窄屏显示 */
+.mobile-tabs { display: none; }
+
+/* 帮助弹窗里的快速上手卡片不需要重复外框 */
+.help-modal .card { box-shadow: none; border: 0; padding: 0; margin: 0; }
+.help-modal .card + .card { margin-top: 14px; }
+.help-modal { max-width: 1080px; width: min(1080px, calc(100vw - 24px)); max-height: 90vh; overflow: auto; }
+
+/* 任务详情摘要：标签与值不拆行，空间不足时整项换到下一行 */
+.detail-summary { gap: 8px; align-items: stretch; }
+.detail-stat {
+  display: inline-flex; align-items: center; gap: 6px;
+  /* 不裁剪内容：状态/时间等短值保持单行；超长内容由下方窄屏规则允许换行。 */
+  white-space: nowrap; max-width: 100%;
+}
+.detail-stat > .tag { white-space: nowrap; }
+.detail-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.detail-stat { min-width: 0; }
+
+/* 表格内状态/时间等短值不换行，避免列被压成两行 */
+td .tag, td .muted, .row-actions, td .log-details summary { white-space: nowrap; }
+/* 表头保持单行：'业务组'/'详细日志' 等中文表头不再折成两行 */
+.table-wrap table thead th { white-space: nowrap; }
+.table-wrap table td { vertical-align: middle; }
+.table-wrap table td .log-details { min-width: 120px; }
+
+/* 表单：宽屏两列，窄屏一列；说明文字与控件对齐 */
+.grid2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.field label { line-height: 1.5; }
+.field input:not([type="checkbox"]), .field select { min-height: 38px; }
+textarea { width: 100%; }
+
+@media (max-width: 900px) {
+  .topbar { padding: 8px 12px; gap: 10px; min-height: 52px; }
+  .main-nav { display: none; }
+  .brand-text { font-size: 15px; }
+  .mobile-tabs {
+    display: flex; flex-wrap: nowrap; gap: 6px;
+    margin: 0; padding: 8px 12px;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    position: sticky; top: 52px; z-index: 190;
+    background: color-mix(in srgb, var(--card-bg) 94%, transparent);
+    border-bottom: 1px solid var(--border-color);
+    backdrop-filter: blur(12px);
+  }
+  .mobile-tabs .tab { flex: 0 0 auto; min-height: 34px; display: inline-flex; align-items: center; }
+  .container { padding: 12px; }
+}
+@media (max-width: 640px) {
+  .topbar { padding: 8px 10px; }
+  .user-chip .user-name { display: none; }
+  .user-chip { padding: 3px 4px; border-radius: 999px; }
+  .theme-switcher { padding: 3px; }
+  .theme-btn { width: 26px; height: 26px; font-size: 14px; }
+  .detail-summary { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .detail-stat { white-space: normal; overflow-wrap: anywhere; }
+  .modal { padding: 12px; }
+  .help-modal { width: calc(100vw - 8px); max-height: 94vh; }
+}
+
+/* 权限/组件多选：可滚动面板，避免组件很多时把页面撑得过长 */
+.check-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+.check-group.scroll {
+  max-height: 280px; overflow: auto;
+  padding: 10px; border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); background: var(--panel-bg);
+}
+.check { display: flex; align-items: flex-start; gap: 8px; line-height: 1.55; cursor: pointer; }
+.check input { margin-top: 3px; flex: 0 0 auto; }
+.check > span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.check .muted { font-size: 12px; line-height: 1.4; }
+.check-row { padding: 5px 6px; border-radius: 6px; }
+.check-row:hover { background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
+.check-group.scroll { grid-template-columns: 1fr; }
+
+/* 人员信息单元格：头像 + 名称/账号两行，避免窄列被拆成多行 */
+.user-cell { display: flex; align-items: center; gap: 10px; min-width: 170px; }
+.user-cell > div { min-width: 0; }
+.user-cell-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-cell-sub { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.avatar.sm { width: 30px; height: 30px; font-size: 12px; flex: 0 0 auto; }
+
+/* 服务组/权限标签：限制单个标签宽度，避免超长组件名撑爆列 */
+.tag.clip { max-width: 220px; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }

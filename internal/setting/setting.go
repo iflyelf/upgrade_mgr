@@ -28,6 +28,8 @@ type Item struct {
 	Get      func(*config.Config) string
 	Set      func(*config.Config, string)
 	Validate func(string) error // 可选：保存前校验，失败则整批设置不落库
+	// Options 可选：type=enum 时的候选值（页面渲染为下拉框）。
+	Options []string
 }
 
 // Registry 全部可页面配置项。
@@ -210,6 +212,55 @@ var Registry = []Item{
 			}
 			return nil
 		}},
+
+	// Redis 缓存（可选；单点/集群/哨兵）
+	{Key: "redis.enabled", Group: "Redis 连接配置", Label: "启用 Redis 缓存（读写失败自动降级，不阻塞主流程）", Type: "bool",
+		Get: func(c *config.Config) string { return b2s(c.Redis.Enabled) },
+		Set: func(c *config.Config, v string) { c.Redis.Enabled = v == "true" }},
+	{Key: "redis.mode", Group: "Redis 连接配置", Label: "连接模式", Type: "enum",
+		Options: []string{"single", "cluster", "sentinel"},
+		Get:     func(c *config.Config) string { return c.Redis.Mode },
+		Set:     func(c *config.Config, v string) { c.Redis.Mode = strings.ToLower(strings.TrimSpace(v)) },
+		Validate: func(v string) error {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "", "single", "cluster", "sentinel":
+				return nil
+			}
+			return fmt.Errorf("只能是 single / cluster / sentinel")
+		}},
+	{Key: "redis.hosts", Group: "Redis 连接配置",
+		Label: "地址列表（逗号分隔；单点可只填 host:port；哨兵填哨兵地址；集群填种子节点）", Type: "string",
+		Get: func(c *config.Config) string { return strings.Join(c.Redis.Hosts, ",") },
+		Set: func(c *config.Config, v string) {
+			if strings.TrimSpace(v) == "" {
+				c.Redis.Hosts = nil
+				return
+			}
+			c.Redis.Hosts = splitComma(v)
+		},
+		Validate: func(v string) error {
+			for _, a := range splitComma(v) {
+				if strings.ContainsAny(a, " \t\r\n") {
+					return fmt.Errorf("地址 %q 含空白字符", a)
+				}
+			}
+			return nil
+		}},
+	{Key: "redis.master_name", Group: "Redis 连接配置", Label: "哨兵主节点名（mode=sentinel 必填）", Type: "string",
+		Get: func(c *config.Config) string { return c.Redis.MasterName },
+		Set: func(c *config.Config, v string) { c.Redis.MasterName = strings.TrimSpace(v) }},
+	{Key: "redis.password", Group: "Redis 连接配置", Label: "密码（留空表示无密码）", Type: "secret", Secret: true,
+		Get: func(c *config.Config) string { return c.Redis.Password },
+		Set: func(c *config.Config, v string) { c.Redis.Password = v }},
+	{Key: "redis.db", Group: "Redis 连接配置", Label: "DB 索引（集群固定 0；超出服务器范围会自动回退并提示）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Redis.DB) },
+		Set: func(c *config.Config, v string) { setInt(&c.Redis.DB, v) }},
+	{Key: "redis.ttl", Group: "Redis 连接配置", Label: "只读列表缓存秒数（默认 10，上限 30；写操作会立即失效）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Redis.TTL) },
+		Set: func(c *config.Config, v string) { setInt(&c.Redis.TTL, v) }},
+	{Key: "redis.prefix", Group: "Redis 连接配置", Label: "键前缀（默认 upgrade_mgr:，多环境共用实例时用于隔离）", Type: "string",
+		Get: func(c *config.Config) string { return c.Redis.Prefix },
+		Set: func(c *config.Config, v string) { c.Redis.Prefix = strings.TrimSpace(v) }},
 
 	// 日志
 	{Key: "log.level", Group: "日志", Label: "级别", Type: "string",
@@ -400,6 +451,7 @@ func (s *Service) View() []map[string]any {
 		out = append(out, map[string]any{
 			"key": it.Key, "group": it.Group, "label": it.Label,
 			"type": it.Type, "secret": it.Secret, "value": val,
+			"options": it.Options,
 		})
 	}
 	return out
@@ -426,6 +478,16 @@ func (s *Service) Snapshot() config.Config {
 func NeedsConsulReload(applied []string) bool {
 	for _, k := range applied {
 		if strings.HasPrefix(k, "consul.") {
+			return true
+		}
+	}
+	return false
+}
+
+// NeedsCacheReload 判断变更是否涉及 Redis（需重建客户端）。
+func NeedsCacheReload(applied []string) bool {
+	for _, k := range applied {
+		if strings.HasPrefix(k, "redis.") {
 			return true
 		}
 	}

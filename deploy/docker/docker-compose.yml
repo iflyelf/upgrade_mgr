@@ -23,6 +23,17 @@ services:
       # - COOKIE_SECURE=auto
       # - ADMIN_PASSWORD=your-strong-password
       # - SESSION_SECRET=your-session-secret
+      # 可选：Redis 页面缓存（单点/集群/哨兵；也可在页面「设置 → Redis 连接配置」填写）
+      # - REDIS_ENABLED=true
+      # - REDIS_MODE=single            # single / cluster / sentinel
+      # - REDIS_HOST=redis
+      # - REDIS_PORT=6379
+      # - REDIS_ADDRS=10.0.0.1:6379,10.0.0.2:6379   # 集群种子 / 哨兵地址
+      # - REDIS_MASTER_NAME=mymaster   # sentinel 必填
+      # - REDIS_PASSWORD=your-redis-password
+      # - REDIS_DB=0                   # cluster 固定 0；超范围自动回退
+      # - REDIS_CACHE_TTL=10           # 列表缓存秒数，上限 30
+      # - REDIS_PREFIX=upgrade_mgr:
     networks:
       - upgrade-net
     depends_on:
