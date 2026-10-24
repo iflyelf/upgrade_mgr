@@ -12,6 +12,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/middleware"
+	"github.com/iflyelf/upgrade_mgr/internal/setting"
 )
 
 // insertHeartbeatAgent 插入一个最小 Agent + 主机，返回 agentID/token。
@@ -50,6 +51,7 @@ func TestHeartbeatRequestsTunnelCheck(t *testing.T) {
 	db, sc := setupHostDB(t)
 	sc.Config = config.Default()
 	sc.AgentGW = agentgw.New(db)
+	sc.Settings = setting.NewService(db, sc.Config)
 
 	// 模拟保存隧道时的初始化。
 	triggerTunnelCheck(sc, hostID)
