@@ -96,3 +96,41 @@ func TestKeyHashStable(t *testing.T) {
 		t.Fatal("different input must produce different hash")
 	}
 }
+
+func TestHostsTTL(t *testing.T) {
+	// 未单独配置时回退到通用 TTL。
+	c := New(Options{Enabled: false, TTL: 10 * time.Second})
+	if got := c.HostsTTL(); got != 10*time.Second {
+		t.Fatalf("fallback HostsTTL=%s, want 10s", got)
+	}
+
+	// 单独配置且大于通用 TTL：按配置生效。
+	c = New(Options{Enabled: false, TTL: 10 * time.Second, HostsTTL: 2 * time.Minute})
+	if got := c.HostsTTL(); got != 2*time.Minute {
+		t.Fatalf("HostsTTL=%s, want 2m", got)
+	}
+	if got := c.TTL(); got != 10*time.Second {
+		t.Fatalf("generic TTL must stay 10s, got %s", got)
+	}
+	if got := c.Status().HostsTTLSeconds; got != 120 {
+		t.Fatalf("status HostsTTLSeconds=%d, want 120", got)
+	}
+
+	// 超过上限按上限截断。
+	c = New(Options{Enabled: false, TTL: 10 * time.Second, HostsTTL: time.Hour})
+	if got := c.HostsTTL(); got != maxHostsTTL {
+		t.Fatalf("HostsTTL=%s, want %s", got, maxHostsTTL)
+	}
+
+	// 小于通用 TTL 没有意义，抬到通用值。
+	c = New(Options{Enabled: false, TTL: 20 * time.Second, HostsTTL: 5 * time.Second})
+	if got := c.HostsTTL(); got != 20*time.Second {
+		t.Fatalf("HostsTTL=%s, want 20s", got)
+	}
+
+	// nil 接收者不 panic。
+	var nilCache *Cache
+	if got := nilCache.HostsTTL(); got != defaultTTL {
+		t.Fatalf("nil HostsTTL=%s, want %s", got, defaultTTL)
+	}
+}

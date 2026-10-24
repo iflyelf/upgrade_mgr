@@ -20,16 +20,17 @@ func CacheStatus(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		st := c.Status()
 		httpx.OK(w, map[string]any{
-			"enabled":      st.Enabled,
-			"mode":         st.Mode,
-			"addrs":        st.Addrs,
-			"master_name":  st.MasterName,
-			"db":           st.DB,
-			"requested_db": st.RequestedDB,
-			"db_fallback":  st.DBFallback,
-			"ttl_seconds":  st.TTLSeconds,
-			"prefix":       st.Prefix,
-			"last_error":   st.LastError,
+			"enabled":           st.Enabled,
+			"mode":              st.Mode,
+			"addrs":             st.Addrs,
+			"master_name":       st.MasterName,
+			"db":                st.DB,
+			"requested_db":      st.RequestedDB,
+			"db_fallback":       st.DBFallback,
+			"ttl_seconds":       st.TTLSeconds,
+			"hosts_ttl_seconds": st.HostsTTLSeconds,
+			"prefix":            st.Prefix,
+			"last_error":        st.LastError,
 		})
 	}
 }

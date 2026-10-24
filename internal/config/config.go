@@ -31,7 +31,9 @@ type Config struct {
 	Artifact ArtifactConfig `yaml:"artifact"`
 	Agent    AgentConfig    `yaml:"agent"`
 	FlyIAM   FlyIAMConfig   `yaml:"flyiam"`
-	Log      LogConfig      `yaml:"log"`
+	// ConsulMgr 可选：从 consul_mgr 同步主机（多服务组、多套 Consul）。
+	ConsulMgr ConsulMgrConfig `yaml:"consul_mgr"`
+	Log       LogConfig       `yaml:"log"`
 }
 
 // ServerConfig 监听与前端。
@@ -174,6 +176,11 @@ type RedisConfig struct {
 	DB         int      `yaml:"db"`
 	// TTL 只读列表缓存秒数（默认 10，上限 30）。
 	TTL int `yaml:"ttl"`
+	// HostsTTL 主机列表 /api/hosts 单独的缓存秒数（0=沿用 TTL，上限 300）。
+	//
+	// 几万台规模时该查询最重；主机数据只由页面写操作改变，而写请求会立即
+	// 清空缓存，所以可以放到分钟级而不影响「改完立刻看到」的体验。
+	HostsTTL int `yaml:"hosts_ttl"`
 	// Prefix 键前缀，默认 upgrade_mgr:。
 	Prefix string `yaml:"prefix"`
 }
@@ -230,6 +237,22 @@ type FlyIAMConfig struct {
 	ServiceToken string `yaml:"service_token"`
 }
 
+// ConsulMgrConfig 可选：从 consul_mgr 同步主机清单。
+//
+// 与直连 Consul 的区别：consul_mgr 管理多个服务组，每组各有独立的
+// Consul 地址与令牌，一次调用即可拿到所有组的主机，并带上服务组归属。
+// 需要在 consul_mgr 的「设置 → 服务间 API」配置同一个令牌。
+type ConsulMgrConfig struct {
+	// Endpoint consul_mgr 后端地址（服务端可达），如 http://consul-mgr.internal:8888
+	Endpoint string `yaml:"endpoint"`
+	// ServiceToken 服务间令牌，通过 X-Service-Token 发送。
+	ServiceToken string `yaml:"service_token"`
+	// Timeout 请求超时秒数（默认 30）；主机多时适当放大。
+	Timeout int `yaml:"timeout"`
+	// GroupID 只同步指定服务组；0 表示全部启用的组。
+	GroupID int64 `yaml:"group_id"`
+}
+
 // LogConfig 日志。
 type LogConfig struct {
 	Level string `yaml:"level"`
@@ -252,7 +275,8 @@ func Default() *Config {
 			Enabled: false, Mode: "single", Host: "localhost", Port: 6379,
 			TTL: 10, Prefix: "upgrade_mgr:",
 		},
-		Artifact: ArtifactConfig{Dir: "/var/lib/upgrade_mgr/artifacts"},
+		ConsulMgr: ConsulMgrConfig{Timeout: 30},
+		Artifact:  ArtifactConfig{Dir: "/var/lib/upgrade_mgr/artifacts"},
 		Agent: AgentConfig{
 			PollHold: 20, LeaseMax: "1h", ClockSkew: "5m",
 			EnrollTokenTTL: "15m", RequireEnrollToken: true, AllowExecMode: true,
@@ -370,6 +394,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.Redis.Prefix, "REDIS_PREFIX")
 	setInt(&c.Redis.DB, "REDIS_DB")
 	setInt(&c.Redis.TTL, "REDIS_CACHE_TTL")
+	setInt(&c.Redis.HostsTTL, "REDIS_HOSTS_CACHE_TTL")
 	setStr(&c.Redis.Password, "REDIS_PASSWORD")
 	if v := os.Getenv("REDIS_ADDRS"); v != "" {
 		c.Redis.Hosts = splitTrim(v)
@@ -392,6 +417,14 @@ func (c *Config) applyEnv() {
 	setInt(&c.Agent.AutoUpdatePercent, "AGENT_AUTO_UPDATE_PERCENT")
 	setStr(&c.FlyIAM.Endpoint, "FLYIAM_ENDPOINT")
 	setStr(&c.FlyIAM.ServiceToken, "FLYIAM_SERVICE_TOKEN")
+	setStr(&c.ConsulMgr.Endpoint, "CONSUL_MGR_ENDPOINT")
+	setStr(&c.ConsulMgr.ServiceToken, "CONSUL_MGR_SERVICE_TOKEN")
+	setInt(&c.ConsulMgr.Timeout, "CONSUL_MGR_TIMEOUT")
+	if v := strings.TrimSpace(os.Getenv("CONSUL_MGR_GROUP_ID")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			c.ConsulMgr.GroupID = n
+		}
+	}
 	setStr(&c.Log.Level, "LOG_LEVEL")
 
 	if c.Server.Host == "" {

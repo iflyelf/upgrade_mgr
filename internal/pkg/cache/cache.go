@@ -42,7 +42,12 @@ type Options struct {
 	Password   string
 	DB         int
 	TTL        time.Duration
-	Prefix     string
+	// HostsTTL 主机列表（/api/hosts）单独的缓存时长，0 表示沿用 TTL。
+	//
+	// 主机规模达到几万台时该查询最重，而「主机名/业务组/自定义字段」等
+	// 由页面写操作驱动，写请求会立即清空缓存，所以可以放宽到分钟级。
+	HostsTTL time.Duration
+	Prefix   string
 }
 
 // Status 运行状态（用于页面展示，不含密码）。
@@ -55,8 +60,10 @@ type Status struct {
 	RequestedDB int      `json:"requested_db"`
 	DBFallback  bool     `json:"db_fallback"`
 	TTLSeconds  int      `json:"ttl_seconds"`
-	Prefix      string   `json:"prefix"`
-	LastError   string   `json:"last_error,omitempty"`
+	// HostsTTLSeconds 主机列表缓存秒数（0 表示与 TTLSeconds 相同）。
+	HostsTTLSeconds int    `json:"hosts_ttl_seconds"`
+	Prefix          string `json:"prefix"`
+	LastError       string `json:"last_error,omitempty"`
 }
 
 // Cache Redis 缓存。零值不可用；请用 New 创建。
@@ -65,6 +72,7 @@ type Cache struct {
 	client   redis.UniversalClient
 	status   Status
 	ttl      time.Duration
+	hostsTTL time.Duration
 	prefix   string
 	closeOne sync.Once
 }
@@ -76,6 +84,13 @@ const defaultTTL = 10 * time.Second
 // 过长的 TTL 会让 Agent 上报的进度/心跳较晚可见。
 const maxHTTPTTL = 30 * time.Second
 
+// maxHostsTTL 主机列表缓存上限（5 分钟）。
+//
+// 主机列表在几万台规模下是最重的查询，且其内容只由页面写操作改变
+// （写请求会立即清空缓存前缀），因此允许比通用 TTL 放宽很多。
+// Agent 心跳/版本变化最迟在该时长后可见，故不设得更长。
+const maxHostsTTL = 5 * time.Minute
+
 // New 创建缓存。任何连接/认证问题都只禁用缓存并记日志，不返回错误。
 func New(opts Options) *Cache {
 	c := &Cache{ttl: opts.TTL, prefix: normalizePrefix(opts.Prefix)}
@@ -86,6 +101,15 @@ func New(opts Options) *Cache {
 		log.Printf("⚠️ Redis 缓存 TTL %s 超过上限，已按 %s 生效", c.ttl, maxHTTPTTL)
 		c.ttl = maxHTTPTTL
 	}
+	// 主机列表 TTL：0 表示沿用通用 TTL；小于通用 TTL 没有意义，直接抬到通用值。
+	c.hostsTTL = opts.HostsTTL
+	if c.hostsTTL > maxHostsTTL {
+		log.Printf("⚠️ Redis 主机列表缓存 TTL %s 超过上限，已按 %s 生效", c.hostsTTL, maxHostsTTL)
+		c.hostsTTL = maxHostsTTL
+	}
+	if c.hostsTTL > 0 && c.hostsTTL < c.ttl {
+		c.hostsTTL = c.ttl
+	}
 	st := Status{
 		Mode:        strings.ToLower(strings.TrimSpace(opts.Mode)),
 		RequestedDB: opts.DB,
@@ -94,6 +118,8 @@ func New(opts Options) *Cache {
 		MasterName:  strings.TrimSpace(opts.MasterName),
 		TTLSeconds:  int(c.ttl / time.Second),
 	}
+	// HostsTTL() 在未单独配置时回退到通用 TTL，页面直接展示生效值。
+	st.HostsTTLSeconds = int(c.HostsTTL() / time.Second)
 	if st.Mode == "" {
 		st.Mode = string(ModeSingle)
 	}
@@ -173,8 +199,8 @@ func New(opts Options) *Cache {
 	if st.DBFallback {
 		extra = "（DB 已回退）"
 	}
-	log.Printf("✅ Redis 缓存已启用: mode=%s addr=%s db=%d%s ttl=%s",
-		st.Mode, strings.Join(addrs, ","), effectiveDB, extra, c.ttl)
+	log.Printf("✅ Redis 缓存已启用: mode=%s addr=%s db=%d%s ttl=%s hosts_ttl=%s",
+		st.Mode, strings.Join(addrs, ","), effectiveDB, extra, c.ttl, c.HostsTTL())
 	return c
 }
 
@@ -360,6 +386,14 @@ func (c *Cache) TTL() time.Duration {
 		return defaultTTL
 	}
 	return c.ttl
+}
+
+// HostsTTL 返回主机列表的缓存时长；未单独配置时回退到 TTL()。
+func (c *Cache) HostsTTL() time.Duration {
+	if c == nil || c.hostsTTL <= 0 {
+		return c.TTL()
+	}
+	return c.hostsTTL
 }
 
 // Status 返回状态快照（不含密码）。
