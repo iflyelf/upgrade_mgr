@@ -67,15 +67,19 @@ jobs:
       - name: Windows 单元测试与真实执行 E2E
         # executor 的 windows 用例会真实调用 PowerShell / cmd：
         # 输出、退出码、stdin、中文脚本 BOM 预处理、cmd 退出码透传。
+        shell: cmd
         run: go test -count=1 -modfile=build/agent-windows.mod ./cmd/agent ./internal/agent/...
 
       - name: PowerShell 7 兼容性（pwsh）
+        shell: cmd
         run: go test -count=1 -v -modfile=build/agent-windows.mod ./internal/agent/executor -run TestWindowsPowerShell7E2E
 
       - name: 构建 Agent（amd64）
+        shell: cmd
         run: go build -modfile=build/agent-windows.mod -o dist/upgrade-agent.exe ./cmd/agent
 
       - name: 交叉编译校验（arm64）
+        shell: cmd
         env:
           GOARCH: arm64
         run: go build -modfile=build/agent-windows.mod -o dist/upgrade-agent-arm64.exe ./cmd/agent
