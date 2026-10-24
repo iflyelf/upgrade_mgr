@@ -4,11 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 // TestRollbackRejectsWorldWritableDir 备份目录可被他人写入时必须拒绝回滚（防提权）。
 func TestRollbackRejectsWorldWritableDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 使用 ACL，跳过 Unix 权限检查")
+	}
 	dir := t.TempDir()
 	bk := filepath.Join(dir, "backup")
 	if err := os.MkdirAll(bk, 0777); err != nil { // 故意过宽
@@ -67,6 +71,9 @@ func TestRollbackPicksNumericLatest(t *testing.T) {
 
 // TestEnsureSecureDirDetectsGroupWritable 同组可写也应被拒。
 func TestEnsureSecureDirDetectsGroupWritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 使用 ACL，跳过 Unix 权限检查")
+	}
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "g")
 	os.MkdirAll(sub, 0770)

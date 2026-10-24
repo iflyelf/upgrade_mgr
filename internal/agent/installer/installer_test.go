@@ -4,10 +4,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestWriteInitialStateWritesServerAndToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 使用 ACL，跳过 Unix 权限检查")
+	}
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := writeInitialState(Options{StatePath: path, ServerURL: "https://mgr.example.com", EnrollToken: "tok-123", Force: false}); err != nil {
 		t.Fatalf("writeInitialState: %v", err)
