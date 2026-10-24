@@ -86,7 +86,10 @@ func TestWindowsCmdE2E(t *testing.T) {
 	}
 }
 
-// TestPrepareScriptPathEncoding 命令脚本必须转换为 UTF-8 BOM + CRLF 的临时副本。
+// TestPrepareScriptPathEncoding 命令脚本必须原地规范化为 UTF-8 BOM + CRLF。
+//
+// 关键回归：已经是 .ps1 的文件不能再生成 `xxx.ps1.ps1`——旧实现会导致
+// PowerShell -File 报「路径不存在」，任务却因退出码丢失而显示成功。
 func TestPrepareScriptPathEncoding(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "raw.ps1")
@@ -98,8 +101,11 @@ func TestPrepareScriptPathEncoding(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	if prepared == src {
-		t.Fatal("应生成独立临时副本，避免污染原文件")
+	if prepared != src {
+		t.Fatalf(".ps1 应原地规范化，实际生成 %s", prepared)
+	}
+	if _, err := os.Stat(src + ".ps1"); err == nil {
+		t.Fatal("不应生成 .ps1.ps1 副本")
 	}
 	data, err := os.ReadFile(prepared)
 	if err != nil {
@@ -113,6 +119,26 @@ func TestPrepareScriptPathEncoding(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("中文注释")) {
 		t.Fatal("中文内容被破坏")
+	}
+}
+
+// TestPrepareScriptPathNoExtension 无扩展名的下载制品要生成 .ps1 副本。
+func TestPrepareScriptPathNoExtension(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "artifact-1")
+	if err := os.WriteFile(src, []byte("Write-Output 'x'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prepared, cleanup, err := prepareScriptPath(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if prepared != src+".ps1" {
+		t.Fatalf("无扩展名应生成 .ps1 副本，实际 %s", prepared)
+	}
+	if data, err := os.ReadFile(prepared); err != nil || !bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
+		t.Fatalf("副本缺少 BOM: %v", err)
 	}
 }
 
