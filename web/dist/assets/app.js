@@ -262,8 +262,10 @@
 
   function topbar() {
     var orgTabs = [
-      ['users', '用户管理'], ['fields', '用户字段'], ['teams', '团队管理'],
-      ['roles', '角色管理'], ['groups', '服务组'], ['depts', '组织架构'], ['flyiam', 'FlyIAM 人员']
+      ['users', '用户管理'], ['fields', '用户字段'], ['hostfields', '主机字段'],
+      ['hostmaps', '主机字段映射'],
+      ['teams', '团队管理'], ['roles', '角色管理'], ['groups', '服务组'],
+      ['depts', '组织架构'], ['flyiam', 'FlyIAM 人员']
     ];
     var orgActive = state.view === 'org';
     var opsItems = [];
@@ -296,6 +298,8 @@
               state.orgUserForm = null;
               state.orgRoleForm = null;
               state.orgGroupForm = null;
+              // 「用户字段」与「主机字段」共用该状态，切换页签必须清空。
+              state.orgNewField = null;
               switchView('org');
             }
           };
@@ -1265,6 +1269,11 @@
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
       state.q ? h('button', { class: 'btn ghost', onclick: function () { state.q = ''; state.hostPage = 1; loadHosts(); } }, ['清除']) : null,
       h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']),
+      // consul_mgr 同步仅管理员可见：后端为 RequireAdmin，非管理员点了必然 403。
+      isAdmin() ? h('button', {
+        class: 'btn ghost', title: '从 consul_mgr 汇总的多套 Consul 同步主机',
+        onclick: syncHostsFromConsulMgr
+      }, ['同步 consul_mgr']) : null,
       state.hostsLoading ? h('span', { class: 'muted' }, ['加载中…']) : null,
       h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
     ]);
@@ -2212,9 +2221,18 @@
     }
     var deptIdx = jobs.length;
     jobs.push(api('/api/org/departments'));
+    // 主机字段定义：与用户字段同样支持页面增删改（后端 /api/field-defs/host）。
+    var hostDefIdx = jobs.length;
+    jobs.push(api('/api/field-defs/host'));
+    // 主机字段映射：外部来源键 → 本地字段，零硬编码（后端 /api/host-field-mappings）。
+    var hostMapIdx = jobs.length;
+    jobs.push(api('/api/host-field-mappings'));
     Promise.all(jobs).then(function (res) {
       if (compIdx >= 0) state.components = res[compIdx] || [];
       state.hostGroupOptions = (res[4] && res[4].groups) || [];
+      // 主机字段定义同时回填给主机页，保证两处列表/表单看到同一份定义。
+      state.hostFieldDefs = res[hostDefIdx] || [];
+      var maps = res[hostMapIdx] || {};
       state.org = {
         users: res[0].users || [],
         userDefs: res[0].defs || [],
@@ -2222,7 +2240,13 @@
         roles: res[1] || [],
         teams: res[2] || [],
         groups: res[3] || [],
-        depts: res[deptIdx] || []
+        depts: res[deptIdx] || [],
+        hostDefs: res[hostDefIdx] || [],
+        hostMaps: maps.mappings || [],
+        // 来源/内置列/保留键均由后端给出，页面不硬编码任何键名。
+        mapSources: maps.sources || [],
+        mapColumns: maps.columns || [],
+        mapReserved: maps.reserved_keys || {}
       };
       render();
     }).catch(function (e) {
@@ -2231,9 +2255,28 @@
     });
   }
 
+  // switchOrgTab 切换人员组织子页签，并清空所有子表单状态。
+  //
+  // 「用户字段」与「主机字段」共用 state.orgNewField，必须在切换时清空，
+  // 否则在一个页签打开表单后切到另一个，会把表单带过去并提交到错误的 kind。
+  function switchOrgTab(tab) {
+    state.orgTab = tab;
+    state.orgUserForm = null;
+    state.orgRoleForm = null;
+    state.orgGroupForm = null;
+    state.orgNewField = null;
+    state.orgMapForm = null;
+    state.orgScan = null;
+    state.orgSel = null;
+    state.orgSelTeam = null;
+    render();
+  }
+
   function orgTabs() {
-    var tabs = [['users', '用户管理'], ['fields', '用户字段'], ['teams', '团队管理'],
-      ['roles', '角色管理'], ['groups', '服务组'], ['depts', '组织架构'], ['flyiam', 'FlyIAM 人员']];
+    var tabs = [['users', '用户管理'], ['fields', '用户字段'], ['hostfields', '主机字段'],
+      ['hostmaps', '主机字段映射'],
+      ['teams', '团队管理'], ['roles', '角色管理'], ['groups', '服务组'],
+      ['depts', '组织架构'], ['flyiam', 'FlyIAM 人员']];
     return h('div', { class: 'tabs', role: 'tablist', style: 'margin-bottom:12px' }, tabs.map(function (t) {
       return h('div', {
         class: 'tab' + (state.orgTab === t[0] ? ' active' : ''),
@@ -2241,16 +2284,10 @@
         'aria-selected': state.orgTab === t[0] ? 'true' : 'false',
         tabindex: '0',
         onclick: function () {
-          state.orgTab = t[0];
-          state.orgUserForm = null;
-          state.orgRoleForm = null;
-          state.orgGroupForm = null;
-          state.orgSel = null;
-          state.orgSelTeam = null;
-          render();
+          switchOrgTab(t[0]);
         },
         onkeydown: function (e) {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); state.orgTab = t[0]; render(); }
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchOrgTab(t[0]); }
         }
       }, [t[1]]);
     }));
@@ -2265,6 +2302,8 @@
     if (state.orgTab === 'users') body = orgUsers(o);
     else if (state.orgTab === 'depts') body = orgDepts(o);
     else if (state.orgTab === 'fields') body = orgUserFields(o);
+    else if (state.orgTab === 'hostfields') body = orgHostFields(o);
+    else if (state.orgTab === 'hostmaps') body = orgHostMaps(o);
     else if (state.orgTab === 'roles') body = orgRoles(o);
     else if (state.orgTab === 'teams') body = orgTeams(o);
     else if (state.orgTab === 'flyiam') body = orgFlyIAMUsers(o);
@@ -2604,10 +2643,77 @@
     ]);
   }
 
-  // newFieldDefForm 新增字段定义表单（用户/主机共用）。
+  // 主机字段定义管理（增删改）。
+  //
+  // 与「用户字段」同构，复用 newFieldDefForm/后端 /api/field-defs/host。
+  // 值存在 hosts.custom_fields(JSONB)，由主机列表列与编辑表单共用：
+  // showInList 控制是否作为列表列，showInForm 控制是否出现在编辑主机表单。
+  function orgHostFields(o) {
+    var defs = (o.hostDefs || []).slice().sort(function (a, b) {
+      return (a.sortOrder || 0) - (b.sortOrder || 0);
+    });
+    var rows = defs.map(function (d) {
+      return [
+        d.fieldKey, d.label, d.fieldType,
+        d.showInList ? '是' : '否', d.showInForm ? '是' : '否',
+        d.builtin ? '内置' : '自定义',
+        h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              state.orgNewField = Object.assign({}, d);
+              render();
+            }
+          }, ['编辑']),
+          d.builtin ? h('span', { class: 'muted' }, ['不可删除'])
+            : h('button', {
+              class: 'btn danger small', onclick: function () {
+                if (!confirm('删除主机字段「' + d.label + '」？各主机已填写的该字段值也会一并删除。')) return;
+                api('/api/field-defs/host/' + d.id, { method: 'DELETE' })
+                  .then(function () {
+                    // 主机页缓存的定义同步失效，避免列表仍按旧定义渲染列。
+                    state.hostFieldDefs = undefined;
+                    loadOrg();
+                  })
+                  .catch(function (e) { alert('删除失败: ' + e.message); });
+              }
+            }, ['删除'])
+        ])
+      ];
+    });
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['主机字段定义']),
+        hint('为主机增加自定义字段（如机房、负责人、资产编号）。字段值在「主机 → 编辑」中填写，' +
+          '勾选「在列表显示」后会作为主机列表的一列；字段键用于 API 与 CSV 导出，建议用英文。'),
+        h('div', { class: 'toolbar' }, [
+          h('button', {
+            class: 'btn', onclick: function () { state.orgNewField = {}; render(); }
+          }, ['新增字段']),
+          h('button', {
+            class: 'btn ghost', onclick: function () {
+              state.hostFieldDefs = undefined;
+              loadOrg();
+            }
+          }, ['刷新'])
+        ]),
+        defs.length ? simpleTable(['键', '名称', '类型', '列表显示', '表单显示', '来源', '操作'], defs, function (d, i) {
+          return rows[i];
+        }) : h('div', { class: 'muted empty' }, ['还没有主机自定义字段，点「新增字段」添加。']),
+        state.orgNewField !== undefined && state.orgNewField !== null ? newFieldDefForm('host') : null
+      ])
+    ]);
+  }
+
+  // newFieldDefForm 字段定义表单（用户/主机共用；带 id 为编辑，否则新增）。
   function newFieldDefForm(kind) {
     var f = state.orgNewField || {};
-    var keyEl = h('input', { value: f.fieldKey || '', placeholder: '如 empCode' }, []);
+    var editing = !!f.id;
+    // 编辑时锁定字段键：改键不会迁移已填写的值（用户值表 / 主机 JSONB），
+    // 会把历史数据变成孤儿。需要换键时请新建字段。
+    var keyEl = h('input', {
+      value: f.fieldKey || '', placeholder: '如 empCode',
+      disabled: editing ? 'disabled' : null
+    }, []);
     var labelEl = h('input', { value: f.label || '', placeholder: '如 工号' }, []);
     var typeEl = h('select', {}, [
       h('option', { value: 'text' }, ['text']),
@@ -2630,18 +2736,29 @@
         options: typeEl.value === 'select' ? optionsEl.value.trim() : '',
         showInList: listEl.checked,
         showInForm: formEl.checked,
-        editable: true,
+        editable: f.editable !== false,
         sortOrder: parseInt(orderEl.value, 10) || 0
       };
-      api('/api/field-defs/' + kind, { method: 'POST', body: JSON.stringify(payload) })
-        .then(function () { state.orgNewField = null; loadOrg(); })
-        .catch(function (e) { alert('新增失败: ' + e.message); });
+      if (!payload.fieldKey || !payload.label) {
+        alert('字段键与显示名称不能为空');
+        return;
+      }
+      var req = editing
+        ? api('/api/field-defs/' + kind + '/' + f.id, { method: 'PUT', body: JSON.stringify(payload) })
+        : api('/api/field-defs/' + kind, { method: 'POST', body: JSON.stringify(payload) });
+      req.then(function () {
+        state.orgNewField = null;
+        // 主机字段定义被主机页缓存，改动后置空以便下次进入重新拉取。
+        if (kind === 'host') state.hostFieldDefs = undefined;
+        loadOrg();
+      }).catch(function (e) { alert((editing ? '保存失败: ' : '新增失败: ') + e.message); });
     };
 
     return h('div', { class: 'card' }, [
-      h('h3', {}, ['新增字段']),
+      h('h3', {}, [editing ? '编辑字段' : '新增字段']),
       h('div', { class: 'grid2' }, [
-        field('字段键 (fieldKey)', keyEl, '字母开头，仅字母数字下划线'),
+        field('字段键 (fieldKey)', keyEl,
+          editing ? '创建后不可修改；需要换键请新建字段' : '字母开头，仅字母数字下划线'),
         field('显示名称', labelEl, '')
       ]),
       h('div', { class: 'grid2' }, [
@@ -2660,6 +2777,348 @@
         }, ['取消'])
       ])
     ]);
+  }
+
+  // 主机字段映射：外部来源键 → 本地字段（内置列或自定义字段）。
+  //
+  // 零硬编码：来源列表、可选内置列、平台保留键全部来自后端
+  // /api/host-field-mappings 的响应，新增来源或列不需要改前端。
+  function orgHostMaps(o) {
+    var maps = (o.hostMaps || []).slice();
+    var columns = o.mapColumns || [];
+    var reserved = o.mapReserved || {};
+    // 内置列的中文名查表，表格里展示「业务组 (biz_group)」这种可读形式。
+    var colLabel = {};
+    columns.forEach(function (c) { colLabel[c.key] = c.label; });
+
+    var targetText = function (m) {
+      if (m.targetKind === 'column') {
+        var lbl = colLabel[m.targetKey];
+        return '内置列 ' + (lbl ? lbl + ' (' + m.targetKey + ')' : m.targetKey);
+      }
+      return '自定义字段 ' + m.targetKey;
+    };
+
+    var reload = function () {
+      state.orgMapForm = null;
+      state.orgMapScan = null;
+      loadOrg();
+    };
+
+    var rows = maps.map(function (m) {
+      return [
+        m.source,
+        h('div', {}, [
+          h('div', {}, [m.sourceKey]),
+          reserved[m.sourceKey] ? h('div', { class: 'muted' }, [reserved[m.sourceKey]]) : null
+        ]),
+        targetText(m),
+        m.overwrite ? '覆盖' : '仅补空',
+        m.enabled ? h('span', { class: 'tag status-success' }, ['启用'])
+          : h('span', { class: 'tag' }, ['停用']),
+        String(m.sortOrder || 0),
+        h('div', { class: 'row-actions' }, [
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              state.orgMapForm = Object.assign({}, m);
+              render();
+            }
+          }, ['编辑']),
+          h('button', {
+            class: 'btn ghost small', onclick: function () {
+              // 快速启停：不进表单，直接提交反转后的 enabled。
+              var payload = Object.assign({}, m, { enabled: !m.enabled });
+              api('/api/host-field-mappings/' + m.id, {
+                method: 'PUT', body: JSON.stringify(payload)
+              }).then(reload).catch(function (e) { alert('操作失败: ' + e.message); });
+            }
+          }, [m.enabled ? '停用' : '启用']),
+          h('button', {
+            class: 'btn danger small', onclick: function () {
+              if (!confirm('删除映射「' + m.sourceKey + ' → ' + m.targetKey + '」？\n已同步到主机的值不会被删除。')) return;
+              api('/api/host-field-mappings/' + m.id, { method: 'DELETE' })
+                .then(reload).catch(function (e) { alert('删除失败: ' + e.message); });
+            }
+          }, ['删除'])
+        ])
+      ];
+    });
+
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['主机字段映射']),
+        hint('把外部来源（Consul ServiceMeta / consul_mgr）的键映射到本地字段，同步时按此规则写入。' +
+          '「仅补空」只填充本地空值，不覆盖人工维护的内容；「覆盖」则每次同步都以外部值为准。' +
+          '不清楚对方有哪些键时，先点「扫描来源键」。'),
+        h('div', { class: 'toolbar' }, [
+          h('button', {
+            class: 'btn', onclick: function () { state.orgMapForm = {}; render(); }
+          }, ['新增映射']),
+          h('button', {
+            class: 'btn ghost', onclick: function () { openMapScan('consul'); }
+          }, ['扫描来源键']),
+          h('button', { class: 'btn ghost', onclick: reload }, ['刷新'])
+        ]),
+        maps.length ? simpleTable(
+          ['来源', '来源键', '目标字段', '写入方式', '状态', '排序', '操作'],
+          maps, function (m, i) { return rows[i]; }
+        ) : h('div', { class: 'muted empty' }, ['还没有映射规则。点「扫描来源键」查看外部实际有哪些键，再勾选导入。']),
+        state.orgMapForm ? hostMapForm(o) : null
+      ]),
+      state.orgMapScan ? mapScanModal(o) : null
+    ]);
+  }
+
+  // hostMapForm 新增/编辑一条映射。
+  function hostMapForm(o) {
+    var f = state.orgMapForm || {};
+    var editing = !!f.id;
+    var sources = o.mapSources || [];
+    var columns = o.mapColumns || [];
+    var hostDefs = (o.hostDefs || []).slice().sort(function (a, b) {
+      return (a.sortOrder || 0) - (b.sortOrder || 0);
+    });
+
+    var sourceEl = h('select', {}, sources.map(function (s) {
+      return h('option', { value: s }, [s]);
+    }));
+    sourceEl.value = f.source || (sources[0] || 'consul');
+
+    var keyEl = h('input', { value: f.sourceKey || '', placeholder: '如 app_code、rack' }, []);
+
+    var kindEl = h('select', {}, [
+      h('option', { value: 'custom' }, ['自定义字段']),
+      h('option', { value: 'column' }, ['内置列'])
+    ]);
+    kindEl.value = f.targetKind || 'custom';
+
+    // 目标下拉随类型切换：内置列用后端白名单，自定义字段用已定义的主机字段。
+    var targetWrap = h('div', {}, []);
+    var targetEl = null;
+    var renderTarget = function () {
+      targetWrap.innerHTML = '';
+      if (kindEl.value === 'column') {
+        targetEl = h('select', {}, columns.map(function (c) {
+          return h('option', { value: c.key }, [c.label + ' (' + c.key + ')']);
+        }));
+        if (f.targetKind === 'column' && f.targetKey) targetEl.value = f.targetKey;
+      } else if (hostDefs.length) {
+        targetEl = h('select', {}, hostDefs.map(function (d) {
+          return h('option', { value: d.fieldKey }, [d.label + ' (' + d.fieldKey + ')']);
+        }));
+        if (f.targetKind !== 'column' && f.targetKey) targetEl.value = f.targetKey;
+      } else {
+        // 没有自定义字段时给出明确指引，而不是一个空下拉。
+        targetEl = null;
+        targetWrap.appendChild(h('div', { class: 'muted' }, [
+          '还没有主机自定义字段，请先到「主机字段」创建，或把目标类型改为「内置列」。'
+        ]));
+        return;
+      }
+      targetWrap.appendChild(targetEl);
+    };
+    renderTarget();
+    kindEl.onchange = renderTarget;
+
+    var overwriteEl = h('input', { type: 'checkbox', checked: !!f.overwrite }, []);
+    var enabledEl = h('input', { type: 'checkbox', checked: f.enabled !== false }, []);
+    var orderEl = h('input', { type: 'number', value: f.sortOrder != null ? f.sortOrder : 100 }, []);
+
+    var save = function () {
+      if (!targetEl) {
+        alert('请先选择目标字段');
+        return;
+      }
+      var payload = {
+        source: sourceEl.value,
+        sourceKey: keyEl.value.trim(),
+        targetKind: kindEl.value,
+        targetKey: targetEl.value,
+        overwrite: overwriteEl.checked,
+        enabled: enabledEl.checked,
+        sortOrder: parseInt(orderEl.value, 10) || 0
+      };
+      if (!payload.sourceKey) {
+        alert('来源键不能为空');
+        return;
+      }
+      var req = editing
+        ? api('/api/host-field-mappings/' + f.id, { method: 'PUT', body: JSON.stringify(payload) })
+        : api('/api/host-field-mappings', { method: 'POST', body: JSON.stringify(payload) });
+      req.then(function () {
+        state.orgMapForm = null;
+        loadOrg();
+      }).catch(function (e) { alert((editing ? '保存失败: ' : '新增失败: ') + e.message); });
+    };
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, [editing ? '编辑映射' : '新增映射']),
+      h('div', { class: 'grid2' }, [
+        field('来源', sourceEl, 'consul=直连 Consul；consul_mgr=经 consul_mgr 汇总'),
+        field('来源键', keyEl, 'Consul ServiceMeta 的键名，大小写敏感')
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('目标类型', kindEl, ''),
+        field('目标字段', targetWrap, '')
+      ]),
+      h('div', { class: 'grid2' }, [
+        h('div', { class: 'field' }, [h('label', { class: 'check' }, [overwriteEl,
+          h('span', {}, [' 覆盖已有值', h('span', { class: 'muted' }, ['不勾选时只填充本地空值'])])])]),
+        h('div', { class: 'field' }, [h('label', { class: 'check' }, [enabledEl, ' 启用'])])
+      ]),
+      field('排序', orderEl, '多条映射指向同一字段时，数值小的先生效（可配置回退链）'),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', onclick: save }, ['保存']),
+        h('button', {
+          class: 'btn ghost', onclick: function () { state.orgMapForm = null; render(); }
+        }, ['取消'])
+      ])
+    ]);
+  }
+
+  // openMapScan 扫描某来源实际存在的键（真实拉一次外部数据，只读）。
+  function openMapScan(source) {
+    state.orgMapScan = { source: source, loading: true, data: null, err: '', picked: {} };
+    render();
+    api('/api/host-field-keys?source=' + encodeURIComponent(source))
+      .then(function (d) {
+        if (!state.orgMapScan || state.orgMapScan.source !== source) return;
+        state.orgMapScan.loading = false;
+        state.orgMapScan.data = d;
+        render();
+      })
+      .catch(function (e) {
+        if (!state.orgMapScan || state.orgMapScan.source !== source) return;
+        state.orgMapScan.loading = false;
+        state.orgMapScan.err = e.message;
+        render();
+      });
+  }
+
+  // mapScanModal 扫描结果弹窗：勾选未映射的键，一键导入为「字段定义 + 映射」。
+  //
+  // 这里刻意不自动创建任何字段：扫描只做展示，导入由管理员显式勾选后触发。
+  function mapScanModal(o) {
+    var sc = state.orgMapScan;
+    var mask = h('div', {
+      class: 'modal-mask',
+      onclick: function (e) { if (e.target === mask) { state.orgMapScan = null; render(); } }
+    }, []);
+
+    var sources = o.mapSources || [];
+    var switchBar = h('div', { class: 'tabs', style: 'margin-bottom:12px' }, sources.map(function (s) {
+      return h('div', {
+        class: 'tab' + (sc.source === s ? ' active' : ''),
+        role: 'tab', tabindex: '0',
+        onclick: function () { openMapScan(s); }
+      }, [s]);
+    }));
+
+    var body;
+    if (sc.loading) {
+      body = h('div', { class: 'muted' }, ['正在从 ' + sc.source + ' 拉取数据…']);
+    } else if (sc.err) {
+      body = h('div', { class: 'err', role: 'alert' }, [sc.err]);
+    } else {
+      var keys = (sc.data && sc.data.keys) || [];
+      var pending = keys.filter(function (k) { return !k.mapped; });
+      if (!keys.length) {
+        body = h('div', { class: 'muted empty' }, ['未扫描到任何键。确认该来源已有主机并配置了 ServiceMeta。']);
+      } else {
+        var rows = keys.map(function (k) {
+          var cb = null;
+          if (!k.mapped) {
+            cb = h('input', {
+              type: 'checkbox', checked: !!sc.picked[k.key],
+              onchange: function () {
+                if (cb.checked) sc.picked[k.key] = true; else delete sc.picked[k.key];
+              }
+            }, []);
+          }
+          return [
+            k.mapped ? h('span', { class: 'muted' }, ['已映射']) : cb,
+            h('div', {}, [
+              h('div', {}, [k.key]),
+              k.note ? h('div', { class: 'muted' }, [k.note]) : null
+            ]),
+            String(k.count),
+            h('div', { class: 'muted' }, [(k.samples || []).join(' / ') || '-']),
+            k.mapped ? h('span', { class: 'muted' }, [k.mapped_to || '']) : ''
+          ];
+        });
+        body = h('div', {}, [
+          hint('共扫描 ' + (sc.data.hosts_scanned || 0) + ' 台主机。勾选未映射的键后点「导入所选」，' +
+            '会按键名创建主机自定义字段并建立映射（写入方式为「仅补空」，可在列表中再调整）。'),
+          simpleTable(['选择', '来源键', '主机数', '样例值', '现有映射'], keys, function (k, i) {
+            return rows[i];
+          }),
+          pending.length ? null : h('div', { class: 'muted' }, ['所有键都已建立映射。'])
+        ]);
+      }
+    }
+
+    var importBtn = h('button', {
+      class: 'btn', onclick: function () {
+        var picked = Object.keys(sc.picked || {});
+        if (!picked.length) {
+          alert('请先勾选要导入的键');
+          return;
+        }
+        // 每个键提交为一条导入项：后端按 targetKind=custom 创建字段并建映射。
+        // label 取扫描结果里的说明（保留键有中文名），否则用键名本身。
+        var byKey = {};
+        ((sc.data && sc.data.keys) || []).forEach(function (k) { byKey[k.key] = k; });
+        var items = picked.map(function (key) {
+          var info = byKey[key] || {};
+          return {
+            sourceKey: key,
+            label: info.note || key,
+            targetKind: 'custom',
+            // 默认不占列表列位：主机列表列数有限，导入后可在「主机字段」里再勾。
+            showInList: false,
+            overwrite: false
+          };
+        });
+        api('/api/host-field-keys/import', {
+          method: 'POST',
+          body: JSON.stringify({ source: sc.source, keys: items })
+        }).then(function (r) {
+          var msg = '导入完成：新建字段 ' + r.created_fields +
+            '，新建映射 ' + r.created_mappings;
+          if (r.skipped) msg += '，跳过已映射 ' + r.skipped;
+          if (r.failed && r.failed.length) {
+            msg += '\n\n失败 ' + r.failed.length + ' 项：\n' +
+              r.failed.map(function (f) { return f.key + '：' + f.error; }).join('\n');
+          }
+          alert(msg);
+          state.orgMapScan = null;
+          // 字段定义已变：清掉主机页缓存，下次进入重新拉取。
+          state.hostFieldDefs = undefined;
+          loadOrg();
+        }).catch(function (e) { alert('导入失败: ' + e.message); });
+      }
+    }, ['导入所选']);
+
+    var modal = h('div', {
+      class: 'modal help-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '扫描来源键'
+    }, [
+      h('div', { class: 'modal-head' }, [
+        h('h3', {}, ['扫描来源键']),
+        h('button', {
+          class: 'btn ghost small', onclick: function () { state.orgMapScan = null; render(); }
+        }, ['关闭'])
+      ]),
+      switchBar,
+      body,
+      h('div', { class: 'toolbar' }, [
+        sc.loading || sc.err ? null : importBtn,
+        h('button', {
+          class: 'btn ghost', onclick: function () { openMapScan(sc.source); }
+        }, ['重新扫描'])
+      ])
+    ]);
+    mask.appendChild(modal);
+    return mask;
   }
 
   // FlyIAM 人员（只读）：与本地账号对照「已接入 / 未接入」。
@@ -3607,6 +4066,9 @@
       ['主节点名', st.master_name || '-'],
       ['DB', String(st.db) + (st.db_fallback ? ('（配置 ' + st.requested_db + ' 不可用，已回退）') : '')],
       ['默认 TTL', (st.ttl_seconds || 0) + ' 秒'],
+      ['主机列表 TTL', (st.hosts_ttl_seconds || 0) > 0
+        ? (st.hosts_ttl_seconds + ' 秒')
+        : ((st.ttl_seconds || 0) + ' 秒（未单独配置，沿用默认）')],
       ['键前缀', st.prefix || '-'],
       ['最近错误', st.last_error || '-']
     ];
@@ -3647,7 +4109,16 @@
     '运维': 'Operations', '帮助': 'Help', '退出登录': 'Sign out',
     '📘 快速上手': '📘 Quick start', '🖥️ 接入主机示例': '🖥️ Enroll host example',
     '外部文件代缓存': 'External binary cache', '系统设置': 'System settings',
-    '用户管理': 'Users', '用户字段': 'User fields', '团队管理': 'Team management', '角色管理': 'Role management',
+    '用户管理': 'Users', '用户字段': 'User fields', '主机字段': 'Host fields',
+    '主机字段定义': 'Host field definitions', '用户字段定义': 'User field definitions',
+    '主机字段映射': 'Host field mappings', '扫描来源键': 'Scan source keys',
+    '新增映射': 'Add mapping', '编辑映射': 'Edit mapping', '导入所选': 'Import selected',
+    '重新扫描': 'Rescan', '同步 consul_mgr': 'Sync consul_mgr',
+    '来源': 'Source', '来源键': 'Source key', '目标字段': 'Target field',
+    '写入方式': 'Write mode', '仅补空': 'Fill blanks', '覆盖': 'Overwrite',
+    '启用': 'Enabled', '停用': 'Disabled', '主机数': 'Hosts', '样例值': 'Samples',
+    '现有映射': 'Existing mapping', '已映射': 'Mapped',
+    '团队管理': 'Team management', '角色管理': 'Role management',
     '服务组': 'Service groups', '服务组管理': 'Service group management', '组织架构': 'Org structure', 'FlyIAM 人员': 'FlyIAM users',
     '登录': 'Sign in', '用户名': 'Username', '密码': 'Password', '正在登录…': 'Signing in…',
     '创建任务': 'Create task', '上传制品': 'Upload artifact', '新建组件': 'New component',
@@ -5516,6 +5987,33 @@
         if (d.deleted) msg += '，清理已移除主机 ' + d.deleted + ' 台';
         if (d.cleanup_skipped && d.cleanup_skipped !== '未开启自动清理') {
           msg += '\n未清理: ' + d.cleanup_skipped;
+        }
+        msg += '\n耗时: ' + d.duration;
+        if (d.mappings === 0) {
+          msg += '\n\n提示：当前没有启用的字段映射，只写入了主机 IP 与位置信息。' +
+            '可在「人员组织 → 主机字段映射」配置要同步哪些字段。';
+        }
+        alert(msg);
+        loadHosts();
+      })
+      .catch(function (e) { alert('同步失败: ' + e.message); });
+  }
+
+  // syncHostsFromMgr 从 consul_mgr 同步主机（覆盖多个服务组/多套 Consul）。
+  //
+  // 与「同步 Consul」并列而非替代：两者来源不同，可按环境选用或同时使用。
+  function syncHostsFromMgr() {
+    api('/api/hosts/sync-consul-mgr', { method: 'POST' })
+      .then(function (d) {
+        var msg = '同步完成: 主机 ' + d.upserted + ' 台（服务组 ' + d.groups + ' 个）';
+        if (d.partial) {
+          // 部分服务组失败时清单不完整，必须让用户知道，否则会误以为主机变少了。
+          msg += '\n\n⚠️ 部分服务组查询失败，清单不完整：' +
+            (d.failed_groups || []).join('、');
+        }
+        if (d.mappings === 0) {
+          msg += '\n\n提示：consul_mgr 来源还没有启用的字段映射。' +
+            '可在「人员组织 → 主机字段映射」里扫描来源键并配置。';
         }
         msg += '\n耗时: ' + d.duration;
         alert(msg);

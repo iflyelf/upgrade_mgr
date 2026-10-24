@@ -158,6 +158,9 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.Handle("PUT /api/auth/password", middleware.RateLimitMiddleware(loginLimiter)(middleware.RequireAuth(auth, handler.ChangePassword(sc))))
 	mux.HandleFunc("GET /api/hosts", middleware.RequireAuth(auth, handler.ListHosts(sc)))
 	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, handler.SyncHosts(sc)))
+	// 从 consul_mgr 同步（覆盖多个服务组/多套 Consul）；与直连 Consul 同步并存。
+	mux.HandleFunc("POST /api/hosts/sync-consul-mgr", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncHostsFromConsulMgr(sc))))
+	mux.HandleFunc("POST /api/consul-mgr/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestConsulMgr(sc))))
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
 	mux.HandleFunc("POST /api/hosts/{id}/tunnel-test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostTunnelTest(sc))))
@@ -252,6 +255,15 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CreateFieldDef(sc))))
 	mux.HandleFunc("PUT /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UpdateFieldDef(sc))))
 	mux.HandleFunc("DELETE /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DeleteFieldDef(sc))))
+	// 主机字段映射（外部来源键 → 内置列/自定义字段；零硬编码）
+	mux.HandleFunc("GET /api/host-field-mappings", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListHostFieldMappings(sc))))
+	mux.HandleFunc("POST /api/host-field-mappings", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CreateHostFieldMapping(sc))))
+	mux.HandleFunc("PUT /api/host-field-mappings/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UpdateHostFieldMapping(sc))))
+	mux.HandleFunc("DELETE /api/host-field-mappings/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DeleteHostFieldMapping(sc))))
+	// 扫描外部来源实际存在的键 + 勾选导入为字段定义与映射
+	mux.HandleFunc("GET /api/host-field-mappings/scan", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ScanHostFieldKeys(sc))))
+	mux.HandleFunc("POST /api/host-field-mappings/import", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ImportHostFieldKeys(sc))))
+
 	// 人员信息（用户扩展字段值）
 	mux.HandleFunc("GET /api/users/fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListUserFieldsWithValues(sc))))
 	mux.HandleFunc("GET /api/users/{username}/fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GetUserFields(sc))))

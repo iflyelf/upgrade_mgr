@@ -31,6 +31,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/cache"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/consul"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/consulmgr"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbinprobe"
 	"github.com/iflyelf/upgrade_mgr/internal/rbac"
 	"github.com/iflyelf/upgrade_mgr/internal/setting"
@@ -142,7 +143,8 @@ func buildCache(c *config.RedisConfig) *cache.Cache {
 	return cache.New(cache.Options{
 		Enabled: c.Enabled, Mode: c.Mode, Host: c.Host, Port: c.Port,
 		Addrs: c.Hosts, MasterName: c.MasterName, Password: c.Password,
-		DB: c.DB, TTL: ttl, Prefix: c.Prefix,
+		DB: c.DB, TTL: ttl, HostsTTL: time.Duration(c.HostsTTL) * time.Second,
+		Prefix: c.Prefix,
 	})
 }
 
@@ -167,6 +169,27 @@ func (s *ServiceContext) GetCache() *cache.Cache {
 
 // Consul 返回当前 Consul 客户端（可能为 nil）。
 func (s *ServiceContext) Consul() *consul.Client { return s.consulRef.Load() }
+
+// ConsulMgr 按当前设置构造 consul_mgr 客户端；未配置地址或令牌时返回 nil。
+//
+// 不做长连接缓存：同步是低频操作，每次按最新设置构造即可，
+// 页面改完「设置 → consul_mgr 对接」立即生效，无需重启或显式重载。
+func (s *ServiceContext) ConsulMgr() *consulmgr.Client {
+	if s == nil || s.Settings == nil {
+		return nil
+	}
+	c := s.Settings.Snapshot().ConsulMgr
+	return consulmgr.NewClientTimeout(c.Endpoint, c.ServiceToken,
+		time.Duration(c.Timeout)*time.Second)
+}
+
+// ConsulMgrGroupID 返回配置中限定的服务组（0 表示全部）。
+func (s *ServiceContext) ConsulMgrGroupID() int64 {
+	if s == nil || s.Settings == nil {
+		return 0
+	}
+	return s.Settings.Snapshot().ConsulMgr.GroupID
+}
 
 // ReloadConsul 依当前配置重建 Consul 客户端；未启用或不可用时置 nil 并告警。
 func (s *ServiceContext) ReloadConsul() {

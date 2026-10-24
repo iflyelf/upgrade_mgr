@@ -17,32 +17,46 @@ import (
 // 只缓存 JSON 200 响应；带 Set-Cookie 的响应不缓存（登录态变化）。
 // 键包含会话 cookie 哈希，天然按用户隔离，不会串租户数据。
 var cacheablePaths = map[string]bool{
-	"/api/hosts":             true,
-	"/api/agents/stats":      true,
-	"/api/components":        true,
-	"/api/artifacts":         true,
-	"/api/artifacts/paged":   true,
-	"/api/tasks":             true,
-	"/api/tasks/creators":    true,
-	"/api/audit-logs":        true,
-	"/api/settings":          true,
-	"/api/quickstart":        true,
-	"/api/my/permissions":    true,
-	"/api/users":             true,
-	"/api/users/fields":      true,
-	"/api/roles":             true,
-	"/api/teams":             true,
-	"/api/service-groups":    true,
-	"/api/host-groups":       true,
-	"/api/org/departments":   true,
-	"/api/flyiam/users":      true,
-	"/api/external/binaries": true,
-	"/api/tenants":           true,
+	"/api/hosts":               true,
+	"/api/agents/stats":        true,
+	"/api/components":          true,
+	"/api/artifacts":           true,
+	"/api/artifacts/paged":     true,
+	"/api/tasks":               true,
+	"/api/tasks/creators":      true,
+	"/api/audit-logs":          true,
+	"/api/settings":            true,
+	"/api/quickstart":          true,
+	"/api/my/permissions":      true,
+	"/api/users":               true,
+	"/api/users/fields":        true,
+	"/api/host-field-mappings": true,
+	"/api/roles":               true,
+	"/api/teams":               true,
+	"/api/service-groups":      true,
+	"/api/host-groups":         true,
+	"/api/org/departments":     true,
+	"/api/flyiam/users":        true,
+	"/api/external/binaries":   true,
+	"/api/tenants":             true,
 }
 
 // cacheablePath 判断是否属于可缓存列表端点（排除详情、写操作与 Agent 高频接口）。
 func cacheablePath(path string) bool {
 	return cacheablePaths[path]
+}
+
+// ttlFor 返回某端点的缓存时长。
+//
+// /api/hosts 在几万台规模下是最重的查询，支持单独配置更长的 TTL
+// （redis.hosts_ttl）；其余端点沿用通用 TTL。
+// 两者都依赖「任意写请求清空 http 前缀」来保证修改立即可见，
+// 所以放长主机列表 TTL 不会让页面操作看起来没生效。
+func ttlFor(c *cache.Cache, path string) time.Duration {
+	if path == "/api/hosts" {
+		return c.HostsTTL()
+	}
+	return c.TTL()
 }
 
 // CachedResponse 缓存的响应体。
@@ -68,7 +82,7 @@ func Cache(provider func() *cache.Cache) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			ttl := c.TTL()
+			ttl := ttlFor(c, r.URL.Path)
 			// 写操作：清空缓存后透传（Agent 心跳/轮询不参与）。
 			if r.Method != http.MethodGet && r.Method != http.MethodHead &&
 				strings.HasPrefix(r.URL.Path, "/api/") &&

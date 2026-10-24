@@ -151,6 +151,52 @@ var Registry = []Item{
 		Get: func(c *config.Config) string { return c.FlyIAM.ServiceToken },
 		Set: func(c *config.Config, v string) { c.FlyIAM.ServiceToken = strings.TrimSpace(v) }},
 
+	// consul_mgr 对接：一次拉取多个服务组（各自独立的 Consul）的主机清单
+	{Key: "consul_mgr.endpoint", Group: "consul_mgr 对接",
+		Label: "consul_mgr 后端地址（如 http://consul-mgr.internal:8888；留空表示不启用）", Type: "string",
+		Get: func(c *config.Config) string { return c.ConsulMgr.Endpoint },
+		Set: func(c *config.Config, v string) {
+			c.ConsulMgr.Endpoint = strings.TrimRight(strings.TrimSpace(v), "/")
+		},
+		Validate: func(v string) error {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return nil
+			}
+			return validateHTTPURL(v)
+		}},
+	{Key: "consul_mgr.service_token", Group: "consul_mgr 对接",
+		Label: "服务令牌（需与 consul_mgr「设置 → 服务间 API」的入站令牌一致）",
+		Type:  "secret", Secret: true,
+		Get: func(c *config.Config) string { return c.ConsulMgr.ServiceToken },
+		Set: func(c *config.Config, v string) { c.ConsulMgr.ServiceToken = strings.TrimSpace(v) }},
+	{Key: "consul_mgr.timeout", Group: "consul_mgr 对接",
+		Label: "请求超时秒数（默认 30；主机多时适当放大）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.Itoa(c.ConsulMgr.Timeout) },
+		Set: func(c *config.Config, v string) { setInt(&c.ConsulMgr.Timeout, v) },
+		Validate: func(v string) error {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 5 || n > 600 {
+				return fmt.Errorf("超时应为 5-600 秒")
+			}
+			return nil
+		}},
+	{Key: "consul_mgr.group_id", Group: "consul_mgr 对接",
+		Label: "只同步指定服务组 ID（0 表示全部启用的服务组）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.FormatInt(c.ConsulMgr.GroupID, 10) },
+		Set: func(c *config.Config, v string) {
+			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n >= 0 {
+				c.ConsulMgr.GroupID = n
+			}
+		},
+		Validate: func(v string) error {
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil || n < 0 {
+				return fmt.Errorf("服务组 ID 应为 0 或正整数")
+			}
+			return nil
+		}},
+
 	// 外部文件代缓存（供老系统通过 HTTP 获取公网文件）
 	{Key: "server.external_binaries", Group: "外部文件代缓存",
 		Label: "白名单（每行 name=地址；脚本用 script: 前缀，如 windows-exporter-install.ps1=script:https://...）",
@@ -258,6 +304,10 @@ var Registry = []Item{
 	{Key: "redis.ttl", Group: "Redis 连接配置", Label: "只读列表缓存秒数（默认 10，上限 30；写操作会立即失效）", Type: "int",
 		Get: func(c *config.Config) string { return strconv.Itoa(c.Redis.TTL) },
 		Set: func(c *config.Config, v string) { setInt(&c.Redis.TTL, v) }},
+	{Key: "redis.hosts_ttl", Group: "Redis 连接配置",
+		Label: "主机列表缓存秒数（0=同上；上限 300。几万台规模时可调到 60-120）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Redis.HostsTTL) },
+		Set: func(c *config.Config, v string) { setInt(&c.Redis.HostsTTL, v) }},
 	{Key: "redis.prefix", Group: "Redis 连接配置", Label: "键前缀（默认 upgrade_mgr:，多环境共用实例时用于隔离）", Type: "string",
 		Get: func(c *config.Config) string { return c.Redis.Prefix },
 		Set: func(c *config.Config, v string) { c.Redis.Prefix = strings.TrimSpace(v) }},

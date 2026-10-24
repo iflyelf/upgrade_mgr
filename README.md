@@ -470,7 +470,16 @@ redis:
   password: "请替换为实际密码"
   db: 0                     # cluster 固定 0；超出服务器 databases 范围会自动回退并提示
   ttl: 10                   # 只读列表缓存秒数（上限 30，写操作立即失效）
+  hosts_ttl: 0              # /api/hosts 单独 TTL（秒）；0=沿用 ttl，上限 300
   prefix: "upgrade_mgr:"    # 与同实例其它系统隔离
+
+# 可选：从 consul_mgr 同步主机（覆盖多个服务组 / 多套 Consul）
+# 需在 consul_mgr 的「设置 → 服务间 API」配置同一个令牌
+consul_mgr:
+  endpoint: ""                # 如 http://consul-mgr.internal:8888
+  service_token: ""           # 与 consul_mgr 的 service_api.token 一致
+  timeout: 30                 # 请求超时秒数；主机多时放大
+  group_id: 0                 # 只同步指定服务组；0=全部启用的组
 
 agent:
   poll_hold: 20
@@ -486,8 +495,11 @@ agent:
 #   集群：   mode=cluster  hosts=["10.1.230.44:7000","10.1.230.45:7000","10.1.230.46:7000"]
 #   哨兵：   mode=sentinel hosts=["10.1.230.50:26379"] master_name=mymaster
 # 环境变量：REDIS_ENABLED / REDIS_MODE / REDIS_HOST / REDIS_PORT / REDIS_ADDRS /
-#          REDIS_MASTER_NAME / REDIS_PASSWORD / REDIS_DB / REDIS_CACHE_TTL / REDIS_PREFIX
+#          REDIS_MASTER_NAME / REDIS_PASSWORD / REDIS_DB / REDIS_CACHE_TTL /
+#          REDIS_HOSTS_CACHE_TTL / REDIS_PREFIX
 # 页面「设置 → Redis 缓存」可查看实际连接的 DB、TTL、前缀与最近错误，并测试/清空缓存。
+# 几万台规模可把 hosts_ttl 调到 60-300 秒：/api/hosts 是最重的查询，
+# 任意写请求仍会立即清空缓存，所以页面改动不会看起来没生效。
 
 # 可选：FlyIAM 集成（人员对照、字段同步、组织树同步）
 # flyiam:
@@ -2884,6 +2896,59 @@ MIT © iflyelf
 - Agent 在切换连接地址时把原因/时间写入 state（`applied_override`、`last_switch_*`），
   跨进程可见，重启后仍能追溯。
 
+### 2026-10-24 主机字段映射（去硬编码）+ consul_mgr 主机同步
+
+- **去掉硬编码的 Meta 映射**：原先 `internal/logic/sync` 把 7 个 ServiceMeta 键
+  （`account`/`app_code`/`group`/`department`/`vendor`/`os_type`/`host_type`）
+  写死映射到固定列，加一个来源键就要改代码，自定义字段也拿不到 Consul 数据。
+  现在映射关系存库（`host_field_mappings`），页面可增删改：
+  - `target_kind=column`：写入 hosts 内置列，列名限定在白名单内；
+  - `target_kind=custom`：写入 `hosts.custom_fields`，键须已在 `host_field_defs` 定义；
+  - `overwrite=false`（默认）只补空值，不覆盖人工维护的内容；`true` 以外部为准；
+  - 多条映射指向同一字段时按 `sort_order` 先到先得，可配置「取 app_code，没有就取 appCode」这类回退链。
+  - 迁移 029 的种子数据与原硬编码行为完全一致，升级后同步结果不变。
+  - 安全：列名只来自 `hostfieldmap.AllowedColumns` 白名单（迁移里另有 CHECK 约束兜底），
+    不拼接任何外部输入；`ip`/`agent_id`/`source`/`tenant_id` 与 Agent 实测的
+    `os_family`/`arch` 等一律不可被映射覆盖。
+
+- **从 consul_mgr 同步主机**：consul_mgr 的每个服务组各自配置独立的 Consul
+  地址与令牌，一个环境常有多套 Consul，而 upgrade_mgr 的 `consul` 配置只能连一套。
+  新增 `POST /api/hosts/sync-consul-mgr`：一次拿到全部服务组的主机，并带上服务组归属。
+  - consul_mgr 侧新增只读服务间接口 `GET /api/service/hosts`（按 IP 聚合，
+    返回完整 ServiceMeta + 服务组归属 + 健康状态），用 `X-Service-Token` 鉴权，
+    与用户会话完全隔离；令牌留空则不注册该路由（默认关闭，零暴露面）。
+    接口只读，不返回 `consul_token` 等凭据。
+  - 服务组名/编码、服务名、标签、健康状态等结构化信息以 `__` 前缀的保留键
+    （`__group_name`、`__services` 等）并入来源键空间，和普通 Meta 一样可被映射。
+  - 主机 `source` 标记为 `consul_mgr`，与直连 Consul 的主机区分；两种来源各自
+    独立的同步锁，可并行。**不做「清理已移除主机」**：服务组可能被临时禁用或
+    连接失败，据此删本地主机风险过高，清理仍只由直连 Consul 的同步负责。
+  - 部分服务组查询失败时返回 `partial=true` 与失败组名，页面明确告警。
+
+- **扫描来源键 → 人工勾选导入**：不清楚外部有哪些键时，
+  `GET /api/host-field-keys?source=` 真实拉一次数据，统计每个键出现的主机数与
+  样例值，并标注是否已映射；勾选后 `POST /api/host-field-keys/import` 按键名
+  创建主机自定义字段并建立映射。**绝不自动创建字段**，避免外部 Meta 污染字段空间。
+  导入按 `(source, source_key)` 幂等，已存在的映射会跳过而非覆盖。
+
+- **新增接口**：`GET/POST /api/host-field-mappings`、
+  `PUT/DELETE /api/host-field-mappings/{id}`、`GET /api/host-field-keys`、
+  `POST /api/host-field-keys/import`、`POST /api/hosts/sync-consul-mgr`、
+  `POST /api/consul-mgr/test`（连通性与令牌自检）。
+
+- **配置项**：`consul_mgr.endpoint/service_token/timeout/group_id`，
+  环境变量 `CONSUL_MGR_ENDPOINT/CONSUL_MGR_SERVICE_TOKEN/CONSUL_MGR_TIMEOUT/
+  CONSUL_MGR_GROUP_ID`；页面「设置 → consul_mgr 对接」可改并即时生效。
+  consul_mgr 侧对应 `ServiceAPI.Token`（env `CONSUL_MGR_SERVICE_API_TOKEN`）。
+
+- **页面**：「人员组织 → 主机字段映射」管理规则 + 扫描弹窗；主机页新增
+  「同步 consul_mgr」按钮。映射的来源列表、内置列候选、保留键说明全部由后端下发，
+  前端不硬编码任何键名。
+
+- **验证**：新增 `hostfieldmap` 单测（白名单、回退链、保留键、覆盖语义）与
+  `upsert` 的真实库集成测试（映射写入、未映射键不入库、overwrite 两种语义、
+  空映射集）。迁移 029 在真实 PostgreSQL 上验证，种子数据与原行为逐条比对一致。
+
 ### 2026-10-24 顶栏菜单 + 人员组织对齐 + Redis 缓存
 
 - **页面布局对齐 consul_mgr**：顶栏改为一级菜单 + 下拉（主机/组件/制品/任务、
@@ -2912,3 +2977,28 @@ MIT © iflyelf
     范围，自动回退到最大可用 DB 并在状态/日志中提示；键前缀仍保证逻辑隔离。
 - **E2E**：Playwright 用例更新为顶栏下拉交互，并新增「帮助菜单」「人员组织」
   「英文切换」断言，7/7 通过。
+
+### 2026-10-24 主机自定义字段管理界面 + 主机列表独立 TTL
+
+- **主机字段定义可在页面维护**：后端 `/api/field-defs/host` 早已具备完整 CRUD，
+  但前端只有「用户字段」入口，主机字段只能靠接口或改库维护。现「人员组织」新增
+  **主机字段** 子页签（顶栏下拉与窄屏页签同步），支持新增 / 编辑 / 删除，
+  类型覆盖 text / textarea / number / select / date。
+  - `showInList` 勾选后作为主机列表的一列，`showInForm` 控制是否出现在「主机 → 编辑」；
+  - 编辑时**锁定字段键**：后端改键不会迁移已存的值（`hosts.custom_fields` JSONB），
+    会把历史数据变成孤儿，需要换键时请新建字段；
+  - 删除会连带清理各主机该字段的值，弹窗二次确认并明确提示；
+  - 字段定义改动后主机页缓存的定义同步失效，列表列立即按新定义渲染；
+  - 「用户字段」与「主机字段」共用 `state.orgNewField`，切换子页签时统一清空，
+    避免在一个页签打开表单后切到另一个、提交到错误的 kind。
+- **`/api/hosts` 支持独立 TTL**：新增 `redis.hosts_ttl`（秒，0=沿用 `redis.ttl`，
+  上限 300）。几万台规模下主机列表是最重的查询，而其内容只由页面写操作改变，
+  任意写请求都会清空 `http` 缓存前缀，所以放长到分钟级不会让操作看起来没生效。
+  - 小于通用 TTL 时自动抬到通用值，超过 300 秒按上限生效并记日志；
+  - 环境变量 `REDIS_HOSTS_CACHE_TTL`；设置页「Redis 连接配置」可直接填；
+  - 状态卡片与 `GET /api/cache/status` 增加「主机列表 TTL」（`hosts_ttl_seconds`），
+    未单独配置时显示「与通用 TTL 相同」；
+  - Agent 心跳/版本变化最迟在该时长后可见，这是放长 TTL 的唯一代价。
+- **验证**：`go build ./...`、`go vet ./...` 全绿；新增 `internal/middleware/cache_ttl_test.go`
+  与 cache 包 TTL 用例；用真实 Redis（10.1.230.44:7000）验证四种 TTL 组合
+  （回退 / 显式 / 超限收敛 / 低于通用值抬升）与读写往返均符合预期。

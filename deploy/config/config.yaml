@@ -68,6 +68,14 @@ consul:                       # 可选：主机与业务分组数据源
   sync_on_start: false
   sync_interval: ""           # 如 5m / 1h，留空不定时
 
+consul_mgr:                   # 可选：从 consul_mgr 同步主机（覆盖多服务组/多套 Consul）
+  endpoint: ""                # consul_mgr 后端地址（env CONSUL_MGR_ENDPOINT）
+  service_token: ""           # 需与 consul_mgr「设置 → 服务间 API」一致（env CONSUL_MGR_SERVICE_TOKEN）
+  timeout: 30                 # 请求超时秒数（env CONSUL_MGR_TIMEOUT）
+  group_id: 0                 # 只同步指定服务组；0=全部启用的组（env CONSUL_MGR_GROUP_ID）
+# 字段映射（哪个来源键写到哪个本地字段）不在配置文件里，
+# 存于 host_field_mappings 表，在「人员组织 → 主机字段映射」中维护。
+
 casdoor:                      # 可选：与 consul_mgr 共用 FlyIAM 实现 SSO（auth.provider=casdoor 时启用）
   endpoint: ""                # 服务端访问 Casdoor 地址，如 http://10.0.56.118:8000
   public_endpoint: ""         # 浏览器访问地址；留空复用 endpoint
@@ -88,6 +96,8 @@ redis:                        # 可选：页面响应缓存（只读 API），�
   password: ""                # env REDIS_PASSWORD（页面设置保存后加密占位显示）
   db: 0                       # env REDIS_DB；集群固定 0；超出 servers 范围自动回退并提示
   ttl: 10                     # 只读列表缓存秒数，上限 30（env REDIS_CACHE_TTL）
+  hosts_ttl: 0                # /api/hosts 单独 TTL 秒数，0=沿用 ttl，上限 300（env REDIS_HOSTS_TTL）
+                              # 主机上万台时该查询最重，可调到 60-120；写操作仍立即失效
   prefix: "upgrade_mgr:"      # 键前缀，与同实例其它系统隔离（env REDIS_PREFIX）
 
 artifact:

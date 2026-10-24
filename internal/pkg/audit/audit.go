@@ -128,6 +128,16 @@ const (
 	ActionGroupDelete      = "group.delete"
 	ActionPermissionSet    = "permission.set"
 	ActionPermissionDelete = "permission.delete"
+	// 主机字段映射（外部来源键 → 本地字段）
+	ActionHostFieldMapCreate = "hostfieldmap.create"
+	ActionHostFieldMapUpdate = "hostfieldmap.update"
+	ActionHostFieldMapDelete = "hostfieldmap.delete"
+	ActionHostFieldMapImport = "hostfieldmap.import"
+	// ActionConsulMgrSync 从 consul_mgr 同步主机清单。
+	ActionConsulMgrSync = "consul_mgr.sync"
+	// 主机同步（直连 Consul / 经 consul_mgr）
+	ActionHostSync = "host.sync"
+
 	// FlyIAM 集成（字段定义同步）
 	ActionFlyIAMSync      = "flyiam.sync"
 	ActionTaskStart       = "task.start"
