@@ -1,6 +1,8 @@
 package sync
 
 import (
+	"context"
+	"sort"
 	"strings"
 
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/consul"
@@ -17,7 +19,7 @@ import (
 //
 // 返回：每台主机的 Meta 快照、扫描到的主机数。
 // 单个服务查询失败只跳过该服务（与同步一致），不中断整次扫描。
-func ScanConsulMeta(cli *consul.Client) ([]map[string]string, int, error) {
+func ScanConsulMeta(ctx context.Context, cli *consul.Client, concurrency int) ([]map[string]string, int, error) {
 	if cli == nil {
 		return nil, 0, nil
 	}
@@ -26,15 +28,19 @@ func ScanConsulMeta(cli *consul.Client) ([]map[string]string, int, error) {
 		return nil, 0, err
 	}
 	agg := map[string]*hostRow{}
+	serviceNames := make([]string, 0, len(services))
 	for name := range services {
 		if name == "consul" {
 			continue
 		}
-		insts, err := cli.ServiceInstances(name)
-		if err != nil {
+		serviceNames = append(serviceNames, name)
+	}
+	sort.Strings(serviceNames)
+	for _, fetched := range fetchServicesBounded(ctx, serviceNames, concurrency, cli.ServiceInstances) {
+		if fetched.err != nil {
 			continue
 		}
-		for _, in := range insts {
+		for _, in := range fetched.instances {
 			if in.Address == "" {
 				continue
 			}

@@ -63,7 +63,7 @@ func NewSyncer(db *sql.DB) *Syncer { return &Syncer{db: db} }
 //   - 存在 agents 记录、未完成任务/指令的主机不删；
 //   - 任一服务实例查询失败（可能只拿到部分清单）时整轮跳过清理；
 //   - 本轮未发现任何主机时跳过清理，避免 Consul 空/配置错误导致清空。
-func (s *Syncer) SyncFromConsul(ctx context.Context, cli *consul.Client, cleanupMissing bool) (*Result, error) {
+func (s *Syncer) SyncFromConsul(ctx context.Context, cli *consul.Client, cleanupMissing bool, concurrency int) (*Result, error) {
 	if cli == nil {
 		return nil, fmt.Errorf("consul 客户端未初始化")
 	}
@@ -95,21 +95,26 @@ func (s *Syncer) SyncFromConsul(ctx context.Context, cli *consul.Client, cleanup
 	}
 	res.Services = len(services)
 
-	// 按 IP 聚合，避免同一主机多服务重复写库
+	// 按 IP 聚合，避免同一主机多服务重复写库。
+	// 服务实例查询使用配置的有界并发，降低大量服务时的总网络往返耗时。
 	agg := map[string]*hostRow{}
+	serviceNames := make([]string, 0, len(services))
 	for name := range services {
 		if name == "consul" {
 			continue
 		}
-		insts, err := cli.ServiceInstances(name)
-		if err != nil {
+		serviceNames = append(serviceNames, name)
+	}
+	sort.Strings(serviceNames)
+	for _, fetched := range fetchServicesBounded(ctx, serviceNames, concurrency, cli.ServiceInstances) {
+		if fetched.err != nil {
 			// 单服务失败仍同步其它服务，但本轮清单不完整，必须跳过清理。
 			res.FailedServices++
 			res.Partial = true
 			continue
 		}
-		res.Instances += len(insts)
-		for _, in := range insts {
+		res.Instances += len(fetched.instances)
+		for _, in := range fetched.instances {
 			if in.Address == "" {
 				continue
 			}

@@ -137,7 +137,8 @@ func ScanHostFieldKeys(s *svc.ServiceContext) http.HandlerFunc {
 					"Consul 未启用或不可用，可在「设置 → Consul」配置后重试")
 				return
 			}
-			m, n, err := synclogic.ScanConsulMeta(cli)
+			snap := s.Settings.Snapshot()
+			m, n, err := synclogic.ScanConsulMeta(r.Context(), cli, snap.Consul.Concurrency)
 			if err != nil {
 				httpx.FailErrf(w, http.StatusBadGateway, "读取 Consul 失败", err)
 				return

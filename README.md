@@ -2912,7 +2912,7 @@ MIT © iflyelf
 
 ### 2026-10-24 配置项全面页面化（设置页覆盖 config.yaml）
 
-- **设置页从 42 项扩充到 78 项**，`deploy/config/config.yaml` 中除「数据库连接」与
+- **设置页从 42 项扩充到 81 项**，`deploy/config/config.yaml` 中除「数据库连接」与
   三个首启动凭据外，全部可在页面维护；保存即写 `app_settings`（优先级最高）。
 - 新增可页面配置：`server.host/port/web_embedded/trust_proxy/trusted_proxies/
   cookie_secure/metrics_token/session_secret/agent_binary_dir`、
@@ -2927,9 +2927,13 @@ MIT © iflyelf
   `Apply` 中显式拒绝修改只读项，不只依赖前端禁用。
 - **S3/OSS 参数补齐**：此前 `storage_type` 可在页面选 `s3`，但端点/桶/密钥只能写
   配置文件，选了必然降级回 local，属于死路；现在同组内可一并填写。
-- **标注三个无效配置**：`server.cors_origins`、`consul.concurrency`、`agent.clock_skew`
-  在代码中只有声明、没有任何读取点（Agent 侧时钟偏移窗口固定 10 分钟），
-  已在配置文件中注明「当前未生效」，避免继续误用。
+- **三个历史无效配置现已全部实现**：
+  - `server.cors_origins`：严格 http/https Origin 白名单，支持带 Cookie 的跨域请求与
+    OPTIONS 预检；不支持 `*`，设置页保存后即时生效，Redis HIT/MISS 都会添加一致的头；
+  - `consul.concurrency`：同步及来源键扫描按服务有界并发查询（1-128），worker pool
+    数量固定；结果仍按服务名排序聚合，避免并发完成顺序改变 Meta 冲突结果；
+  - `agent.clock_skew`：通过心跳下发到 Agent、写入 state，并用于 HMAC 指令验签；
+    设置页修改后最迟一个心跳周期生效，限制为 30s-30m（旧 Agent 默认 10m 兼容）。
 - 新增 `internal/setting/registry_test.go`：覆盖键重复、Get/Set 完整性、
   只读项拒改与不落库、需重启项有提示、secret 脱敏。
 

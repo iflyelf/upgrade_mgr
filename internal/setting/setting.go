@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/corsx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 )
 
@@ -55,12 +56,24 @@ var Registry = []Item{
 		Validate: validateExternalURL},
 	{Key: "server.agent_binary_dir", Group: "服务器",
 		Label: "Agent 二进制目录（供 /api/agent/binary/{name} 下载，默认 ./dist）", Type: "string",
-		Note:  "文件名须为 upgrade-agent-<os>-<arch>[-legacy][.exe]；接入 Windows 主机必须放入 windows-*.exe",
-		Get:   func(c *config.Config) string { return c.Server.AgentBinaryDir },
+		Note: "文件名须为 upgrade-agent-<os>-<arch>[-legacy][.exe]；接入 Windows 主机必须放入 windows-*.exe",
+		Get:  func(c *config.Config) string { return c.Server.AgentBinaryDir },
 		Set: func(c *config.Config, v string) {
 			if t := strings.TrimSpace(v); t != "" {
 				c.Server.AgentBinaryDir = t
 			}
+		}},
+	{Key: "server.cors_origins", Group: "服务器",
+		Label: "允许跨域的 Origin（逗号分隔，如 https://ops.example.com）", Type: "string",
+		Note: "精确匹配 scheme + host + port；不支持 *。保存后 CORS 中间件立即生效。",
+		Get:  func(c *config.Config) string { return strings.Join(c.Server.CORSOrigins, ",") },
+		Set: func(c *config.Config, v string) {
+			origins, _ := corsx.NormalizeOrigins(splitComma(v))
+			c.Server.CORSOrigins = origins
+		},
+		Validate: func(v string) error {
+			_, err := corsx.NormalizeOrigins(splitComma(v))
+			return err
 		}},
 
 	// 以下服务器项在启动时绑定到监听地址/中间件/会话编解码器上，
@@ -166,11 +179,17 @@ var Registry = []Item{
 		Set:      func(c *config.Config, v string) { setInt(&c.Consul.Timeout, v) },
 		Validate: validateIntRange(1, 300, "Consul 超时"),
 		Note:     "保存后重建 Consul 客户端即时生效。"},
+	{Key: "consul.concurrency", Group: "Consul",
+		Label: "服务实例查询并发数（默认 16）", Type: "int",
+		Get:      func(c *config.Config) string { return strconv.Itoa(c.Consul.Concurrency) },
+		Set:      func(c *config.Config, v string) { setInt(&c.Consul.Concurrency, v) },
+		Validate: validateIntRange(1, 128, "Consul 并发数"),
+		Note:     "同步与来源键扫描按服务并行查询；值越大越快，但会增加 Consul 压力。"},
 	{Key: "consul.sync_on_start", Group: "Consul",
 		Label: "启动时自动同步一次", Type: "bool",
-		Get:   func(c *config.Config) string { return b2s(c.Consul.SyncOnStart) },
-		Set:   func(c *config.Config, v string) { c.Consul.SyncOnStart = v == "true" },
-		Note:  "仅影响下次启动；当前进程不会因保存而立即同步（可用主机页「同步 Consul」手动触发）。"},
+		Get:  func(c *config.Config) string { return b2s(c.Consul.SyncOnStart) },
+		Set:  func(c *config.Config, v string) { c.Consul.SyncOnStart = v == "true" },
+		Note: "仅影响下次启动；当前进程不会因保存而立即同步（可用主机页「同步 Consul」手动触发）。"},
 
 	// 认证
 	{Key: "auth.provider", Group: "认证", Label: "认证方式", Type: "enum",
@@ -228,8 +247,8 @@ var Registry = []Item{
 		Restart: true},
 	{Key: "casdoor.redirect_uri", Group: "Casdoor（需重启）",
 		Label: "OAuth2 回调地址（留空按 server.external_url + /api/auth/callback 推导）", Type: "string",
-		Get:   func(c *config.Config) string { return c.Casdoor.RedirectURI },
-		Set:   func(c *config.Config, v string) { c.Casdoor.RedirectURI = strings.TrimSpace(v) },
+		Get: func(c *config.Config) string { return c.Casdoor.RedirectURI },
+		Set: func(c *config.Config, v string) { c.Casdoor.RedirectURI = strings.TrimSpace(v) },
 		Validate: func(v string) error {
 			if strings.TrimSpace(v) == "" {
 				return nil
@@ -247,8 +266,8 @@ var Registry = []Item{
 		Note:    "制品仓储在启动时绑定该目录；修改后需重启。已上传的制品不会自动迁移到新目录。"},
 	{Key: "artifact.max_size", Group: "制品",
 		Label: "单文件上限字节数（0=不限，默认按 2GB 处理）", Type: "int",
-		Get:   func(c *config.Config) string { return strconv.FormatInt(c.Artifact.MaxSize, 10) },
-		Set:   func(c *config.Config, v string) { setInt64(&c.Artifact.MaxSize, v) },
+		Get: func(c *config.Config) string { return strconv.FormatInt(c.Artifact.MaxSize, 10) },
+		Set: func(c *config.Config, v string) { setInt64(&c.Artifact.MaxSize, v) },
 		Validate: func(v string) error {
 			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 			if err != nil || n < 0 {
@@ -273,10 +292,10 @@ var Registry = []Item{
 		Restart: true,
 		Note:    "切换后需重启。改为 s3/oss 时必须同时填好下方对应参数，否则启动时初始化失败会自动降级为 local。"},
 	{Key: "artifact.s3_endpoint", Group: "制品存储后端（需重启）", Label: "S3/MinIO 端点（storage_type=s3）", Type: "string",
-		Get:      func(c *config.Config) string { return c.Artifact.S3Endpoint },
-		Set:      func(c *config.Config, v string) { c.Artifact.S3Endpoint = strings.TrimSpace(v) },
-		Restart:  true,
-		Note:     "如 http://minio:9000；留空则无法使用 s3 后端"},
+		Get:     func(c *config.Config) string { return c.Artifact.S3Endpoint },
+		Set:     func(c *config.Config, v string) { c.Artifact.S3Endpoint = strings.TrimSpace(v) },
+		Restart: true,
+		Note:    "如 http://minio:9000；留空则无法使用 s3 后端"},
 	{Key: "artifact.s3_region", Group: "制品存储后端（需重启）", Label: "S3 区域", Type: "string",
 		Get:     func(c *config.Config) string { return c.Artifact.S3Region },
 		Set:     func(c *config.Config, v string) { c.Artifact.S3Region = strings.TrimSpace(v) },
@@ -325,14 +344,26 @@ var Registry = []Item{
 		Validate: validateDuration(true)},
 	{Key: "agent.require_enroll_token", Group: "Agent",
 		Label: "强制要求注册令牌（生产环境强烈建议开启）", Type: "bool",
-		Get:   func(c *config.Config) string { return b2s(c.Agent.RequireEnrollToken) },
-		Set:   func(c *config.Config, v string) { c.Agent.RequireEnrollToken = v == "true" },
-		Note:  "关闭后任何能访问本服务的主机都可自行注册，仅限可信内网使用。"},
+		Get:  func(c *config.Config) string { return b2s(c.Agent.RequireEnrollToken) },
+		Set:  func(c *config.Config, v string) { c.Agent.RequireEnrollToken = v == "true" },
+		Note: "关闭后任何能访问本服务的主机都可自行注册，仅限可信内网使用。"},
 	{Key: "agent.enroll_token_ttl", Group: "Agent",
 		Label: "注册令牌有效期（如 15m）", Type: "string",
-		Get:   func(c *config.Config) string { return c.Agent.EnrollTokenTTL },
-		Set:   func(c *config.Config, v string) { c.Agent.EnrollTokenTTL = strings.TrimSpace(v) },
+		Get:      func(c *config.Config) string { return c.Agent.EnrollTokenTTL },
+		Set:      func(c *config.Config, v string) { c.Agent.EnrollTokenTTL = strings.TrimSpace(v) },
 		Validate: validateDuration(true)},
+	{Key: "agent.clock_skew", Group: "Agent",
+		Label: "指令签名允许的时钟偏移（如 5m）", Type: "string",
+		Get: func(c *config.Config) string { return c.Agent.ClockSkew },
+		Set: func(c *config.Config, v string) { c.Agent.ClockSkew = strings.TrimSpace(v) },
+		Validate: func(v string) error {
+			d, err := time.ParseDuration(strings.TrimSpace(v))
+			if err != nil || d < 30*time.Second || d > 30*time.Minute {
+				return fmt.Errorf("时钟偏移应为 30s-30m（建议 5m）")
+			}
+			return nil
+		},
+		Note: "服务端随心跳下发，Agent 最迟一个心跳周期内生效并持久化；窗口越大，重放防护越弱。"},
 	{Key: "agent.allow_exec_mode", Group: "Agent", Label: "允许 exec/script 模式与命令任务", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.AllowExecMode) },
 		Set: func(c *config.Config, v string) { c.Agent.AllowExecMode = v == "true" }},
@@ -527,8 +558,8 @@ var Registry = []Item{
 	// 这里只展示当前生效值，便于确认「服务到底连的哪个库」，修改仍走配置文件/环境变量。
 	{Key: "database.host", Group: "数据库（只读，改配置文件后重启）", Label: "主机", Type: "string",
 		ReadOnly: true, Note: "由 config.yaml 的 database.host 或环境变量 DB_HOST 提供",
-		Get:      func(c *config.Config) string { return c.Database.Host },
-		Set:      func(c *config.Config, v string) {}},
+		Get: func(c *config.Config) string { return c.Database.Host },
+		Set: func(c *config.Config, v string) {}},
 	{Key: "database.port", Group: "数据库（只读，改配置文件后重启）", Label: "端口", Type: "int",
 		ReadOnly: true,
 		Get:      func(c *config.Config) string { return strconv.Itoa(c.Database.Port) },
@@ -547,16 +578,16 @@ var Registry = []Item{
 		Set:      func(c *config.Config, v string) {}},
 	{Key: "database.max_open_conns", Group: "数据库（只读，改配置文件后重启）",
 		Label: "最大连接数", Type: "int", ReadOnly: true,
-		Get:   func(c *config.Config) string { return strconv.Itoa(c.Database.MaxOpenConns) },
-		Set:   func(c *config.Config, v string) {}},
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Database.MaxOpenConns) },
+		Set: func(c *config.Config, v string) {}},
 	{Key: "database.max_idle_conns", Group: "数据库（只读，改配置文件后重启）",
 		Label: "最大空闲连接数", Type: "int", ReadOnly: true,
-		Get:   func(c *config.Config) string { return strconv.Itoa(c.Database.MaxIdleConns) },
-		Set:   func(c *config.Config, v string) {}},
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Database.MaxIdleConns) },
+		Set: func(c *config.Config, v string) {}},
 	{Key: "database.conn_max_lifetime", Group: "数据库（只读，改配置文件后重启）",
 		Label: "连接最大存活秒数", Type: "int", ReadOnly: true,
-		Get:   func(c *config.Config) string { return strconv.Itoa(c.Database.ConnMaxLifetime) },
-		Set:   func(c *config.Config, v string) {}},
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Database.ConnMaxLifetime) },
+		Set: func(c *config.Config, v string) {}},
 
 	// 日志
 	{Key: "log.level", Group: "日志", Label: "级别", Type: "string",
@@ -880,4 +911,3 @@ func validateDuration(allowEmpty bool) func(string) error {
 		return nil
 	}
 }
-
