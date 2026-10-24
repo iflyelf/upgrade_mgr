@@ -40,11 +40,14 @@ type Config struct {
 	// ServerURLs 是备用连接地址列表（安装时用逗号分隔多个 --server 或手工写入
 	// state）。当前地址连续连接失败时按顺序轮换，减少对服务端下发覆盖的依赖。
 	// 隧道由隧道软件负责建立；这里只负责"连哪个入口"。
-	ServerURLs    []string `json:"server_urls,omitempty"`
-	EnrollToken   string
-	AgentID       string
-	Token         string
-	Secret        string
+	ServerURLs  []string `json:"server_urls,omitempty"`
+	EnrollToken string
+	AgentID     string
+	Token       string
+	Secret      string
+	// ClockSkew 是指令签名时间戳允许偏移窗口。服务端通过心跳下发并持久化；
+	// 旧 state 不含该字段时 New 会补默认 10m，保持历史行为。
+	ClockSkew     string `json:"clock_skew,omitempty"`
 	StatePath     string
 	LastHeartbeat time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
 	// Version/Variant 是编译期注入的构建信息，不写入 state：
@@ -128,6 +131,9 @@ func New(cfg Config) *Agent {
 		cfg.DefaultServerURL = cfg.ServerURL
 	}
 	cfg.DefaultServerURL = strings.TrimRight(cfg.DefaultServerURL, "/")
+	if d, err := time.ParseDuration(strings.TrimSpace(cfg.ClockSkew)); err != nil || d <= 0 {
+		cfg.ClockSkew = "10m"
+	}
 	// 把当前服务端地址导出为环境变量，随子进程（安装脚本/命令任务）继承。
 	// 供脚本在无法访问外网时改用平台自身提供的下载地址，例如 Windows
 	// 2008 R2 的 PowerShell 不支持 TLS 1.2，可用 http://<平台>/api/external/binary/...
@@ -282,6 +288,8 @@ func (a *Agent) heartbeat() {
 		log.Printf("⚠️ 心跳失败: %v", err)
 		a.handleConnectFailure()
 	} else {
+		// 设置页热更新：只接受正的合法 duration，非法值不覆盖当前有效值。
+		a.applyClockSkew(resp.ClockSkew)
 		// 记录服务端本次下发的覆盖地址，供 status 对比是否已生效。
 		if got := strings.TrimSpace(resp.ServerURL); got != a.cfg.RequestedOverride {
 			a.cfg.RequestedOverride = got
@@ -315,6 +323,18 @@ func (a *Agent) heartbeat() {
 	}
 	// 心跳是稳定的 30s 周期，用它补报执行结果，避免一次网络抖动导致任务卡死。
 	a.flushPendingReports()
+}
+
+// applyClockSkew 应用服务端下发的验签时钟窗口。
+// 返回 true 表示值发生变化；非法/空值保持当前有效配置。
+func (a *Agent) applyClockSkew(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	d, err := time.ParseDuration(raw)
+	if raw == "" || err != nil || d <= 0 || raw == a.cfg.ClockSkew {
+		return false
+	}
+	a.cfg.ClockSkew = raw
+	return true
 }
 
 func (a *Agent) poll(ctx context.Context) {
@@ -465,24 +485,28 @@ func (a *Agent) verifyCommand(cmd protocol.Command) error {
 		Method: "CMD", Body: body,
 		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
 	}
+	skew := 10 * time.Minute
+	if d, err := time.ParseDuration(a.cfg.ClockSkew); err == nil && d > 0 {
+		skew = d
+	}
 
 	// 新服务端同时下发 signature_v2。存在时必须校验通过，
 	// 不能回退到旧签名，否则攻击者可篡改 v2 签名实施降级。
 	if cmd.SignatureV2 != "" {
 		env.Path = cmd.SignedPath()
-		return signer.Verify(a.cfg.Secret, cmd.SignatureV2, env, 10*time.Minute)
+		return signer.Verify(a.cfg.Secret, cmd.SignatureV2, env, skew)
 	}
 
 	// 兼容旧服务端：signature_v2 缺失时，signature 可能是新版 SignedPath，
 	// 也可能只签了 ID。先按新版校验，失败再按旧版校验；两种服务端均可工作。
 	// 注意：缺失时的回退是为了兼容旧服务端，旧链路应配合 HTTPS 使用。
 	env.Path = cmd.SignedPath()
-	errV2 := signer.Verify(a.cfg.Secret, cmd.Signature, env, 10*time.Minute)
+	errV2 := signer.Verify(a.cfg.Secret, cmd.Signature, env, skew)
 	if errV2 == nil {
 		return nil
 	}
 	env.Path = cmd.ID
-	if errV1 := signer.Verify(a.cfg.Secret, cmd.Signature, env, 10*time.Minute); errV1 == nil {
+	if errV1 := signer.Verify(a.cfg.Secret, cmd.Signature, env, skew); errV1 == nil {
 		return nil
 	}
 	return errV2

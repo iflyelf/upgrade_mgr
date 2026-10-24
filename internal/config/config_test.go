@@ -26,6 +26,8 @@ func TestLoadConsulSyncEnv(t *testing.T) {
 	t.Setenv("CONSUL_ENABLED", "true")
 	t.Setenv("CONSUL_SYNC_ON_START", "true")
 	t.Setenv("CONSUL_SYNC_INTERVAL", "5m")
+	t.Setenv("CONSUL_CONCURRENCY", "7")
+	t.Setenv("CONSUL_TIMEOUT", "12")
 
 	c, err := Load("")
 	if err != nil {
@@ -36,6 +38,38 @@ func TestLoadConsulSyncEnv(t *testing.T) {
 	}
 	if c.Consul.SyncInterval != "5m" {
 		t.Fatalf("SyncInterval = %q, want 5m", c.Consul.SyncInterval)
+	}
+	if c.Consul.Concurrency != 7 || c.Consul.Timeout != 12 {
+		t.Fatalf("Consul 并发/超时未应用: %+v", c.Consul)
+	}
+}
+
+func TestLoadCORSAndClockSkewEnv(t *testing.T) {
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://OPS.example.com/,http://localhost:5173")
+	t.Setenv("AGENT_CLOCK_SKEW", "3m")
+	c, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.Server.CORSOrigins) != 2 || c.Server.CORSOrigins[0] != "https://ops.example.com" {
+		t.Fatalf("CORSOrigins=%#v", c.Server.CORSOrigins)
+	}
+	if c.Agent.ClockSkew != "3m" {
+		t.Fatalf("ClockSkew=%q", c.Agent.ClockSkew)
+	}
+}
+
+func TestLoadRejectsInvalidCORS(t *testing.T) {
+	t.Setenv("CORS_ALLOWED_ORIGINS", "*")
+	if _, err := Load(""); err == nil {
+		t.Fatal("通配符 CORS Origin 应被拒绝")
+	}
+}
+
+func TestLoadRejectsInvalidClockSkew(t *testing.T) {
+	t.Setenv("AGENT_CLOCK_SKEW", "2h")
+	if _, err := Load(""); err == nil {
+		t.Fatal("超过 30m 的 clock_skew 应被拒绝")
 	}
 }
 

@@ -18,6 +18,50 @@ func TestNewTrimsServerURL(t *testing.T) {
 	if a.cfg.ServerURL != "http://10.0.88.88:8090" {
 		t.Fatalf("ServerURL = %q, want %q", a.cfg.ServerURL, "http://10.0.88.88:8090")
 	}
+	if a.cfg.ClockSkew != "10m" {
+		t.Fatalf("ClockSkew = %q, want default 10m", a.cfg.ClockSkew)
+	}
+}
+
+func TestNewKeepsValidClockSkew(t *testing.T) {
+	a := New(Config{ServerURL: "http://127.0.0.1:8090", ClockSkew: "3m"})
+	if a.cfg.ClockSkew != "3m" {
+		t.Fatalf("ClockSkew = %q, want 3m", a.cfg.ClockSkew)
+	}
+}
+
+func TestApplyClockSkew(t *testing.T) {
+	a := New(Config{ServerURL: "http://127.0.0.1:8090"})
+	if !a.applyClockSkew("3m") || a.cfg.ClockSkew != "3m" {
+		t.Fatalf("合法配置未应用: %q", a.cfg.ClockSkew)
+	}
+	if a.applyClockSkew("bad") || a.cfg.ClockSkew != "3m" {
+		t.Fatalf("非法配置不应覆盖当前值: %q", a.cfg.ClockSkew)
+	}
+}
+
+func TestVerifyCommandUsesConfiguredClockSkew(t *testing.T) {
+	secret := "test-secret"
+	cmd := protocol.Command{
+		ID:        "skew-1",
+		Type:      protocol.CmdUpgradeComponent,
+		Payload:   protocol.CommandPayload{ToVersion: "2.0.0"},
+		Timestamp: time.Now().Add(-2 * time.Minute).Unix(),
+		Nonce:     "nonce-skew",
+		ExpireAt:  time.Now().Add(5 * time.Minute),
+	}
+	body, _ := json.Marshal(cmd.Payload)
+	cmd.SignatureV2 = signer.Sign(secret, signer.Envelope{
+		Method: "CMD", Path: cmd.SignedPath(), Body: body,
+		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
+	})
+
+	if err := New(Config{Secret: secret, ClockSkew: "1m"}).verifyCommand(cmd); err == nil {
+		t.Fatal("2 分钟前的签名不应通过 1m 窗口")
+	}
+	if err := New(Config{Secret: secret, ClockSkew: "3m"}).verifyCommand(cmd); err != nil {
+		t.Fatalf("2 分钟前的签名应通过 3m 窗口: %v", err)
+	}
 }
 
 func TestLoadStateEmptyFile(t *testing.T) {

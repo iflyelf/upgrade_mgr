@@ -284,7 +284,9 @@ func (s *ServiceContext) runSyncOnce() {
 	if cli == nil {
 		return
 	}
-	res, err := s.Syncer.SyncFromConsul(context.Background(), cli, s.Config.Consul.CleanupMissing)
+	snap := s.Settings.Snapshot()
+	res, err := s.Syncer.SyncFromConsul(context.Background(), cli,
+		snap.Consul.CleanupMissing, snap.Consul.Concurrency)
 	if errors.Is(err, synclogic.ErrSyncInProgress) {
 		return // 其他副本/请求正在同步，本轮跳过
 	}

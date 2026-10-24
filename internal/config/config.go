@@ -14,9 +14,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/corsx"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 )
 
@@ -303,6 +305,21 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	c.applyEnv()
+	origins, err := corsx.NormalizeOrigins(c.Server.CORSOrigins)
+	if err != nil {
+		return nil, fmt.Errorf("cors_origins 配置错误: %w", err)
+	}
+	c.Server.CORSOrigins = origins
+	if c.Consul.Concurrency < 1 || c.Consul.Concurrency > 128 {
+		return nil, fmt.Errorf("consul.concurrency 应为 1-128")
+	}
+	if c.Consul.Timeout < 1 || c.Consul.Timeout > 300 {
+		return nil, fmt.Errorf("consul.timeout 应为 1-300 秒")
+	}
+	skew, err := time.ParseDuration(strings.TrimSpace(c.Agent.ClockSkew))
+	if err != nil || skew < 30*time.Second || skew > 30*time.Minute {
+		return nil, fmt.Errorf("agent.clock_skew 应为 30s-30m（建议 5m）")
+	}
 	// 统一去掉结尾斜杠，避免拼接出 //api/... 导致 404。
 	c.Server.ExternalURL = strings.TrimRight(c.Server.ExternalURL, "/")
 	// 启动时校验白名单：配置写错（非法名称/地址、非白名单域名）直接报错，
@@ -374,6 +391,8 @@ func (c *Config) applyEnv() {
 	setStr(&c.Consul.Address, "CONSUL_ADDRESS")
 	setStr(&c.Consul.Token, "CONSUL_TOKEN")
 	setStr(&c.Consul.Datacenter, "CONSUL_DATACENTER")
+	setInt(&c.Consul.Timeout, "CONSUL_TIMEOUT")
+	setInt(&c.Consul.Concurrency, "CONSUL_CONCURRENCY")
 	setBool(&c.Consul.SyncOnStart, "CONSUL_SYNC_ON_START")
 	setStr(&c.Consul.SyncInterval, "CONSUL_SYNC_INTERVAL")
 	setBool(&c.Consul.CleanupMissing, "CONSUL_CLEANUP_MISSING")
@@ -415,6 +434,7 @@ func (c *Config) applyEnv() {
 	setBool(&c.Agent.AutoUpdate, "AGENT_AUTO_UPDATE")
 	setBool(&c.Agent.TaskOwnerOnly, "AGENT_TASK_OWNER_ONLY")
 	setInt(&c.Agent.AutoUpdatePercent, "AGENT_AUTO_UPDATE_PERCENT")
+	setStr(&c.Agent.ClockSkew, "AGENT_CLOCK_SKEW")
 	setStr(&c.FlyIAM.Endpoint, "FLYIAM_ENDPOINT")
 	setStr(&c.FlyIAM.ServiceToken, "FLYIAM_SERVICE_TOKEN")
 	setStr(&c.ConsulMgr.Endpoint, "CONSUL_MGR_ENDPOINT")

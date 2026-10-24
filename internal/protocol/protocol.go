@@ -256,6 +256,9 @@ type HeartbeatRequest struct {
 // 为空表示未配置隧道，Agent 若此前切换过，应回退到安装时的默认地址。
 type HeartbeatResponse struct {
 	ServerURL string `json:"server_url,omitempty"`
+	// ClockSkew 是 Agent 校验指令签名时间戳时允许的时钟偏移窗口（如 "5m"）。
+	// 旧服务端不发送时 Agent 保持默认 10m，保证向后兼容。
+	ClockSkew string `json:"clock_skew,omitempty"`
 	// TunnelCheckURL 非空时要求 Agent 从主机侧拨测该地址，并在下一次心跳回报结果。
 	// 服务端仅在保存隧道地址后的一段时间内下发，避免持续占用主机资源。
 	TunnelCheckURL string `json:"tunnel_check_url,omitempty"`

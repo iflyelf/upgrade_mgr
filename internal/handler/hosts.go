@@ -251,7 +251,9 @@ func SyncHosts(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusServiceUnavailable, "Consul 未启用或不可用，可在设置页配置后重试")
 			return
 		}
-		res, err := s.Syncer.SyncFromConsul(r.Context(), cli, s.Config.Consul.CleanupMissing)
+		snap := s.Settings.Snapshot()
+		res, err := s.Syncer.SyncFromConsul(r.Context(), cli,
+			snap.Consul.CleanupMissing, snap.Consul.Concurrency)
 		if errors.Is(err, synclogic.ErrSyncInProgress) {
 			httpx.Fail(w, http.StatusConflict, "已有同步任务正在执行，请稍后重试")
 			return

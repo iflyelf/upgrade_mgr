@@ -68,6 +68,11 @@ func main() {
 	}
 	root = middleware.LimitBody(1<<20, "POST /api/artifacts")(root)
 	root = middleware.SecurityHeaders(root)
+	// CORS 必须在 Redis 缓存外侧：缓存 HIT 也要按当前 Origin 动态加响应头。
+	// 设置页保存 server.cors_origins 后立即生效；预检在进入 ServeMux 前处理。
+	root = middleware.CORS(func() []string {
+		return sc.Settings.Snapshot().Server.CORSOrigins
+	})(root)
 	root = middleware.AccessLog(root)
 
 	// 可选 HTTPS / 双向 TLS：未配置证书时保持原有 HTTP 行为。

@@ -174,8 +174,13 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			saveAgentTunnelCheck(r.Context(), s.DB, agentID, protocolTunnelCheck(*req.TunnelCheck))
 		}
 		// 隧道地址：管理员为该主机配置过则在响应中下发，Agent 自动切换。
-		resp := protocol.HeartbeatResponse{ServerURL: resolveServerURLOverride(s, r, serverURLOverride,
-			normalizeServerURL(req.AgentDefaultServerURL))}
+		// 每次心跳下发 clock_skew：设置页修改后，Agent 最迟一个心跳周期内生效。
+		snap := s.Settings.Snapshot()
+		resp := protocol.HeartbeatResponse{
+			ServerURL: resolveServerURLOverride(s, r, serverURLOverride,
+				normalizeServerURL(req.AgentDefaultServerURL)),
+			ClockSkew: strings.TrimSpace(snap.Agent.ClockSkew),
+		}
 		if checkRequested.Valid {
 			if time.Since(checkRequested.Time) < agentCheckWindow && resp.ServerURL != "" {
 				// 仍在校验窗口内：继续下发待测地址，直到 Agent 回报结果。

@@ -27,6 +27,7 @@ type Config struct {
 	AgentID       string
 	Token         string
 	Secret        string
+	ClockSkew     string `json:"clock_skew,omitempty"`
 	StatePath     string
 	LastHeartbeat time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
 }
@@ -41,6 +42,9 @@ type Agent struct {
 
 // New 创建 Agent
 func New(cfg Config) *Agent {
+	if d, err := time.ParseDuration(strings.TrimSpace(cfg.ClockSkew)); err != nil || d <= 0 {
+		cfg.ClockSkew = "10m"
+	}
 	info := osinfo.Detect()
 	return &Agent{
 		cfg:    cfg,
@@ -110,9 +114,22 @@ func (a *Agent) heartbeat() {
 		Status:         "online",
 		SignatureModes: protocol.SupportedSignatureModes(),
 	}
-	_ = a.postJSON("/api/agent/heartbeat", req, nil)
+	var resp protocol.HeartbeatResponse
+	if err := a.postJSON("/api/agent/heartbeat", req, &resp); err == nil {
+		a.applyClockSkew(resp.ClockSkew)
+	}
 	a.cfg.LastHeartbeat = time.Now()
 	a.saveState()
+}
+
+func (a *Agent) applyClockSkew(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	d, err := time.ParseDuration(raw)
+	if raw == "" || err != nil || d <= 0 || raw == a.cfg.ClockSkew {
+		return false
+	}
+	a.cfg.ClockSkew = raw
+	return true
 }
 
 func (a *Agent) poll(ctx context.Context) {
@@ -179,23 +196,27 @@ func (a *Agent) verifyCommand(cmd protocol.Command) error {
 		Method: "CMD", Body: body,
 		Timestamp: cmd.Timestamp, Nonce: cmd.Nonce,
 	}
+	skew := 10 * time.Minute
+	if d, err := time.ParseDuration(a.cfg.ClockSkew); err == nil && d > 0 {
+		skew = d
+	}
 
 	// 新服务端同时下发 signature_v2。存在时必须校验通过，
 	// 不能回退到旧签名，否则攻击者可篡改 v2 签名实施降级。
 	if cmd.SignatureV2 != "" {
 		env.Path = cmd.SignedPath()
-		return signer.Verify(a.cfg.Secret, cmd.SignatureV2, env, 10*time.Minute)
+		return signer.Verify(a.cfg.Secret, cmd.SignatureV2, env, skew)
 	}
 
 	// 兼容旧服务端：signature_v2 缺失时，signature 可能是新版 SignedPath，
 	// 也可能只签了 ID。旧链路应配合 HTTPS 使用。
 	env.Path = cmd.SignedPath()
-	errV2 := signer.Verify(a.cfg.Secret, cmd.Signature, env, 10*time.Minute)
+	errV2 := signer.Verify(a.cfg.Secret, cmd.Signature, env, skew)
 	if errV2 == nil {
 		return nil
 	}
 	env.Path = cmd.ID
-	if errV1 := signer.Verify(a.cfg.Secret, cmd.Signature, env, 10*time.Minute); errV1 == nil {
+	if errV1 := signer.Verify(a.cfg.Secret, cmd.Signature, env, skew); errV1 == nil {
 		return nil
 	}
 	return errV2
