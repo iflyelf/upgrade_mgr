@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,9 @@ func TestRunRejectsMissingEnrollToken(t *testing.T) {
 }
 
 func TestSaveStateAtomicAndPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 使用 ACL，跳过 Unix 权限检查")
+	}
 	path := filepath.Join(t.TempDir(), "state.json")
 	a := New(Config{
 		ServerURL: "https://mgr.example.com",
