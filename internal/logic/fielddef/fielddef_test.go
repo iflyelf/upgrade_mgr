@@ -125,6 +125,9 @@ func TestRepoCRUD(t *testing.T) {
 	}
 
 	key := "test_field_" + t.Name()
+	// 清理可能残留的测试数据
+	db.Exec(`DELETE FROM user_field_defs WHERE field_key=$1`, key)
+	
 	id, err := repo.Create(ctx, &Def{
 		FieldKey: key, Label: "测试字段", FieldType: TypeText,
 		ShowInList: true, ShowInForm: true, Editable: true, SortOrder: 999,

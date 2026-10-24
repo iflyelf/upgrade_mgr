@@ -49,6 +49,9 @@ func TestRoleCRUD(t *testing.T) {
 	ctx := context.Background()
 
 	name := "role-" + t.Name()
+	// 清理可能残留的测试数据
+	db.Exec(`DELETE FROM roles WHERE name=$1 OR name=$2`, name, name+"-new")
+	
 	id, err := s.CreateRole(ctx, name, "", "测试角色", []string{PermRead, PermDeploy})
 	if err != nil {
 		t.Fatalf("CreateRole: %v", err)
@@ -81,11 +84,17 @@ func TestRoleCRUD(t *testing.T) {
 	}
 
 	// 被团队引用时不可删
-	teamID, err := s.CreateTeam(ctx, "team-"+t.Name(), "", "", nil, "tester")
+	teamName := "team-" + t.Name()
+	groupName := "group-" + t.Name()
+	// 清理可能残留的测试数据
+	db.Exec(`DELETE FROM teams WHERE name=$1`, teamName)
+	db.Exec(`DELETE FROM service_groups WHERE name=$1`, groupName)
+	
+	teamID, err := s.CreateTeam(ctx, teamName, "", "", nil, "tester")
 	if err != nil {
 		t.Fatalf("CreateTeam: %v", err)
 	}
-	groupID, err := s.CreateGroup(ctx, "group-"+t.Name(), "", "", nil, "tester")
+	groupID, err := s.CreateGroup(ctx, groupName, "", "", nil, "tester")
 	if err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
