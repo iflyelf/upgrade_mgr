@@ -183,14 +183,6 @@ func (s *ServiceContext) ConsulMgr() *consulmgr.Client {
 		time.Duration(c.Timeout)*time.Second)
 }
 
-// ConsulMgrGroupID 返回配置中限定的服务组（0 表示全部）。
-func (s *ServiceContext) ConsulMgrGroupID() int64 {
-	if s == nil || s.Settings == nil {
-		return 0
-	}
-	return s.Settings.Snapshot().ConsulMgr.GroupID
-}
-
 // ReloadConsul 依当前配置重建 Consul 客户端；未启用或不可用时置 nil 并告警。
 func (s *ServiceContext) ReloadConsul() {
 	c := s.Settings.Snapshot().Consul

@@ -61,6 +61,10 @@
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1,
     orgUserQ: '', orgUserForm: null, orgRoleForm: null, orgGroupForm: null,
     orgRoleQ: '', orgGroupQ: '',
+    // 主机字段映射：orgMapForm 为编辑中的规则，orgMapScan 为扫描来源键的弹窗。
+    orgMapForm: null, orgMapScan: null,
+    // mgrSync 为「从 consul_mgr 同步」的服务组选择弹窗状态。
+    mgrSync: null,
     helpOpen: null, cacheStatus: null, cacheErr: '', navOpen: null };
 
   function h(tag, attrs, children) {
@@ -1270,10 +1274,11 @@
       state.q ? h('button', { class: 'btn ghost', onclick: function () { state.q = ''; state.hostPage = 1; loadHosts(); } }, ['清除']) : null,
       h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']),
       // consul_mgr 同步仅管理员可见：后端为 RequireAdmin，非管理员点了必然 403。
+      // 点击后先弹窗选择服务组（列表来自 consul_mgr），不在配置里写死 group_id。
       isAdmin() ? h('button', {
         class: 'btn ghost', title: '从 consul_mgr 汇总的多套 Consul 同步主机',
-        onclick: syncHostsFromConsulMgr
-      }, ['同步 consul_mgr']) : null,
+        onclick: openConsulMgrSync
+      }, ['同步 consul_mgr…']) : null,
       state.hostsLoading ? h('span', { class: 'muted' }, ['加载中…']) : null,
       h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
     ]);
@@ -3997,7 +4002,10 @@
   }
 
   function settingsView() {
+    // inputs 只收集「可提交」的项：readonly 项不入表，避免把只读值回写。
     var inputs = {};
+    // restartKeys 记录需重启生效的项，保存后据此提示。
+    var restartKeys = {};
     var groups = {};
     (state.settings || []).forEach(function (s) { (groups[s.group] = groups[s.group] || []).push(s); });
     // Redis 状态卡片单独置顶：保存 redis.* 后需重建连接，页面可直接自检。
@@ -4021,16 +4029,47 @@
           inp = h('input', { value: s.value || '' }, []);
           if (s.secret) inp.type = 'password';
         }
-        inputs[s.key] = inp;
-        return h('div', { class: 'field' }, [h('label', {}, [s.label + '  (' + s.key + ')']), inp]);
+        if (s.readonly) {
+          // 只读项（如数据库连接）：禁用输入，仅作「当前生效值」展示。
+          inp.disabled = true;
+        } else {
+          inputs[s.key] = inp;
+          if (s.restart) restartKeys[s.key] = true;
+        }
+
+        // 标签后缀：只读/需重启各给一个醒目标记，避免用户改完以为已生效。
+        var tags = [];
+        if (s.readonly) tags.push(h('span', { class: 'tag' }, ['只读']));
+        if (s.restart) tags.push(h('span', { class: 'tag status-failed' }, ['需重启']));
+
+        var sub = [];
+        if (s.note) sub.push(h('div', { class: 'muted' }, [s.note]));
+
+        return h('div', { class: 'field' }, [
+          h('label', {}, [s.label + '  (' + s.key + ')'].concat(tags)),
+          inp
+        ].concat(sub));
       })));
     });
     var saveBtn = h('button', {
       class: 'btn', onclick: function () {
-        var kv = {}; Object.keys(inputs).forEach(function (k) { kv[k] = inputs[k].value; });
+        var kv = {};
+        var changedRestart = [];
+        Object.keys(inputs).forEach(function (k) {
+          kv[k] = inputs[k].value;
+          if (restartKeys[k]) {
+            // 与服务端当前值比对，只提示「真的改了」的需重启项。
+            var cur = (state.settings || []).filter(function (s) { return s.key === k; })[0];
+            if (cur && String(cur.value) !== String(inputs[k].value)) changedRestart.push(k);
+          }
+        });
         api('/api/settings', { method: 'PUT', body: JSON.stringify(kv) })
           .then(function () {
-            alert('已保存');
+            var msg = '已保存';
+            if (changedRestart.length) {
+              msg += '\n\n⚠️ 以下配置需重启服务后生效：\n' + changedRestart.join('\n');
+            }
+            alert(msg);
             // redis.* 变更会重建连接：清掉状态缓存，下次渲染重新拉取。
             state.cacheStatus = null;
             state.cacheErr = '';
@@ -4113,7 +4152,9 @@
     '主机字段定义': 'Host field definitions', '用户字段定义': 'User field definitions',
     '主机字段映射': 'Host field mappings', '扫描来源键': 'Scan source keys',
     '新增映射': 'Add mapping', '编辑映射': 'Edit mapping', '导入所选': 'Import selected',
-    '重新扫描': 'Rescan', '同步 consul_mgr': 'Sync consul_mgr',
+    '重新扫描': 'Rescan', '同步 consul_mgr…': 'Sync consul_mgr…',
+    '从 consul_mgr 同步主机': 'Sync hosts from consul_mgr',
+    '全部服务组': 'All service groups', '开始同步': 'Start sync', '同步中…': 'Syncing…',
     '来源': 'Source', '来源键': 'Source key', '目标字段': 'Target field',
     '写入方式': 'Write mode', '仅补空': 'Fill blanks', '覆盖': 'Overwrite',
     '启用': 'Enabled', '停用': 'Disabled', '主机数': 'Hosts', '样例值': 'Samples',
@@ -5642,6 +5683,9 @@
     if (state.helpOpen) {
       app.appendChild(helpModal());
     }
+    if (state.mgrSync) {
+      app.appendChild(consulMgrSyncModal());
+    }
     if (state.taskDetailId) {
       app.appendChild(taskDetailModal());
       // 自动刷新会重建 DOM，恢复用户原来的滚动位置。
@@ -5999,11 +6043,120 @@
       .catch(function (e) { alert('同步失败: ' + e.message); });
   }
 
+  // openConsulMgrSync 打开服务组选择弹窗，再由用户确认后同步。
+  //
+  // 服务组列表来自 consul_mgr（GET /api/consul-mgr/groups），不在配置文件里写死
+  // group_id：哪些组可同步由 consul_mgr 侧的启用状态决定，页面只负责展示与选择。
+  function openConsulMgrSync() {
+    state.mgrSync = { loading: true, groups: null, err: '', groupID: 0, running: false };
+    render();
+    api('/api/consul-mgr/groups')
+      .then(function (d) {
+        if (!state.mgrSync) return;
+        state.mgrSync.loading = false;
+        state.mgrSync.groups = d.groups || [];
+        state.mgrSync.endpoint = d.endpoint || '';
+        render();
+      })
+      .catch(function (e) {
+        if (!state.mgrSync) return;
+        state.mgrSync.loading = false;
+        state.mgrSync.err = e.message;
+        render();
+      });
+  }
+
+  // consulMgrSyncModal 选择服务组并触发同步。
+  function consulMgrSyncModal() {
+    var st = state.mgrSync;
+    var mask = h('div', {
+      class: 'modal-mask',
+      onclick: function (e) {
+        // 同步进行中不允许点遮罩关闭，避免用户以为已取消（请求仍在跑）。
+        if (e.target === mask && !st.running) { state.mgrSync = null; render(); }
+      }
+    }, []);
+
+    var body;
+    if (st.loading) {
+      body = h('div', { class: 'muted' }, ['正在读取 consul_mgr 的服务组…']);
+    } else if (st.err) {
+      body = h('div', {}, [
+        h('div', { class: 'err', role: 'alert' }, [st.err]),
+        hint('确认「设置 → consul_mgr 对接」已填写地址与服务令牌，且令牌与 consul_mgr ' +
+          '「设置 → 服务间 API」一致。')
+      ]);
+    } else if (!st.groups.length) {
+      body = h('div', {}, [
+        h('div', { class: 'muted empty' }, ['consul_mgr 中没有可同步的服务组。']),
+        hint('只有「启用且已配置 Consul 地址」的服务组才会出现在这里，请到 consul_mgr 中检查。')
+      ]);
+    } else {
+      // 单选列表：全部 + 各服务组。用 radio 而非下拉，便于看清每组的编码与数据中心。
+      var items = [{ id: 0, name: '全部服务组', code: '', datacenter: '' }].concat(st.groups);
+      body = h('div', {}, [
+        hint('选择要同步的服务组。「全部服务组」会遍历 consul_mgr 中所有启用的组（多套 Consul）。'),
+        h('div', { class: 'check-group scroll' }, items.map(function (g) {
+          var rb = h('input', {
+            type: 'radio', name: 'mgr-group', checked: st.groupID === g.id,
+            onchange: function () { st.groupID = g.id; }
+          }, []);
+          var sub = [];
+          if (g.code) sub.push('编码 ' + g.code);
+          if (g.datacenter) sub.push('dc ' + g.datacenter);
+          if (g.id) sub.push('ID ' + g.id);
+          return h('label', { class: 'check check-row' }, [rb, h('span', {}, [
+            h('span', {}, [g.name]),
+            sub.length ? h('span', { class: 'muted' }, [sub.join(' · ')]) : null
+          ])]);
+        }))
+      ]);
+    }
+
+    var startBtn = h('button', {
+      class: 'btn', disabled: st.running ? 'disabled' : null,
+      onclick: function () {
+        st.running = true;
+        render();
+        syncHostsFromMgr(st.groupID, function () {
+          state.mgrSync = null;
+          render();
+        });
+      }
+    }, [st.running ? '同步中…' : '开始同步']);
+
+    var modal = h('div', {
+      class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '从 consul_mgr 同步主机'
+    }, [
+      h('div', { class: 'modal-head' }, [
+        h('h3', {}, ['从 consul_mgr 同步主机']),
+        h('button', {
+          class: 'btn ghost small', disabled: st.running ? 'disabled' : null,
+          onclick: function () { state.mgrSync = null; render(); }
+        }, ['关闭'])
+      ]),
+      st.endpoint ? h('div', { class: 'muted' }, ['来源：' + st.endpoint]) : null,
+      body,
+      h('div', { class: 'toolbar' }, [
+        st.loading || st.err || !(st.groups || []).length ? null : startBtn,
+        h('button', {
+          class: 'btn ghost', disabled: st.running ? 'disabled' : null,
+          onclick: function () { state.mgrSync = null; render(); }
+        }, ['取消'])
+      ])
+    ]);
+    mask.appendChild(modal);
+    return mask;
+  }
+
   // syncHostsFromMgr 从 consul_mgr 同步主机（覆盖多个服务组/多套 Consul）。
   //
   // 与「同步 Consul」并列而非替代：两者来源不同，可按环境选用或同时使用。
-  function syncHostsFromMgr() {
-    api('/api/hosts/sync-consul-mgr', { method: 'POST' })
+  // groupID=0 表示全部启用的服务组；done 在请求结束（成功或失败）后调用。
+  function syncHostsFromMgr(groupID, done) {
+    var url = '/api/hosts/sync-consul-mgr';
+    if (groupID) url += '?group_id=' + encodeURIComponent(groupID);
+    api(url, { method: 'POST' })
       .then(function (d) {
         var msg = '同步完成: 主机 ' + d.upserted + ' 台（服务组 ' + d.groups + ' 个）';
         if (d.partial) {
@@ -6016,10 +6169,14 @@
             '可在「人员组织 → 主机字段映射」里扫描来源键并配置。';
         }
         msg += '\n耗时: ' + d.duration;
+        if (done) done();
         alert(msg);
         loadHosts();
       })
-      .catch(function (e) { alert('同步失败: ' + e.message); });
+      .catch(function (e) {
+        if (done) done();
+        alert('同步失败: ' + e.message);
+      });
   }
   // autoRefreshDelay 返回当前页面自动刷新间隔；0 表示不需要轮询。
   // 有升级动作时 4 秒刷新，空闲时 15 秒低频刷新，避免无意义的数据库压力。

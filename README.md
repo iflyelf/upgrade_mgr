@@ -479,7 +479,7 @@ consul_mgr:
   endpoint: ""                # 如 http://consul-mgr.internal:8888
   service_token: ""           # 与 consul_mgr 的 service_api.token 一致
   timeout: 30                 # 请求超时秒数；主机多时放大
-  group_id: 0                 # 只同步指定服务组；0=全部启用的组
+  # 服务组在主机页的下拉中选择，不在此配置
 
 agent:
   poll_hold: 20
@@ -889,6 +889,20 @@ consul:  # 可选：同步主机清单；编排器不依赖 Consul
 
 > **配置优先级**：运行期「设置页」写入的 `app_settings` > 环境变量 > 配置文件 > 内置默认值。
 > 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
+
+**配置文件 vs 设置页**：绝大多数配置都能在「设置」页直接改，配置文件只用于首次启动的引导。
+分三类（页面上有对应标记）：
+
+| 类别 | 页面标记 | 典型项 | 说明 |
+|---|---|---|---|
+| 保存即生效 | 无 | `server.external_url`、`consul.*`、`redis.*`、`agent.*`、`consul_mgr.*`、`flyiam.*`、外部文件白名单 | 保存后立即作用于当前副本；Consul/Redis 会自动重建连接 |
+| 保存后需重启 | 🔴 需重启 | 监听地址/端口、`trust_proxy`、`cookie_secure`、`metrics_token`、`session_secret`、认证方式、Casdoor、制品后端 | 这些值在启动时被绑定到中间件/连接池/认证提供方上，改内存不影响已建对象 |
+| 只读展示 | 灰色 只读 | `database.*` | 启动顺序是「先连库 → 再读设置」，数据库参数不可能由页面提供，只展示当前生效值 |
+
+> 只读项即使绕过页面直接调 `PUT /api/settings` 也会被服务端拒绝，不会写进 `app_settings`。
+>
+> 数据库密码、`auth.admin_password` 不在设置页出现：前者属于只读的数据库配置，
+> 后者仅在启动时用于确保管理员账号存在，日常改密请用「用户菜单 → 修改密码」。
 
 **`server.external_url` 怎么填**：
 
@@ -2896,6 +2910,29 @@ MIT © iflyelf
 - Agent 在切换连接地址时把原因/时间写入 state（`applied_override`、`last_switch_*`），
   跨进程可见，重启后仍能追溯。
 
+### 2026-10-24 配置项全面页面化（设置页覆盖 config.yaml）
+
+- **设置页从 42 项扩充到 78 项**，`deploy/config/config.yaml` 中除「数据库连接」与
+  三个首启动凭据外，全部可在页面维护；保存即写 `app_settings`（优先级最高）。
+- 新增可页面配置：`server.host/port/web_embedded/trust_proxy/trusted_proxies/
+  cookie_secure/metrics_token/session_secret/agent_binary_dir`、
+  `consul.timeout/sync_on_start`、`casdoor.redirect_uri`、
+  `artifact.max_size/storage_type` 与完整的 S3/OSS 参数、
+  `agent.require_enroll_token/enroll_token_ttl`、`auth.provider/admin_username`。
+- **区分「即时生效」与「需重启」**：`Item.Restart` 标记启动时绑定的配置（监听地址、
+  认证方式、制品后端、代理信任链等），页面显示红色「需重启」标签，保存后弹窗
+  列出本次真正改动的需重启项，避免改完以为已生效。
+- **数据库连接改为只读展示**：启动顺序是「先连库 → 再读设置」，连接参数不可能
+  由页面提供。页面展示当前生效值（不含密码）便于确认连的是哪个库；服务端在
+  `Apply` 中显式拒绝修改只读项，不只依赖前端禁用。
+- **S3/OSS 参数补齐**：此前 `storage_type` 可在页面选 `s3`，但端点/桶/密钥只能写
+  配置文件，选了必然降级回 local，属于死路；现在同组内可一并填写。
+- **标注三个无效配置**：`server.cors_origins`、`consul.concurrency`、`agent.clock_skew`
+  在代码中只有声明、没有任何读取点（Agent 侧时钟偏移窗口固定 10 分钟），
+  已在配置文件中注明「当前未生效」，避免继续误用。
+- 新增 `internal/setting/registry_test.go`：覆盖键重复、Get/Set 完整性、
+  只读项拒改与不落库、需重启项有提示、secret 脱敏。
+
 ### 2026-10-24 主机字段映射（去硬编码）+ consul_mgr 主机同步
 
 - **去掉硬编码的 Meta 映射**：原先 `internal/logic/sync` 把 7 个 ServiceMeta 键
@@ -2936,10 +2973,14 @@ MIT © iflyelf
   `POST /api/host-field-keys/import`、`POST /api/hosts/sync-consul-mgr`、
   `POST /api/consul-mgr/test`（连通性与令牌自检）。
 
-- **配置项**：`consul_mgr.endpoint/service_token/timeout/group_id`，
-  环境变量 `CONSUL_MGR_ENDPOINT/CONSUL_MGR_SERVICE_TOKEN/CONSUL_MGR_TIMEOUT/
-  CONSUL_MGR_GROUP_ID`；页面「设置 → consul_mgr 对接」可改并即时生效。
+- **配置项**：`consul_mgr.endpoint/service_token/timeout`，
+  环境变量 `CONSUL_MGR_ENDPOINT/CONSUL_MGR_SERVICE_TOKEN/CONSUL_MGR_TIMEOUT`；
+  页面「设置 → consul_mgr 对接」可改并即时生效。
   consul_mgr 侧对应 `ServiceAPI.Token`（env `CONSUL_MGR_SERVICE_API_TOKEN`）。
+- **服务组在页面选择**：主机页「同步 consul_mgr」旁的下拉列出对方的服务组
+  （`GET /api/consul-mgr/groups` → consul_mgr 的 `GET /api/service/groups`），
+  默认「全部服务组」。候选只含「启用且已配置 Consul 地址」的组，与同步口径一致；
+  接口只回 id/name/code/datacenter，不含 consul_address 与 consul_token。
 
 - **页面**：「人员组织 → 主机字段映射」管理规则 + 扫描弹窗；主机页新增
   「同步 consul_mgr」按钮。映射的来源列表、内置列候选、保留键说明全部由后端下发，

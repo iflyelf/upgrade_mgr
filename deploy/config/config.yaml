@@ -1,6 +1,15 @@
 # upgrade-mgr 配置示例
+#
 # 优先级：环境变量 > 本文件默认；运行期「设置页」(app_settings) 覆盖为最高。
 # 必填：database；可选：consul / casdoor / redis（缺失仅降级，不阻塞启动）。
+#
+# ⚙️ 本文件只是「首次启动的初始值」：除 database 外，几乎所有项都能在
+#    「设置」页面修改并持久化到数据库，之后本文件对应项不再生效。
+#    页面上每项都标注了生效方式：
+#      - 无标记：保存即生效（如 Consul / Redis 连接会自动热重建）；
+#      - 「需重启」：值已存库，但要重启服务才会被读取（监听地址、代理信任、
+#        认证方式、存储后端等在启动时绑定到长生命周期对象上）；
+#      - 「只读」：仅展示当前生效值，不能在页面改（见下方 database 说明）。
 
 server:
   host: 0.0.0.0
@@ -11,7 +20,7 @@ server:
   trust_proxy: false          # 是否信任 X-Forwarded-For；无反向代理保持 false（env TRUST_PROXY）
   trusted_proxies: []         # 受信代理 IP/CIDR（env TRUSTED_PROXIES，逗号分隔）；XFF 从右往左跳过这些地址
   cookie_secure: "auto"       # 会话 Cookie Secure：auto/true/false；纯 HTTP 用 auto 或 false（env COOKIE_SECURE）
-  cors_origins: []
+  cors_origins: []            # ⚠️ 预留未实现：当前未接入 CORS 中间件，填了不生效
   metrics_token: ""           # /metrics Bearer 令牌（env METRICS_TOKEN）；留空则需登录会话
   agent_binary_dir: ./dist    # Agent 二进制目录（env AGENT_BINARY_DIR），供 /api/agent/binary/{name} 下载
                               # 文件名：upgrade-agent-<os>-<arch>[-legacy][.exe]
@@ -41,7 +50,9 @@ server:
   # 允许访问的内网网段/IP（逗号分隔或 YAML 列表）。为空表示拒绝所有内网地址。
   external_binary_allow_cidrs: []
 
-database:                     # 必填
+database:                     # 必填；⚠️ 只能在此处或环境变量配置，设置页仅只读展示
+                              # 原因：设置项本身存在数据库的 app_settings 表，
+                              # 启动顺序是「先连库 → 再读设置」，连不上库就读不到设置。
   dsn: ""                     # 优先使用；如 postgresql://user:pass@host:5432/upgrade_mgr?sslmode=disable
   host: localhost
   port: 5432
@@ -54,8 +65,10 @@ database:                     # 必填
   conn_max_lifetime: 3600
 
 auth:
-  provider: builtin           # builtin(内置账号) 或 casdoor(FlyIAM SSO)
-  admin_username: admin
+  provider: builtin           # builtin(内置账号) 或 casdoor(FlyIAM SSO)；设置页可改，需重启
+  admin_username: admin       # 设置页可改，需重启（仅确保账号存在，不会重命名已有账号）
+  # admin_password 刻意不做页面配置：改密码请用右上角用户菜单的「修改密码」，
+  # 或在「人员组织 → 用户管理」中重置，避免密码以明文经设置接口来回传输。
   admin_password: ""          # 明文或 bcrypt 哈希（env ADMIN_PASSWORD）；留空则首次启动随机生成并仅打印一次
 
 consul:                       # 可选：主机与业务分组数据源
@@ -64,7 +77,7 @@ consul:                       # 可选：主机与业务分组数据源
   token: ""                   # 建议用环境变量 CONSUL_TOKEN 覆盖
   datacenter: ""              # 留空自动探测（Agent API → Catalog 兜底）
   timeout: 10
-  concurrency: 16
+  concurrency: 16             # ⚠️ 预留未实现：同步按服务串行，填了不生效
   sync_on_start: false
   sync_interval: ""           # 如 5m / 1h，留空不定时
 
@@ -72,8 +85,9 @@ consul_mgr:                   # 可选：从 consul_mgr 同步主机（覆盖多
   endpoint: ""                # consul_mgr 后端地址（env CONSUL_MGR_ENDPOINT）
   service_token: ""           # 需与 consul_mgr「设置 → 服务间 API」一致（env CONSUL_MGR_SERVICE_TOKEN）
   timeout: 30                 # 请求超时秒数（env CONSUL_MGR_TIMEOUT）
-  group_id: 0                 # 只同步指定服务组；0=全部启用的组（env CONSUL_MGR_GROUP_ID）
-# 字段映射（哪个来源键写到哪个本地字段）不在配置文件里，
+# 服务组不在配置文件里指定：同步时在主机页的下拉中选择
+# （候选来自 consul_mgr 的 GET /api/service/groups，默认「全部服务组」）。
+# 字段映射（哪个来源键写到哪个本地字段）同样不在配置文件里，
 # 存于 host_field_mappings 表，在「人员组织 → 主机字段映射」中维护。
 
 casdoor:                      # 可选：与 consul_mgr 共用 FlyIAM 实现 SSO（auth.provider=casdoor 时启用）
@@ -120,7 +134,7 @@ artifact:
 agent:
   poll_hold: 20               # 长轮询挂起秒数
   lease_max: 1h               # 升级维护窗口上限
-  clock_skew: 5m              # 指令时间戳允许偏移
+  clock_skew: 5m              # ⚠️ 预留未实现：Agent 侧固定按 ±10m 校验签名时间戳，填了不生效
   enroll_token_ttl: 15m
   require_enroll_token: true  # 是否强制要求注册令牌（生产环境强烈建议开启）
   allow_exec_mode: true       # 允许 exec/replace_exec/script 模式与命令任务（默认开启；如只需二进制替换可关闭）

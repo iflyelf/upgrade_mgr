@@ -30,6 +30,20 @@ type Item struct {
 	Validate func(string) error // 可选：保存前校验，失败则整批设置不落库
 	// Options 可选：type=enum 时的候选值（页面渲染为下拉框）。
 	Options []string
+	// Restart 为 true 表示该项保存后不会立即生效，需重启服务。
+	//
+	// 这类配置在启动时被读取并绑定到中间件/连接池等长生命周期对象上，
+	// 运行期改内存值不会影响已建立的对象。页面据此给出明确提示，
+	// 避免用户改完以为已生效。
+	Restart bool
+	// ReadOnly 为 true 表示只在页面展示当前值，不接受页面修改。
+	//
+	// 用于数据库连接这类「鸡生蛋」配置：设置项本身存在数据库里，
+	// 连不上库就读不到设置，所以只能由配置文件/环境变量提供。
+	// 页面展示出来便于排查「当前到底连的哪个库」。
+	ReadOnly bool
+	// Note 可选：补充说明（风险提示、生效范围），页面显示在输入框下方。
+	Note string
 }
 
 // Registry 全部可页面配置项。
@@ -39,6 +53,82 @@ var Registry = []Item{
 		Get:      func(c *config.Config) string { return c.Server.ExternalURL },
 		Set:      func(c *config.Config, v string) { c.Server.ExternalURL = normalizeExternalURL(v) },
 		Validate: validateExternalURL},
+	{Key: "server.agent_binary_dir", Group: "服务器",
+		Label: "Agent 二进制目录（供 /api/agent/binary/{name} 下载，默认 ./dist）", Type: "string",
+		Note:  "文件名须为 upgrade-agent-<os>-<arch>[-legacy][.exe]；接入 Windows 主机必须放入 windows-*.exe",
+		Get:   func(c *config.Config) string { return c.Server.AgentBinaryDir },
+		Set: func(c *config.Config, v string) {
+			if t := strings.TrimSpace(v); t != "" {
+				c.Server.AgentBinaryDir = t
+			}
+		}},
+
+	// 以下服务器项在启动时绑定到监听地址/中间件/会话编解码器上，
+	// 改内存值不影响已建立的对象，必须重启才生效（Restart=true）。
+	{Key: "server.host", Group: "服务器（需重启）", Label: "监听地址", Type: "string",
+		Restart: true,
+		Get:     func(c *config.Config) string { return c.Server.Host },
+		Set: func(c *config.Config, v string) {
+			if t := strings.TrimSpace(v); t != "" {
+				c.Server.Host = t
+			}
+		}},
+	{Key: "server.port", Group: "服务器（需重启）", Label: "监听端口", Type: "int",
+		Restart:  true,
+		Get:      func(c *config.Config) string { return strconv.Itoa(c.Server.Port) },
+		Set:      func(c *config.Config, v string) { setInt(&c.Server.Port, v) },
+		Validate: validateIntRange(1, 65535, "端口")},
+	{Key: "server.web_embedded", Group: "服务器（需重启）",
+		Label: "启用内嵌前端页面", Type: "bool", Restart: true,
+		Get: func(c *config.Config) string { return b2s(c.Server.WebEmbedded) },
+		Set: func(c *config.Config, v string) { c.Server.WebEmbedded = v == "true" }},
+	{Key: "server.trust_proxy", Group: "服务器（需重启）",
+		Label: "信任 X-Forwarded-For / X-Real-IP", Type: "bool", Restart: true,
+		Note: "仅在确有反向代理时开启，并同时填写受信代理网段；否则客户端可伪造来源 IP 绕过限流",
+		Get:  func(c *config.Config) string { return b2s(c.Server.TrustProxy) },
+		Set:  func(c *config.Config, v string) { c.Server.TrustProxy = v == "true" }},
+	{Key: "server.trusted_proxies", Group: "服务器（需重启）",
+		Label: "受信代理 IP/CIDR（逗号分隔，如 10.0.0.0/8）", Type: "string", Restart: true,
+		Note: "XFF 从右往左跳过这些地址，取第一个非受信地址为真实客户端 IP",
+		Get:  func(c *config.Config) string { return strings.Join(c.Server.TrustedProxies, ",") },
+		Set:  func(c *config.Config, v string) { c.Server.TrustedProxies = splitComma(v) },
+		Validate: func(v string) error {
+			if strings.TrimSpace(v) == "" {
+				return nil
+			}
+			return extbin.ValidateCIDRs(splitComma(v))
+		}},
+	{Key: "server.cookie_secure", Group: "服务器（需重启）",
+		Label: "会话 Cookie Secure", Type: "enum", Restart: true,
+		Options: []string{"auto", "true", "false"},
+		Note:    "auto 按 external_url 是否 https 推断；纯 HTTP 部署用 auto 或 false，否则浏览器不会回传 Cookie",
+		Get:     func(c *config.Config) string { return c.Server.CookieSecure },
+		Set:     func(c *config.Config, v string) { c.Server.CookieSecure = strings.ToLower(strings.TrimSpace(v)) },
+		Validate: func(v string) error {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "", "auto", "true", "false":
+				return nil
+			}
+			return fmt.Errorf("只能是 auto / true / false")
+		}},
+	{Key: "server.metrics_token", Group: "服务器（需重启）",
+		Label: "/metrics Bearer 令牌（留空则需登录会话）", Type: "secret", Secret: true, Restart: true,
+		Get: func(c *config.Config) string { return c.Server.MetricsToken },
+		Set: func(c *config.Config, v string) { c.Server.MetricsToken = strings.TrimSpace(v) }},
+	{Key: "server.session_secret", Group: "服务器（需重启）",
+		Label: "会话密钥（留空自动生成并持久化；生产建议 32+ 字节）", Type: "secret", Secret: true, Restart: true,
+		Note: "⚠️ 修改后所有用户的登录会话立即失效，需重新登录",
+		Get:  func(c *config.Config) string { return c.Server.SessionSecret },
+		Set: func(c *config.Config, v string) {
+			c.Server.SessionSecret = strings.TrimSpace(v)
+		},
+		Validate: func(v string) error {
+			v = strings.TrimSpace(v)
+			if v != "" && len(v) < 16 {
+				return fmt.Errorf("会话密钥至少 16 字节（建议 32+），或留空由系统生成")
+			}
+			return nil
+		}},
 
 	// Consul（可选数据源）
 	{Key: "server.audit_retention_days", Group: "服务器",
@@ -71,47 +161,178 @@ var Registry = []Item{
 	{Key: "consul.cleanup_missing", Group: "Consul", Label: "自动清理 Consul 中已移除的主机（仅纯 Consul 主机，有 Agent/任务时保留）", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Consul.CleanupMissing) },
 		Set: func(c *config.Config, v string) { c.Consul.CleanupMissing = v == "true" }},
+	{Key: "consul.timeout", Group: "Consul", Label: "请求超时秒数（默认 10）", Type: "int",
+		Get:      func(c *config.Config) string { return strconv.Itoa(c.Consul.Timeout) },
+		Set:      func(c *config.Config, v string) { setInt(&c.Consul.Timeout, v) },
+		Validate: validateIntRange(1, 300, "Consul 超时"),
+		Note:     "保存后重建 Consul 客户端即时生效。"},
+	{Key: "consul.sync_on_start", Group: "Consul",
+		Label: "启动时自动同步一次", Type: "bool",
+		Get:   func(c *config.Config) string { return b2s(c.Consul.SyncOnStart) },
+		Set:   func(c *config.Config, v string) { c.Consul.SyncOnStart = v == "true" },
+		Note:  "仅影响下次启动；当前进程不会因保存而立即同步（可用主机页「同步 Consul」手动触发）。"},
 
 	// 认证
-	{Key: "auth.provider", Group: "认证", Label: "认证方式(builtin/casdoor)", Type: "string",
-		Get: func(c *config.Config) string { return c.Auth.Provider },
-		Set: func(c *config.Config, v string) { c.Auth.Provider = v }},
+	{Key: "auth.provider", Group: "认证", Label: "认证方式", Type: "enum",
+		Options: []string{"builtin", "casdoor"},
+		Get:     func(c *config.Config) string { return c.Auth.Provider },
+		Set:     func(c *config.Config, v string) { c.Auth.Provider = strings.ToLower(strings.TrimSpace(v)) },
+		Validate: func(v string) error {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "", "builtin", "casdoor":
+				return nil
+			}
+			return fmt.Errorf("只能是 builtin 或 casdoor")
+		},
+		Restart: true,
+		Note:    "认证提供方在启动时构建；切换后需重启服务。切到 casdoor 前请先填好下方 Casdoor 配置，否则重启后无法登录。"},
+	{Key: "auth.admin_username", Group: "认证", Label: "内置管理员用户名（provider=builtin）", Type: "string",
+		Get:     func(c *config.Config) string { return c.Auth.AdminUsername },
+		Set:     func(c *config.Config, v string) { c.Auth.AdminUsername = strings.TrimSpace(v) },
+		Restart: true,
+		Note:    "仅在启动时用于确保该账号存在；改名不会重命名已有账号，请在「人员组织 → 用户管理」中维护。"},
 
 	// Casdoor（可选 SSO）
-	{Key: "casdoor.endpoint", Group: "Casdoor", Label: "后端地址", Type: "string",
-		Get: func(c *config.Config) string { return c.Casdoor.Endpoint },
-		Set: func(c *config.Config, v string) { c.Casdoor.Endpoint = v }},
-	{Key: "casdoor.public_endpoint", Group: "Casdoor", Label: "浏览器地址", Type: "string",
-		Get: func(c *config.Config) string { return c.Casdoor.PublicEndpoint },
-		Set: func(c *config.Config, v string) { c.Casdoor.PublicEndpoint = v }},
-	{Key: "casdoor.organization", Group: "Casdoor", Label: "组织名", Type: "string",
-		Get: func(c *config.Config) string { return c.Casdoor.OrganizationName },
-		Set: func(c *config.Config, v string) { c.Casdoor.OrganizationName = v }},
-	{Key: "casdoor.application", Group: "Casdoor", Label: "应用名", Type: "string",
-		Get: func(c *config.Config) string { return c.Casdoor.ApplicationName },
-		Set: func(c *config.Config, v string) { c.Casdoor.ApplicationName = v }},
-	{Key: "casdoor.client_id", Group: "Casdoor", Label: "Client ID", Type: "string",
-		Get: func(c *config.Config) string { return c.Casdoor.ClientId },
-		Set: func(c *config.Config, v string) { c.Casdoor.ClientId = v }},
-	{Key: "casdoor.client_secret", Group: "Casdoor", Label: "Client Secret", Type: "secret", Secret: true,
-		Get: func(c *config.Config) string { return c.Casdoor.ClientSecret },
-		Set: func(c *config.Config, v string) { c.Casdoor.ClientSecret = v }},
-	{Key: "casdoor.certificate", Group: "Casdoor", Label: "证书", Type: "secret", Secret: true,
-		Get: func(c *config.Config) string { return c.Casdoor.Certificate },
-		Set: func(c *config.Config, v string) { c.Casdoor.Certificate = v }},
+	//
+	// 全部标记 Restart：认证提供方由 buildAuth 在启动时构建一次并绑定到中间件，
+	// 运行期改内存值不会影响已创建的客户端（本服务没有 Casdoor 热重载路径）。
+	{Key: "casdoor.endpoint", Group: "Casdoor（需重启）", Label: "后端地址（服务端可达）", Type: "string",
+		Get:     func(c *config.Config) string { return c.Casdoor.Endpoint },
+		Set:     func(c *config.Config, v string) { c.Casdoor.Endpoint = strings.TrimSpace(v) },
+		Restart: true,
+		Note:    "保存后需重启服务才生效。"},
+	{Key: "casdoor.public_endpoint", Group: "Casdoor（需重启）",
+		Label: "浏览器地址（留空复用后端地址）", Type: "string",
+		Get:     func(c *config.Config) string { return c.Casdoor.PublicEndpoint },
+		Set:     func(c *config.Config, v string) { c.Casdoor.PublicEndpoint = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "casdoor.organization", Group: "Casdoor（需重启）", Label: "组织名", Type: "string",
+		Get:     func(c *config.Config) string { return c.Casdoor.OrganizationName },
+		Set:     func(c *config.Config, v string) { c.Casdoor.OrganizationName = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "casdoor.application", Group: "Casdoor（需重启）", Label: "应用名", Type: "string",
+		Get:     func(c *config.Config) string { return c.Casdoor.ApplicationName },
+		Set:     func(c *config.Config, v string) { c.Casdoor.ApplicationName = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "casdoor.client_id", Group: "Casdoor（需重启）", Label: "Client ID", Type: "string",
+		Get:     func(c *config.Config) string { return c.Casdoor.ClientId },
+		Set:     func(c *config.Config, v string) { c.Casdoor.ClientId = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "casdoor.client_secret", Group: "Casdoor（需重启）", Label: "Client Secret", Type: "secret", Secret: true,
+		Get:     func(c *config.Config) string { return c.Casdoor.ClientSecret },
+		Set:     func(c *config.Config, v string) { c.Casdoor.ClientSecret = v },
+		Restart: true},
+	{Key: "casdoor.certificate", Group: "Casdoor（需重启）", Label: "证书（可选，预留）", Type: "secret", Secret: true,
+		Get:     func(c *config.Config) string { return c.Casdoor.Certificate },
+		Set:     func(c *config.Config, v string) { c.Casdoor.Certificate = v },
+		Restart: true},
+	{Key: "casdoor.redirect_uri", Group: "Casdoor（需重启）",
+		Label: "OAuth2 回调地址（留空按 server.external_url + /api/auth/callback 推导）", Type: "string",
+		Get:   func(c *config.Config) string { return c.Casdoor.RedirectURI },
+		Set:   func(c *config.Config, v string) { c.Casdoor.RedirectURI = strings.TrimSpace(v) },
+		Validate: func(v string) error {
+			if strings.TrimSpace(v) == "" {
+				return nil
+			}
+			return validateHTTPURL(v)
+		},
+		Restart: true,
+		Note:    "必须与 Casdoor 应用中登记的回调地址完全一致，否则登录会被拒绝。"},
 
 	// 制品
 	{Key: "artifact.dir", Group: "制品", Label: "存储目录", Type: "string",
-		Get: func(c *config.Config) string { return c.Artifact.Dir },
-		Set: func(c *config.Config, v string) { c.Artifact.Dir = v }},
+		Get:     func(c *config.Config) string { return c.Artifact.Dir },
+		Set:     func(c *config.Config, v string) { c.Artifact.Dir = v },
+		Restart: true,
+		Note:    "制品仓储在启动时绑定该目录；修改后需重启。已上传的制品不会自动迁移到新目录。"},
+	{Key: "artifact.max_size", Group: "制品",
+		Label: "单文件上限字节数（0=不限，默认按 2GB 处理）", Type: "int",
+		Get:   func(c *config.Config) string { return strconv.FormatInt(c.Artifact.MaxSize, 10) },
+		Set:   func(c *config.Config, v string) { setInt64(&c.Artifact.MaxSize, v) },
+		Validate: func(v string) error {
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil || n < 0 {
+				return fmt.Errorf("应为 0 或正整数（字节）")
+			}
+			return nil
+		},
+		Note: "上传接口每次读取当前值，保存后立即生效。1GB = 1073741824。"},
+	{Key: "artifact.storage_type", Group: "制品", Label: "存储后端", Type: "enum",
+		Options: []string{"local", "s3", "oss"},
+		Get:     func(c *config.Config) string { return c.Artifact.StorageType },
+		Set: func(c *config.Config, v string) {
+			c.Artifact.StorageType = strings.ToLower(strings.TrimSpace(v))
+		},
+		Validate: func(v string) error {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "", "local", "s3", "oss":
+				return nil
+			}
+			return fmt.Errorf("只能是 local / s3 / oss")
+		},
+		Restart: true,
+		Note:    "切换后需重启。改为 s3/oss 时必须同时填好下方对应参数，否则启动时初始化失败会自动降级为 local。"},
+	{Key: "artifact.s3_endpoint", Group: "制品存储后端（需重启）", Label: "S3/MinIO 端点（storage_type=s3）", Type: "string",
+		Get:      func(c *config.Config) string { return c.Artifact.S3Endpoint },
+		Set:      func(c *config.Config, v string) { c.Artifact.S3Endpoint = strings.TrimSpace(v) },
+		Restart:  true,
+		Note:     "如 http://minio:9000；留空则无法使用 s3 后端"},
+	{Key: "artifact.s3_region", Group: "制品存储后端（需重启）", Label: "S3 区域", Type: "string",
+		Get:     func(c *config.Config) string { return c.Artifact.S3Region },
+		Set:     func(c *config.Config, v string) { c.Artifact.S3Region = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "artifact.s3_bucket", Group: "制品存储后端（需重启）", Label: "S3 存储桶", Type: "string",
+		Get:     func(c *config.Config) string { return c.Artifact.S3Bucket },
+		Set:     func(c *config.Config, v string) { c.Artifact.S3Bucket = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "artifact.s3_access_key", Group: "制品存储后端（需重启）", Label: "S3 Access Key", Type: "string",
+		Get:     func(c *config.Config) string { return c.Artifact.S3AccessKey },
+		Set:     func(c *config.Config, v string) { c.Artifact.S3AccessKey = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "artifact.s3_secret_key", Group: "制品存储后端（需重启）", Label: "S3 Secret Key", Type: "secret", Secret: true,
+		Get:     func(c *config.Config) string { return c.Artifact.S3SecretKey },
+		Set:     func(c *config.Config, v string) { c.Artifact.S3SecretKey = v },
+		Restart: true},
+	{Key: "artifact.s3_use_ssl", Group: "制品存储后端（需重启）", Label: "S3 使用 HTTPS", Type: "bool",
+		Get:     func(c *config.Config) string { return b2s(c.Artifact.S3UseSSL) },
+		Set:     func(c *config.Config, v string) { c.Artifact.S3UseSSL = v == "true" },
+		Restart: true},
+	{Key: "artifact.oss_endpoint", Group: "制品存储后端（需重启）", Label: "阿里云 OSS 端点（storage_type=oss）", Type: "string",
+		Get:     func(c *config.Config) string { return c.Artifact.OSSEndpoint },
+		Set:     func(c *config.Config, v string) { c.Artifact.OSSEndpoint = strings.TrimSpace(v) },
+		Restart: true,
+		Note:    "如 oss-cn-hangzhou.aliyuncs.com"},
+	{Key: "artifact.oss_bucket", Group: "制品存储后端（需重启）", Label: "OSS 存储桶", Type: "string",
+		Get:     func(c *config.Config) string { return c.Artifact.OSSBucket },
+		Set:     func(c *config.Config, v string) { c.Artifact.OSSBucket = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "artifact.oss_access_key", Group: "制品存储后端（需重启）", Label: "OSS Access Key", Type: "string",
+		Get:     func(c *config.Config) string { return c.Artifact.OSSAccessKey },
+		Set:     func(c *config.Config, v string) { c.Artifact.OSSAccessKey = strings.TrimSpace(v) },
+		Restart: true},
+	{Key: "artifact.oss_secret_key", Group: "制品存储后端（需重启）", Label: "OSS Secret Key", Type: "secret", Secret: true,
+		Get:     func(c *config.Config) string { return c.Artifact.OSSSecretKey },
+		Set:     func(c *config.Config, v string) { c.Artifact.OSSSecretKey = v },
+		Restart: true},
 
 	// Agent / 指令
 	{Key: "agent.poll_hold", Group: "Agent", Label: "长轮询挂起(秒)", Type: "int",
 		Get: func(c *config.Config) string { return strconv.Itoa(c.Agent.PollHold) },
 		Set: func(c *config.Config, v string) { setInt(&c.Agent.PollHold, v) }},
 	{Key: "agent.lease_max", Group: "Agent", Label: "维护窗口上限(1h)", Type: "string",
-		Get: func(c *config.Config) string { return c.Agent.LeaseMax },
-		Set: func(c *config.Config, v string) { c.Agent.LeaseMax = v }},
+		Get:      func(c *config.Config) string { return c.Agent.LeaseMax },
+		Set:      func(c *config.Config, v string) { c.Agent.LeaseMax = strings.TrimSpace(v) },
+		Validate: validateDuration(true)},
+	{Key: "agent.require_enroll_token", Group: "Agent",
+		Label: "强制要求注册令牌（生产环境强烈建议开启）", Type: "bool",
+		Get:   func(c *config.Config) string { return b2s(c.Agent.RequireEnrollToken) },
+		Set:   func(c *config.Config, v string) { c.Agent.RequireEnrollToken = v == "true" },
+		Note:  "关闭后任何能访问本服务的主机都可自行注册，仅限可信内网使用。"},
+	{Key: "agent.enroll_token_ttl", Group: "Agent",
+		Label: "注册令牌有效期（如 15m）", Type: "string",
+		Get:   func(c *config.Config) string { return c.Agent.EnrollTokenTTL },
+		Set:   func(c *config.Config, v string) { c.Agent.EnrollTokenTTL = strings.TrimSpace(v) },
+		Validate: validateDuration(true)},
 	{Key: "agent.allow_exec_mode", Group: "Agent", Label: "允许 exec/script 模式与命令任务", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.AllowExecMode) },
 		Set: func(c *config.Config, v string) { c.Agent.AllowExecMode = v == "true" }},
@@ -181,21 +402,8 @@ var Registry = []Item{
 			}
 			return nil
 		}},
-	{Key: "consul_mgr.group_id", Group: "consul_mgr 对接",
-		Label: "只同步指定服务组 ID（0 表示全部启用的服务组）", Type: "int",
-		Get: func(c *config.Config) string { return strconv.FormatInt(c.ConsulMgr.GroupID, 10) },
-		Set: func(c *config.Config, v string) {
-			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n >= 0 {
-				c.ConsulMgr.GroupID = n
-			}
-		},
-		Validate: func(v string) error {
-			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-			if err != nil || n < 0 {
-				return fmt.Errorf("服务组 ID 应为 0 或正整数")
-			}
-			return nil
-		}},
+	// 服务组不在设置里配置：同步时在主机页的下拉中选择（候选来自
+	// GET /api/consul-mgr/groups），避免「页面能选、配置又写死」两处语义冲突。
 
 	// 外部文件代缓存（供老系统通过 HTTP 获取公网文件）
 	{Key: "server.external_binaries", Group: "外部文件代缓存",
@@ -312,6 +520,44 @@ var Registry = []Item{
 		Get: func(c *config.Config) string { return c.Redis.Prefix },
 		Set: func(c *config.Config, v string) { c.Redis.Prefix = strings.TrimSpace(v) }},
 
+	// 数据库（只读展示）
+	//
+	// 设置项本身存在数据库的 app_settings 表里：启动顺序是「先连库 → 再读设置」，
+	// 所以数据库连接参数不可能由页面提供（连不上库就读不到设置）。
+	// 这里只展示当前生效值，便于确认「服务到底连的哪个库」，修改仍走配置文件/环境变量。
+	{Key: "database.host", Group: "数据库（只读，改配置文件后重启）", Label: "主机", Type: "string",
+		ReadOnly: true, Note: "由 config.yaml 的 database.host 或环境变量 DB_HOST 提供",
+		Get:      func(c *config.Config) string { return c.Database.Host },
+		Set:      func(c *config.Config, v string) {}},
+	{Key: "database.port", Group: "数据库（只读，改配置文件后重启）", Label: "端口", Type: "int",
+		ReadOnly: true,
+		Get:      func(c *config.Config) string { return strconv.Itoa(c.Database.Port) },
+		Set:      func(c *config.Config, v string) {}},
+	{Key: "database.user", Group: "数据库（只读，改配置文件后重启）", Label: "用户名", Type: "string",
+		ReadOnly: true,
+		Get:      func(c *config.Config) string { return c.Database.User },
+		Set:      func(c *config.Config, v string) {}},
+	{Key: "database.dbname", Group: "数据库（只读，改配置文件后重启）", Label: "库名", Type: "string",
+		ReadOnly: true,
+		Get:      func(c *config.Config) string { return c.Database.DBName },
+		Set:      func(c *config.Config, v string) {}},
+	{Key: "database.sslmode", Group: "数据库（只读，改配置文件后重启）", Label: "SSL 模式", Type: "string",
+		ReadOnly: true,
+		Get:      func(c *config.Config) string { return c.Database.SSLMode },
+		Set:      func(c *config.Config, v string) {}},
+	{Key: "database.max_open_conns", Group: "数据库（只读，改配置文件后重启）",
+		Label: "最大连接数", Type: "int", ReadOnly: true,
+		Get:   func(c *config.Config) string { return strconv.Itoa(c.Database.MaxOpenConns) },
+		Set:   func(c *config.Config, v string) {}},
+	{Key: "database.max_idle_conns", Group: "数据库（只读，改配置文件后重启）",
+		Label: "最大空闲连接数", Type: "int", ReadOnly: true,
+		Get:   func(c *config.Config) string { return strconv.Itoa(c.Database.MaxIdleConns) },
+		Set:   func(c *config.Config, v string) {}},
+	{Key: "database.conn_max_lifetime", Group: "数据库（只读，改配置文件后重启）",
+		Label: "连接最大存活秒数", Type: "int", ReadOnly: true,
+		Get:   func(c *config.Config) string { return strconv.Itoa(c.Database.ConnMaxLifetime) },
+		Set:   func(c *config.Config, v string) {}},
+
 	// 日志
 	{Key: "log.level", Group: "日志", Label: "级别", Type: "string",
 		Get: func(c *config.Config) string { return c.Log.Level },
@@ -388,6 +634,15 @@ func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, er
 		if !ok {
 			continue
 		}
+		// 只读项（数据库连接参数）：页面会禁用输入框，但不能只靠前端。
+		// 这里显式拒绝，避免直接调 API 把无效值写进 app_settings，
+		// 下次启动 Load 时又被套用到 Config 上。
+		if it.ReadOnly {
+			if v != it.Get(s.cfg) {
+				return nil, fmt.Errorf("设置 %s 为只读项，请修改配置文件或环境变量后重启", k)
+			}
+			continue
+		}
 		// secret 占位符表示不修改
 		if it.Secret && IsMasked(v) {
 			continue
@@ -405,6 +660,11 @@ func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, er
 	for k, v := range kv {
 		it, ok := s.items[k]
 		if !ok {
+			continue
+		}
+		// 只读项不落库：上面已确认值未变，这里直接跳过，
+		// 保持 app_settings 里不出现数据库连接参数。
+		if it.ReadOnly {
 			continue
 		}
 		if it.Secret && IsMasked(v) {
@@ -502,6 +762,9 @@ func (s *Service) View() []map[string]any {
 			"key": it.Key, "group": it.Group, "label": it.Label,
 			"type": it.Type, "secret": it.Secret, "value": val,
 			"options": it.Options,
+			// readonly/restart/note 供页面区分「可改且立即生效」
+			// 「可改但需重启」「只读展示」三种情况。
+			"readonly": it.ReadOnly, "restart": it.Restart, "note": it.Note,
 		})
 	}
 	return out
@@ -579,3 +842,42 @@ func setInt(dst *int, v string) {
 		*dst = n
 	}
 }
+
+// setInt64 同 setInt，用于 int64 字段（如制品大小上限）。
+func setInt64(dst *int64, v string) {
+	if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+		*dst = n
+	}
+}
+
+// validateIntRange 生成「整数且在 [min,max] 内」的校验函数。
+//
+// name 用于错误提示，便于用户定位是哪一项填错。
+func validateIntRange(min, max int, name string) func(string) error {
+	return func(v string) error {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n < min || n > max {
+			return fmt.Errorf("%s应为 %d-%d 的整数", name, min, max)
+		}
+		return nil
+	}
+}
+
+// validateDuration 校验 Go 时长字符串（如 15m / 1h）；allowEmpty 时空值合法。
+func validateDuration(allowEmpty bool) func(string) error {
+	return func(v string) error {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			if allowEmpty {
+				return nil
+			}
+			return fmt.Errorf("不能为空（示例 15m / 1h）")
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("无效时长（示例 15m / 1h）")
+		}
+		return nil
+	}
+}
+
