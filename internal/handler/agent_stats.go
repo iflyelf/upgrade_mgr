@@ -13,6 +13,8 @@ import (
 func AgentStats(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tCond, tArgs := reqScope(r).Where("h", 1)
+		// 兼容历史数据：早期注册未回填 agents.host_id，此时按 agent_id 关联主机；
+		// 新数据优先使用 agents.host_id（避免同 agent_id 多主机时重复计数）。
 		rows, err := s.DB.QueryContext(r.Context(), `
 			SELECT COALESCE(a.agent_version,''), COALESCE(a.os,''), COALESCE(a.arch,''),
 			       COUNT(*) AS total,
@@ -22,7 +24,7 @@ func AgentStats(s *svc.ServiceContext) http.HandlerFunc {
 			              OR a.last_heartbeat_at < NOW() - INTERVAL '5 minutes'
 			       ) AS offline
 			  FROM agents a
-			  JOIN hosts h ON h.id = a.host_id
+			  JOIN hosts h ON h.id = a.host_id OR (a.host_id IS NULL AND h.agent_id = a.agent_id)
 			 WHERE `+tCond+`
 			 GROUP BY 1,2,3
 			 ORDER BY total DESC`, tArgs...)

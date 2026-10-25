@@ -34,6 +34,8 @@ services:
       # - REDIS_DB=0                   # cluster 固定 0；超范围自动回退
       # - REDIS_CACHE_TTL=10           # 列表缓存秒数，上限 30
       # - REDIS_PREFIX=upgrade_mgr:
+      # - ARTIFACT_MAX_CONCURRENT_UPLOADS=4   # 每个上传占用一条 advisory lock 连接
+      # - ARTIFACT_LOCK_WAIT=30m              # 跨副本同组件上传/删除锁等待上限
     networks:
       - upgrade-net
     depends_on:

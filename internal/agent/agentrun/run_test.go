@@ -242,3 +242,11 @@ func TestResolveArtifactURL(t *testing.T) {
 		t.Fatalf("自定义 script_url 不应携带 Agent 凭据，got %q", auth)
 	}
 }
+
+// TestPostJSONInvalidServerURL 非法 server 地址不能让 Agent crash（nil request）。
+func TestPostJSONInvalidServerURL(t *testing.T) {
+	a := New(Config{ServerURL: "http://bad host\x7f"})
+	if err := a.postJSON("/api/agent/heartbeat", map[string]any{}, nil); err == nil {
+		t.Fatal("非法 server 地址应返回错误而不是 panic")
+	}
+}

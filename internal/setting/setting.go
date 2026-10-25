@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -276,6 +277,24 @@ var Registry = []Item{
 			return nil
 		},
 		Note: "上传接口每次读取当前值，保存后立即生效。1GB = 1073741824。"},
+	{Key: "artifact.max_concurrent_uploads", Group: "制品",
+		Label: "并发上传数上限（1-64，默认 4）", Type: "int",
+		Get:      func(c *config.Config) string { return strconv.Itoa(c.Artifact.MaxConcurrentUploads) },
+		Set:      func(c *config.Config, v string) { setInt(&c.Artifact.MaxConcurrentUploads, v) },
+		Validate: validateIntRange(1, 64, "并发上传数"),
+		Note:     "每个并发上传会持有一条 PostgreSQL advisory lock 连接；保存后本实例立即热更新上传限流器，并在线把 database.max_open_conns 抬到至少“上传数 + 4”。多副本部署下其他副本约 5 秒内自动同步。"},
+	{Key: "artifact.lock_wait", Group: "制品",
+		Label: "跨副本上传锁等待时长（1s-24h，默认 30m）", Type: "string",
+		Get: func(c *config.Config) string { return c.Artifact.LockWait },
+		Set: func(c *config.Config, v string) { c.Artifact.LockWait = strings.TrimSpace(v) },
+		Validate: func(v string) error {
+			d, err := time.ParseDuration(strings.TrimSpace(v))
+			if err != nil || d < time.Second || d > 24*time.Hour {
+				return fmt.Errorf("应为 1s-24h 的时长（示例 30m / 1h）")
+			}
+			return nil
+		},
+		Note: "等待其他副本上传/删除同一组件制品的最长时间；保存后本实例立即生效，其他副本约 5 秒内自动同步。"},
 	{Key: "artifact.storage_type", Group: "制品", Label: "存储后端", Type: "enum",
 		Options: []string{"local", "s3", "oss"},
 		Get:     func(c *config.Config) string { return c.Artifact.StorageType },
@@ -578,8 +597,9 @@ var Registry = []Item{
 		Set:      func(c *config.Config, v string) {}},
 	{Key: "database.max_open_conns", Group: "数据库（只读，改配置文件后重启）",
 		Label: "最大连接数", Type: "int", ReadOnly: true,
-		Get: func(c *config.Config) string { return strconv.Itoa(c.Database.MaxOpenConns) },
-		Set: func(c *config.Config, v string) {}},
+		Get:  func(c *config.Config) string { return strconv.Itoa(c.Database.MaxOpenConns) },
+		Set:  func(c *config.Config, v string) {},
+		Note: "运行时按 artifact.max_concurrent_uploads + 4 自动抬高；页面显示的是配置文件基数（每个上传持有一条 advisory lock 连接）。"},
 	{Key: "database.max_idle_conns", Group: "数据库（只读，改配置文件后重启）",
 		Label: "最大空闲连接数", Type: "int", ReadOnly: true,
 		Get: func(c *config.Config) string { return strconv.Itoa(c.Database.MaxIdleConns) },
@@ -687,7 +707,14 @@ func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, er
 		}
 	}
 
-	applied := make([]string, 0, len(kv))
+	// 先收集需要写入的项，再单事务提交：任一项失败则整批回滚，
+	// 避免页面一次保存多个设置时出现“部分生效”的不一致状态。
+	type pendingSetting struct {
+		key  string
+		val  string
+		item Item
+	}
+	pending := make([]pendingSetting, 0, len(kv))
 	for k, v := range kv {
 		it, ok := s.items[k]
 		if !ok {
@@ -701,14 +728,39 @@ func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, er
 		if it.Secret && IsMasked(v) {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx,
+		pending = append(pending, pendingSetting{key: k, val: v, item: it})
+	}
+	// 固定写入顺序，便于测试与排查；事务内顺序不影响最终结果。
+	sort.Slice(pending, func(i, j int) bool { return pending[i].key < pending[j].key })
+	applied := make([]string, 0, len(pending))
+	if len(pending) == 0 {
+		return applied, nil
+	}
+	if s.db == nil {
+		return nil, fmt.Errorf("数据库未初始化")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("开始保存设置事务失败: %w", err)
+	}
+	defer tx.Rollback()
+	for _, p := range pending {
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO app_settings (key, value, updated_at) VALUES ($1,$2,NOW())
 			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-			k, v); err != nil {
-			return applied, fmt.Errorf("保存设置 %s 失败: %w", k, err)
+			p.key, p.val); err != nil {
+			return nil, fmt.Errorf("保存设置 %s 失败: %w", p.key, err)
 		}
-		it.Set(s.cfg, v)
-		applied = append(applied, k)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交设置失败: %w", err)
+	}
+	// 事务提交成功后再一次性更新内存（仍持有 s.mu 写锁，
+	// 期间 Snapshot 读到的是提交前的完整旧值或提交后的完整新值）。
+	for _, p := range pending {
+		p.item.Set(s.cfg, p.val)
+		applied = append(applied, p.key)
 	}
 	return applied, nil
 }
@@ -801,6 +853,69 @@ func (s *Service) View() []map[string]any {
 	return out
 }
 
+// ReadValues 读取指定键在数据库中的当前值；未出现的键不放入返回 map。
+//
+// 用于多副本运行时同步：不修改内存配置，也不写数据库。
+func (s *Service) ReadValues(ctx context.Context, keys ...string) (map[string]string, error) {
+	out := map[string]string{}
+	if s == nil || s.db == nil || len(keys) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(keys))
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = k
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT key, value FROM app_settings WHERE key IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// ApplyRuntime 仅把给定值写回内存 Config，不写数据库。
+//
+// 用于多副本运行时同步：某副本保存设置后，其他副本轮询到 DB 变化时调用。
+// 只接受已注册、非只读、校验通过且值确实变化的项；返回实际更新的键。
+func (s *Service) ApplyRuntime(kv map[string]string) []string {
+	if s == nil || len(kv) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	applied := make([]string, 0, len(kv))
+	for k, v := range kv {
+		it, ok := s.items[k]
+		if !ok || it.ReadOnly {
+			continue
+		}
+		if it.Secret && IsMasked(v) {
+			continue
+		}
+		if v == it.Get(s.cfg) {
+			continue
+		}
+		if it.Validate != nil {
+			if err := it.Validate(v); err != nil {
+				continue
+			}
+		}
+		it.Set(s.cfg, v)
+		applied = append(applied, k)
+	}
+	return applied
+}
+
 // Snapshot 返回当前 Config 的快照副本（用于并发安全的读取）。
 func (s *Service) Snapshot() config.Config {
 	s.mu.RLock()
@@ -832,6 +947,17 @@ func NeedsConsulReload(applied []string) bool {
 func NeedsCacheReload(applied []string) bool {
 	for _, k := range applied {
 		if strings.HasPrefix(k, "redis.") {
+			return true
+		}
+	}
+	return false
+}
+
+// NeedsArtifactReload 判断变更是否涉及制品上传并发/锁等待（可热更新）。
+func NeedsArtifactReload(applied []string) bool {
+	for _, k := range applied {
+		switch k {
+		case "artifact.max_concurrent_uploads", "artifact.lock_wait":
 			return true
 		}
 	}

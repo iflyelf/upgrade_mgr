@@ -719,32 +719,6 @@ func (g *Gateway) Report(ctx context.Context, agentID, cmdIDStr string, req prot
 	return nil
 }
 
-// ConsumeEnrollToken 消费一次性注册令牌，返回其所属租户 ID。
-//
-// 校验：token 有效、未使用、未过期、IP 匹配（若限定）。
-// 成功后标记已使用，返回 (tenantID, true)；失败返回 (0, false)。
-func (g *Gateway) ConsumeEnrollToken(ctx context.Context, token, clientIP string) (int64, bool) {
-	var tenantID int64
-	var allowedIP sql.NullString
-	err := g.db.QueryRowContext(ctx, `
-		SELECT tenant_id, allowed_ip FROM enroll_tokens 
-		WHERE token=$1 AND used=false AND (expire_at IS NULL OR expire_at > NOW())`,
-		token).Scan(&tenantID, &allowedIP)
-	if err != nil {
-		return 0, false
-	}
-	// IP 限定检查
-	if allowedIP.Valid && allowedIP.String != clientIP {
-		return 0, false
-	}
-	// 原子标记已使用
-	_, err = g.db.ExecContext(ctx, `UPDATE enroll_tokens SET used=true, used_at=NOW() WHERE token=$1`, token)
-	if err != nil {
-		return 0, false
-	}
-	return tenantID, true
-}
-
 // activeCommandStatusList 返回活动指令状态的 SQL 字面量列表。
 func activeCommandStatusList() string {
 	return "'pending','dispatched','accepted','running'"

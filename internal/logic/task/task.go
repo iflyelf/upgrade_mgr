@@ -363,6 +363,9 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 	if kind == "" {
 		kind = KindUpgrade
 	}
+	if kind != KindUpgrade && kind != KindCommand {
+		return nil, fmt.Errorf("不支持的任务类型 %q", kind)
+	}
 	var compName string
 	if kind == KindCommand {
 		if !isPrivilegedActor(req.actor) {

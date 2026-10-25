@@ -128,7 +128,9 @@ func tunnelCheckDetail(res tunnelprobe.Result) string {
 	detail := strings.Join(parts, "；")
 	const maxLen = 2000
 	if len(detail) > maxLen {
-		detail = detail[:maxLen] + "…"
+		// 按字节截断可能切坏中文字符，PostgreSQL 的 UTF-8 校验会拒绝整个
+		// UPDATE（表现为拨测结果永远写不进去）。这里丢弃不完整的尾字符。
+		detail = strings.ToValidUTF8(detail[:maxLen], "") + "…"
 	}
 	return detail
 }

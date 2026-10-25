@@ -2,8 +2,13 @@
 <html lang="zh-CN" data-theme="warm">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#f5efe6" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="format-detection" content="telephone=no" />
   <title>升级控制平台</title>
   <script>
     // 防首屏闪烁：Vue/渲染前先设置主题
@@ -16,6 +21,8 @@
           t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'warm';
         }
         document.documentElement.setAttribute('data-theme', t);
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', t === 'dark' ? '#171a1f' : (t === 'cool' ? '#f4f6f8' : '#f5efe6'));
       } catch (e) { document.documentElement.setAttribute('data-theme', 'warm'); }
     })();
   </script>

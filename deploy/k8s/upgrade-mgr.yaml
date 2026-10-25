@@ -41,6 +41,9 @@ data:
       # 多副本必须使用 S3/OSS，或给所有副本挂载同一个 RWX 共享目录。
       storage_type: s3
       dir: /data/artifacts
+      # 每个上传占用一条 advisory lock 连接；连接池会自动按此值 + 4 抬高。
+      max_concurrent_uploads: 4
+      lock_wait: 30m
       s3_endpoint: "obs.cn-east-3.myhuaweicloud.com"
       s3_region: "cn-east-3"
       s3_bucket: "upgrade-mgr"

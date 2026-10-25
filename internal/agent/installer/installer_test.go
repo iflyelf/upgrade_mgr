@@ -109,3 +109,25 @@ func TestWriteInitialStateForceOverwritesCredentials(t *testing.T) {
 		t.Fatalf("--force 应写入新服务端/令牌，got %+v", st)
 	}
 }
+
+// TestInstallRejectsUnitInjection 服务单元模板直接写入 --server 参数：
+// 必须拒绝换行/空白/非 http(s) 值，避免向 unit 文件注入额外指令。
+func TestInstallRejectsUnitInjection(t *testing.T) {
+	base := t.TempDir()
+	cases := []string{
+		"http://example.com/\n[Service]\nExecStart=/bin/sh",
+		"http://example.com/ with space",
+		"javascript:alert(1)",
+		"file:///etc/passwd",
+	}
+	for _, s := range cases {
+		err := Install(Options{
+			ServerURL: s,
+			BinPath:   filepath.Join(base, "agent"),
+			StatePath: filepath.Join(base, "state.json"),
+		})
+		if err == nil {
+			t.Fatalf("server=%q 应被拒绝", s)
+		}
+	}
+}

@@ -125,6 +125,13 @@ test('系统设置展示 Redis 缓存状态与操作入口', async ({ page }) =>
   await expect(page.getByRole('button', { name: '测试连接' })).toBeVisible();
   await expect(page.getByRole('button', { name: '清空缓存' })).toBeVisible();
   await expect(page.getByRole('button', { name: '刷新状态' })).toBeVisible();
+  // 制品上传的新配置项必须在页面可见，且明确不要求重启（保存后热更新）。
+  const uploadLabel = page.locator('label', { hasText: 'artifact.max_concurrent_uploads' });
+  const lockWaitLabel = page.locator('label', { hasText: 'artifact.lock_wait' });
+  await expect(uploadLabel).toBeVisible();
+  await expect(lockWaitLabel).toBeVisible();
+  await expect(uploadLabel).not.toContainText('需重启');
+  await expect(lockWaitLabel).not.toContainText('需重启');
 });
 
 test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {

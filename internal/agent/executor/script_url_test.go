@@ -95,6 +95,10 @@ func TestArtifactFilename(t *testing.T) {
 		{"https://example.com/api/artifacts/42/download", "artifact-42.bin"},
 		{"https://example.com", "artifact"},
 		{"https://example.com/..", "artifact"},
+		// Windows 下 %5c 解码为反斜杠，不能借此跳出下载临时目录。
+		{"https://example.com/%2e%2e%5cevil", "evil"},
+		{"https://example.com/a%5c..%5cb", "b"},
+		{"https://example.com/a%5c..%5c", "artifact"},
 	}
 	for _, tc := range cases {
 		if got := artifactFilename(tc.raw); got != tc.want {

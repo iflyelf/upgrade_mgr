@@ -8,10 +8,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/middleware"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/tunnelprobe"
 	"github.com/iflyelf/upgrade_mgr/internal/setting"
 )
 
@@ -114,5 +116,18 @@ func TestHeartbeatRequestsTunnelCheck(t *testing.T) {
 	}
 	if requestd != nil {
 		t.Fatal("回报结果后应清除待检查标记")
+	}
+}
+
+// TestTunnelCheckDetailUTF8 超长中文详情截断后仍必须是合法 UTF-8，
+// 否则 PostgreSQL 会拒绝写入拨测结果。
+func TestTunnelCheckDetailUTF8(t *testing.T) {
+	long := strings.Repeat("中文", 1200) // 7200 字节，远超 2000
+	got := tunnelCheckDetail(tunnelprobe.Result{Hint: long})
+	if len(got) > 2010 {
+		t.Fatalf("截断长度过大: %d", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("截断结果不是合法 UTF-8")
 	}
 }

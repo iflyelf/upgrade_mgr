@@ -730,6 +730,12 @@ func UploadExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 			limit = externalBinaryScriptMaxSize
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
+		// multipart 超过内存阈值的部分会落到临时文件，必须显式清理。
+		defer func() {
+			if r.MultipartForm != nil {
+				_ = r.MultipartForm.RemoveAll()
+			}
+		}()
 		if err := r.ParseMultipartForm(8 << 20); err != nil {
 			status := http.StatusBadRequest
 			if strings.Contains(err.Error(), "request body too large") {
