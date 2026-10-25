@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -53,11 +54,14 @@ func main() {
 	sc.StartMaintenance(ctx)
 	// 外部文件可用性探测（Prometheus 指标），便于观察公网/内网镜像稳定性。
 	sc.StartExtbinProbe(ctx, handler.NewExtbinProvider(sc), 0)
+	// 其他副本在页面保存的制品上传配置：当前实例由保存请求立即热更新，
+	// 其他副本通过 5 秒轮询同步，无需重启。
+	sc.StartArtifactSettingsWatcher(ctx, 5*time.Second)
 
 	mux := http.NewServeMux()
 	limiters := registerRoutes(mux, sc)
 
-	// 访问日志 → 安全响应头 → 请求体限制 → Redis 缓存 → 业务路由。
+	// 访问日志 → CORS → 安全响应头 → CSRF → 请求体限制 → Redis 缓存 → 业务路由。
 	// 缓存放在安全头内侧：命中缓存时仍会经过 SecurityHeaders / LimitBody，
 	// 不会出现「命中 Redis 就缺少安全头」的问题。
 	var root http.Handler = mux
@@ -67,12 +71,23 @@ func main() {
 		log.Printf("✅ Redis HTTP 缓存已挂载（TTL %s，前缀 %s）", c.TTL(), c.Status().Prefix)
 	}
 	root = middleware.LimitBody(1<<20, "POST /api/artifacts")(root)
+	// 写请求 CSRF 纵深防御：会话 Cookie 已是 SameSite=Lax，这里再校验
+	// Origin/Referer 与请求 Host（或 CORS/ExternalURL 白名单）一致。
+	// 允许的 Origin 每次请求读取设置快照，保存后立即生效。
+	allowedOrigins := func() []string {
+		snap := sc.Settings.Snapshot()
+		out := append([]string(nil), snap.Server.CORSOrigins...)
+		if v := strings.TrimRight(strings.TrimSpace(snap.Server.ExternalURL), "/"); v != "" {
+			out = append(out, v)
+		}
+		return out
+	}
+	root = middleware.CSRFGuard(allowedOrigins)(root)
+	// 安全头在 CSRF 外侧：即使请求被 CSRF 拒绝，也会带上 no-store 等安全头。
 	root = middleware.SecurityHeaders(root)
 	// CORS 必须在 Redis 缓存外侧：缓存 HIT 也要按当前 Origin 动态加响应头。
 	// 设置页保存 server.cors_origins 后立即生效；预检在进入 ServeMux 前处理。
-	root = middleware.CORS(func() []string {
-		return sc.Settings.Snapshot().Server.CORSOrigins
-	})(root)
+	root = middleware.CORS(allowedOrigins)(root)
 	root = middleware.AccessLog(root)
 
 	// 可选 HTTPS / 双向 TLS：未配置证书时保持原有 HTTP 行为。
@@ -85,9 +100,17 @@ func main() {
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: root,
-		// 不设置全局 WriteTimeout，避免打断 Agent 长轮询；读超时保留。
+		// 不设置全局 WriteTimeout，避免打断 Agent 长轮询。
+		// 读超时覆盖请求头与请求体：仅靠 ReadHeaderTimeout 时，攻击者可以
+		// 用极慢的请求体长期占用连接（slowloris）。30 分钟足以覆盖 2GB
+		// 制品在常见内网带宽下的上传；超大文件建议经反向代理上传。
 		ReadHeaderTimeout: 15 * time.Second,
-		TLSConfig:         tlsCfg,
+		ReadTimeout:       30 * time.Minute,
+		// 空闲 keep-alive 连接超时，避免慢连接长期占用文件描述符。
+		IdleTimeout: 120 * time.Second,
+		// 限制请求头大小，降低内存压力。
+		MaxHeaderBytes: 1 << 20,
+		TLSConfig:      tlsCfg,
 	}
 
 	go func() {
@@ -162,11 +185,11 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/auth/userinfo", middleware.RequireAuth(auth, handler.UserInfo(sc)))
 	mux.Handle("PUT /api/auth/password", middleware.RateLimitMiddleware(loginLimiter)(middleware.RequireAuth(auth, handler.ChangePassword(sc))))
 	mux.HandleFunc("GET /api/hosts", middleware.RequireAuth(auth, handler.ListHosts(sc)))
-	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, handler.SyncHosts(sc)))
+	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SyncHosts(sc))))
 	// 从 consul_mgr 同步（覆盖多个服务组/多套 Consul）；与直连 Consul 同步并存。
-	mux.HandleFunc("GET /api/consul-mgr/groups", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListConsulMgrGroups(sc))))
-	mux.HandleFunc("POST /api/hosts/sync-consul-mgr", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncHostsFromConsulMgr(sc))))
-	mux.HandleFunc("POST /api/consul-mgr/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestConsulMgr(sc))))
+	mux.HandleFunc("GET /api/consul-mgr/groups", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ListConsulMgrGroups(sc))))
+	mux.HandleFunc("POST /api/hosts/sync-consul-mgr", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SyncHostsFromConsulMgr(sc))))
+	mux.HandleFunc("POST /api/consul-mgr/test", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.TestConsulMgr(sc))))
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
 	mux.HandleFunc("POST /api/hosts/{id}/tunnel-test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostTunnelTest(sc))))
@@ -187,26 +210,28 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.Handle("POST /api/agent/commands/{id}/stage", agentAuth(http.HandlerFunc(handler.AgentCommandStage(sc))))
 	mux.Handle("POST /api/agent/commands/{id}/report", agentAuth(http.HandlerFunc(handler.AgentCommandReport(sc))))
 	mux.Handle("GET /api/agent/enroll-token", middleware.RateLimitMiddleware(enrollLimiter)(middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentEnrollToken(sc)))))
+	// 兼容旧客户端保留 GET；新页面使用 POST（GET 不应产生副作用，也避免顶级导航 CSRF）。
+	mux.Handle("POST /api/agent/enroll-token", middleware.RateLimitMiddleware(enrollLimiter)(middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentEnrollToken(sc)))))
 	// Agent 二进制下载（无鉴权，白名单架构）
 	mux.HandleFunc("GET /api/agent/binary/{name}", handler.AgentBinaryDownload(sc))
 	// 白名单外部二进制（控制台代为下载缓存）：供无法 TLS 1.2 的老系统用 HTTP 拉取
 	mux.HandleFunc("GET /api/external/binary/{name}", handler.ExternalBinaryDownload(sc))
 	// 白名单管理（页面表格页）：查看 / 保存（热加载）/ 测试下载
 	mux.HandleFunc("GET /api/external/binaries",
-		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListExternalBinaries(sc))))
+		middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ListExternalBinaries(sc))))
 	mux.HandleFunc("PUT /api/external/binaries",
-		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SaveExternalBinaries(sc))))
+		middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SaveExternalBinaries(sc))))
 	mux.HandleFunc("POST /api/external/binaries/test",
-		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestExternalBinary(sc))))
+		middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.TestExternalBinary(sc))))
 	mux.HandleFunc("POST /api/external/binaries/refresh",
-		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RefreshExternalBinary(sc))))
+		middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.RefreshExternalBinary(sc))))
 	mux.HandleFunc("POST /api/external/binaries/refresh-all",
-		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.RefreshAllExternalBinaries(sc))))
+		middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.RefreshAllExternalBinaries(sc))))
 	// 离线文件上传（平台无法出网时使用；优先于上游缓存）
 	mux.HandleFunc("POST /api/external/binaries/{name}/upload",
-		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UploadExternalBinary(sc))))
+		middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.UploadExternalBinary(sc))))
 	mux.HandleFunc("DELETE /api/external/binaries/{name}/upload",
-		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DeleteExternalBinaryUpload(sc))))
+		middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.DeleteExternalBinaryUpload(sc))))
 
 	// 组件管理
 	mux.HandleFunc("GET /api/components", middleware.RequireAuth(auth, handler.ComponentList(sc)))
@@ -247,9 +272,9 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/quickstart", middleware.RequireAuth(auth, handler.Quickstart()))
 	mux.HandleFunc("GET /api/my/permissions", middleware.RequireAuth(auth, handler.MyPermissions(sc)))
 	// Redis 缓存：状态/自检/清理（管理员）
-	mux.HandleFunc("GET /api/cache/status", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CacheStatus(sc))))
-	mux.HandleFunc("POST /api/cache/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CacheTest(sc))))
-	mux.HandleFunc("POST /api/cache/flush", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CacheFlush(sc))))
+	mux.HandleFunc("GET /api/cache/status", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CacheStatus(sc))))
+	mux.HandleFunc("POST /api/cache/test", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CacheTest(sc))))
+	mux.HandleFunc("POST /api/cache/flush", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CacheFlush(sc))))
 	mux.HandleFunc("GET /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserList(sc))))
 	mux.HandleFunc("POST /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCreate(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/tenant-roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetTenantRoles(sc))))
@@ -258,17 +283,17 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/users/{username}/reset-password", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserResetPassword(sc))))
 	// 字段自定义（用户/主机扩展字段定义）
 	mux.HandleFunc("GET /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListFieldDefs(sc))))
-	mux.HandleFunc("POST /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CreateFieldDef(sc))))
-	mux.HandleFunc("PUT /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UpdateFieldDef(sc))))
-	mux.HandleFunc("DELETE /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DeleteFieldDef(sc))))
+	mux.HandleFunc("POST /api/field-defs/{kind}", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CreateFieldDef(sc))))
+	mux.HandleFunc("PUT /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.UpdateFieldDef(sc))))
+	mux.HandleFunc("DELETE /api/field-defs/{kind}/{id}", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.DeleteFieldDef(sc))))
 	// 主机字段映射（外部来源键 → 内置列/自定义字段；零硬编码）
 	mux.HandleFunc("GET /api/host-field-mappings", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListHostFieldMappings(sc))))
-	mux.HandleFunc("POST /api/host-field-mappings", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.CreateHostFieldMapping(sc))))
-	mux.HandleFunc("PUT /api/host-field-mappings/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UpdateHostFieldMapping(sc))))
-	mux.HandleFunc("DELETE /api/host-field-mappings/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.DeleteHostFieldMapping(sc))))
+	mux.HandleFunc("POST /api/host-field-mappings", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CreateHostFieldMapping(sc))))
+	mux.HandleFunc("PUT /api/host-field-mappings/{id}", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.UpdateHostFieldMapping(sc))))
+	mux.HandleFunc("DELETE /api/host-field-mappings/{id}", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.DeleteHostFieldMapping(sc))))
 	// 扫描外部来源实际存在的键 + 勾选导入为字段定义与映射
 	mux.HandleFunc("GET /api/host-field-mappings/scan", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ScanHostFieldKeys(sc))))
-	mux.HandleFunc("POST /api/host-field-mappings/import", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ImportHostFieldKeys(sc))))
+	mux.HandleFunc("POST /api/host-field-mappings/import", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ImportHostFieldKeys(sc))))
 
 	// 人员信息（用户扩展字段值）
 	mux.HandleFunc("GET /api/users/fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ListUserFieldsWithValues(sc))))
@@ -277,7 +302,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 
 	// FlyIAM 集成：连通性测试 + 用户字段定义同步
 	mux.HandleFunc("POST /api/flyiam/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestFlyIAM(sc))))
-	mux.HandleFunc("POST /api/flyiam/sync-user-fields", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncUserFieldsFromFlyIAM(sc))))
+	mux.HandleFunc("POST /api/flyiam/sync-user-fields", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SyncUserFieldsFromFlyIAM(sc))))
 	mux.HandleFunc("POST /api/flyiam/sync-departments", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncDepartmentsFromFlyIAM(sc))))
 	mux.HandleFunc("GET /api/flyiam/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMUsers(sc))))
 	mux.HandleFunc("POST /api/flyiam/users/{username}/provision", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMProvisionLocalUser(sc))))

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/safepath"
 )
 
 // Local 本地文件系统存储。
@@ -30,33 +32,40 @@ func (l *Local) Save(key string, reader io.Reader, size int64) (string, error) {
 	if err := validateKey(key); err != nil {
 		return "", fmt.Errorf("非法 key: %w", err)
 	}
-	
+
 	path := filepath.Join(l.baseDir, key)
-	// 纵深防御：确保最终路径在 baseDir 内
-	if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(l.baseDir)) {
+	// 纵深防御：确保最终路径在 baseDir 内（前缀判断对 artifacts-evil 这类
+	// 相邻目录会误放行，使用 filepath.Rel 做真正的边界校验）。
+	if err := safepath.EnsureWithin(l.baseDir, path); err != nil {
 		return "", fmt.Errorf("路径越界: %s", key)
 	}
-	
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
 
-	// 原子写：先写临时文件再 rename
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
+	// 并发安全：同 key 的并发上传不能共用固定 .tmp 文件（会互相覆盖/半写）。
+	// 每次使用唯一临时文件，完整写入并 close 后再原子 rename；最后一次获胜。
+	tmpf, err := os.CreateTemp(dir, ".upload-*")
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	tmp := tmpf.Name()
+	defer os.Remove(tmp)
 
-	if _, err := io.Copy(f, reader); err != nil {
-		os.Remove(tmp)
+	if _, err := io.Copy(tmpf, reader); err != nil {
+		tmpf.Close()
 		return "", err
 	}
-
+	if err := tmpf.Sync(); err != nil {
+		tmpf.Close()
+		return "", err
+	}
+	if err := tmpf.Close(); err != nil {
+		return "", err
+	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
 		return "", err
 	}
 
@@ -69,7 +78,7 @@ func (l *Local) Get(key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("非法 key: %w", err)
 	}
 	path := filepath.Join(l.baseDir, key)
-	if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(l.baseDir)) {
+	if err := safepath.EnsureWithin(l.baseDir, path); err != nil {
 		return nil, fmt.Errorf("路径越界: %s", key)
 	}
 	return os.Open(path)
@@ -81,7 +90,7 @@ func (l *Local) Delete(key string) error {
 		return fmt.Errorf("非法 key: %w", err)
 	}
 	path := filepath.Join(l.baseDir, key)
-	if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(l.baseDir)) {
+	if err := safepath.EnsureWithin(l.baseDir, path); err != nil {
 		return fmt.Errorf("路径越界: %s", key)
 	}
 	return os.Remove(path)
@@ -93,7 +102,7 @@ func (l *Local) Exists(key string) (bool, error) {
 		return false, fmt.Errorf("非法 key: %w", err)
 	}
 	path := filepath.Join(l.baseDir, key)
-	if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(l.baseDir)) {
+	if err := safepath.EnsureWithin(l.baseDir, path); err != nil {
 		return false, fmt.Errorf("路径越界: %s", key)
 	}
 	_, err := os.Stat(path)

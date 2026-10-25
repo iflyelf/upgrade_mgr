@@ -13,6 +13,7 @@ import (
 	"github.com/lib/pq"
 
 	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
@@ -259,9 +260,16 @@ func SyncHosts(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			auditOp(s, r, audit.ActionHostSync, "host", "", "", err)
 			httpx.FailErr(w, http.StatusBadGateway, fmt.Errorf("同步失败: %w", err))
 			return
 		}
+		auditOpDetails(s, r, audit.ActionHostSync, "host", "", "consul", nil,
+			map[string]any{
+				"services": res.Services, "instances": res.Instances,
+				"upserted": res.Upserted, "deleted": res.Deleted,
+				"partial": res.Partial, "cleanup_skipped": res.CleanupSkipped,
+			}, nil)
 		httpx.OK(w, map[string]any{
 			"services": res.Services, "instances": res.Instances,
 			"upserted": res.Upserted, "deleted": res.Deleted,

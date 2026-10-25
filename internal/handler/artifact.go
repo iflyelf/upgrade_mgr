@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -28,13 +29,41 @@ func ArtifactList(s *svc.ServiceContext) http.HandlerFunc {
 // ArtifactUpload 上传制品（multipart: file + 表单字段）。
 func ArtifactUpload(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 限制本实例并发上传数：每个上传会持有一条 advisory lock 连接，
+		// 槽位在解析 multipart 之前获取，避免排队请求先把临时文件写满磁盘。
+		release, err := s.Artifact.AcquireUploadSlot(r.Context())
+		if err != nil {
+			httpx.Fail(w, http.StatusServiceUnavailable, "上传请求已取消或等待超时，请稍后重试")
+			return
+		}
+		defer release()
 		// 防滥用：限制单文件大小，避免填满磁盘或消耗带宽。
-		maxSize := s.Config.Artifact.MaxSize
+		maxSize := s.ConfigSnapshot().Artifact.MaxSize
 		if maxSize <= 0 {
 			maxSize = 2 << 30 // 默认 2GB
 		}
-		if err := r.ParseMultipartForm(maxSize); err != nil {
-			httpx.FailErr(w, http.StatusBadRequest, fmt.Errorf("解析上传失败: %w", err))
+		// ParseMultipartForm 的参数是「内存中保留的最大字节数」，不是请求体上限：
+		// 直接传 maxSize 会让最大 2GB 的文件全部驻留内存，构成内存 DoS。
+		// 这里用 MaxBytesReader 限制请求体总量，并只保留 32MB 在内存中，
+		// 其余落临时文件；处理结束后统一删除临时文件。
+		bodyLimit := maxSize
+		if bodyLimit < (1 << 62) {
+			bodyLimit += 1 << 20 // multipart 头部/字段开销
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
+		defer func() {
+			if r.MultipartForm != nil {
+				_ = r.MultipartForm.RemoveAll()
+			}
+		}()
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) || strings.Contains(err.Error(), "request body too large") {
+				httpx.Fail(w, http.StatusRequestEntityTooLarge,
+					fmt.Sprintf("文件超过限制（%d MB）", maxSize>>20))
+				return
+			}
+			httpx.Fail(w, http.StatusBadRequest, "解析上传失败")
 			return
 		}
 		file, header, err := r.FormFile("file")
@@ -43,7 +72,7 @@ func ArtifactUpload(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		defer file.Close()
-		// 二次校验：header.Size 可能被伪造，但 ParseMultipartForm 已限制总量，此处拒绝明显超标的。
+		// 二次校验：header.Size 是解析后的真实文件大小，比请求体更精确。
 		if header.Size > maxSize {
 			httpx.Fail(w, http.StatusRequestEntityTooLarge,
 				fmt.Sprintf("文件超过限制（%d MB）", maxSize>>20))

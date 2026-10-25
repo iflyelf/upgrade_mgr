@@ -10,6 +10,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,6 +58,24 @@ func Install(opts Options) error {
 		opts.StatePath = agentpath.StatePath()
 	}
 	opts.ServerURL = strings.TrimRight(opts.ServerURL, "/")
+	// 服务单元模板会把这些值直接写入 ExecStart；拒绝换行等控制字符，
+	// 防止构造安装参数时向 unit 文件注入额外指令。
+	for name, v := range map[string]string{
+		"server": opts.ServerURL, "bin": opts.BinPath, "state": opts.StatePath,
+	} {
+		if strings.ContainsAny(v, "\r\n\x00") {
+			return fmt.Errorf("%s 参数包含非法控制字符", name)
+		}
+	}
+	if opts.ServerURL != "" {
+		if strings.ContainsAny(opts.ServerURL, " \t\"'\\") {
+			return fmt.Errorf("server 地址包含空白或引号")
+		}
+		u, err := url.Parse(opts.ServerURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("server 必须是 http(s) 绝对地址: %q", opts.ServerURL)
+		}
+	}
 	info := osinfo.Detect()
 
 	// 0. 平台预处理：Windows 上先停掉旧服务，避免安装时 exe 被占用。

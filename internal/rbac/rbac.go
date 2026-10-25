@@ -156,37 +156,64 @@ func (s *Service) SetTenantRoles(ctx context.Context, actor *auth.User, username
 	if err != nil {
 		return err
 	}
+	targetTenant, targetRoles, err := s.targetAccount(ctx, username)
+	if err != nil {
+		return err
+	}
 	target, err := s.resolveTarget(actor, tenantID, norm)
 	if err != nil {
 		return err
 	}
-	// 非 superadmin 还须确认「被改对象」原本就在自己租户内，防止跨租户接管账号。
-	if actor == nil || !actor.IsSuperAdmin() {
-		var cur int64
-		err := s.db.QueryRowContext(ctx,
-			`SELECT COALESCE(tenant_id,1) FROM local_users WHERE username=$1`, username).Scan(&cur)
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("用户不存在")
-		}
-		if err != nil {
-			return err
-		}
-		if actor == nil || cur != actor.TenantID {
+	// 非 superadmin 还须确认「被改对象」原本就在自己租户内，防止跨租户接管账号；
+	// 且不能修改管理员/超级管理员账号，否则可把同租户的 superadmin 降级。
+	nonSuper := actor == nil || !actor.IsSuperAdmin()
+	if nonSuper {
+		if actor == nil || targetTenant != actor.TenantID {
 			return fmt.Errorf("无权修改其他租户的用户")
+		}
+		if hasAdminRole(targetRoles) {
+			return fmt.Errorf("仅 superadmin 可修改管理员账号")
 		}
 	}
 	isAdmin := containsRole(norm, auth.RoleAdmin) || containsRole(norm, auth.RoleSuperAdmin)
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE local_users SET tenant_id=$2, roles=$3, is_admin=$4, updated_at=NOW()
-		 WHERE username=$1`,
-		username, target, pq.Array(norm), isAdmin)
+	q := `UPDATE local_users SET tenant_id=$2, roles=$3, is_admin=$4, updated_at=NOW()
+		WHERE username=$1`
+	args := []any{username, target, pq.Array(norm), isAdmin}
+	if nonSuper {
+		// 复查条件写进 UPDATE，防止校验后目标角色被并发提升。
+		q += ` AND COALESCE(tenant_id,1)=$5
+		   AND NOT (COALESCE(roles, ARRAY['user']::text[]) && ARRAY['admin','superadmin']::text[])`
+		args = append(args, actor.TenantID)
+	}
+	res, err := s.db.ExecContext(ctx, q, args...)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("用户不存在")
+		return fmt.Errorf("用户不存在或无权修改管理员账号")
 	}
 	return nil
+}
+
+// targetAccount 返回用户所属租户与当前角色。
+func (s *Service) targetAccount(ctx context.Context, username string) (int64, []string, error) {
+	var tenantID int64
+	var roles pq.StringArray
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(tenant_id,1), COALESCE(roles, ARRAY['user']::text[])
+		   FROM local_users WHERE username=$1`, username).Scan(&tenantID, &roles)
+	if err == sql.ErrNoRows {
+		return 0, nil, fmt.Errorf("用户不存在")
+	}
+	if err != nil {
+		return 0, nil, err
+	}
+	return tenantID, []string(roles), nil
+}
+
+// hasAdminRole 判断角色集合是否包含管理员或超级管理员。
+func hasAdminRole(roles []string) bool {
+	return containsRole(roles, auth.RoleAdmin) || containsRole(roles, auth.RoleSuperAdmin)
 }
 
 // SetDisabled 启用/禁用用户（不删除，保留审计线索）。
@@ -196,12 +223,26 @@ func (s *Service) SetDisabled(ctx context.Context, actor *auth.User, username st
 	}
 	q := `UPDATE local_users SET disabled=$2, updated_at=NOW() WHERE username=$1`
 	args := []any{username, disabled}
-	if actor == nil || !actor.IsSuperAdmin() {
+	nonSuper := actor == nil || !actor.IsSuperAdmin()
+	if nonSuper {
 		tid := int64(-1)
 		if actor != nil {
 			tid = actor.TenantID
 		}
-		q += ` AND COALESCE(tenant_id,1)=$3`
+		targetTenant, targetRoles, err := s.targetAccount(ctx, username)
+		if err != nil {
+			return err
+		}
+		if actor == nil || targetTenant != tid {
+			return fmt.Errorf("用户不存在或无权操作")
+		}
+		// 租户管理员不能禁用/启用管理员或 superadmin（否则可借此接管/瘫痪租户）。
+		if hasAdminRole(targetRoles) {
+			return fmt.Errorf("仅 superadmin 可修改管理员账号")
+		}
+		// 复查条件写进 UPDATE，防止校验后目标被并发提升为管理员。
+		q += ` AND COALESCE(tenant_id,1)=$3
+		   AND NOT (COALESCE(roles, ARRAY['user']::text[]) && ARRAY['admin','superadmin']::text[])`
 		args = append(args, tid)
 	}
 	res, err := s.db.ExecContext(ctx, q, args...)

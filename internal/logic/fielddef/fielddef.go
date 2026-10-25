@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // 字段类型。
@@ -298,6 +300,38 @@ func (r *Repo) UserValues(ctx context.Context, username string) (map[string]stri
 		if err := rows.Scan(&k, &v); err == nil {
 			out[k] = v
 		}
+	}
+	return out, rows.Err()
+}
+
+// UserValuesForUsernames 批量读取指定用户的字段值，返回 username → (key → value)。
+//
+// 与 UserValuesAll 的区别：调用方传入当前租户可见的用户名，避免把其他租户的
+// 字段值读出数据库（多租户列表接口使用）。
+func (r *Repo) UserValuesForUsernames(ctx context.Context, usernames []string) (map[string]map[string]string, error) {
+	out := map[string]map[string]string{}
+	if r.kind != KindUser {
+		return nil, fmt.Errorf("仅用户字段支持该操作")
+	}
+	if len(usernames) == 0 {
+		return out, nil
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT user_id, field_key, value FROM user_field_values WHERE user_id = ANY($1)`,
+		pq.Array(usernames))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid, k, v string
+		if err := rows.Scan(&uid, &k, &v); err != nil {
+			return nil, err
+		}
+		if out[uid] == nil {
+			out[uid] = map[string]string{}
+		}
+		out[uid][k] = v
 	}
 	return out, rows.Err()
 }

@@ -101,6 +101,15 @@ func ComponentDelete(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.FailErr(w, http.StatusBadRequest, err)
 			return
 		}
+		// 与制品上传共用组件级 advisory lock：删除期间阻止新上传，
+		// 并等待正在上传的制品完成，避免删除文件/元数据后又被写入。
+		lock, lerr := s.Artifact.LockComponent(r.Context(), id)
+		if lerr != nil {
+			auditOp(s, r, audit.ActionComponentDelete, "component", strconv.FormatInt(id, 10), "", lerr)
+			httpx.FailErrf(w, http.StatusConflict, "组件正在上传或删除制品，请稍后重试", lerr)
+			return
+		}
+		defer lock.Unlock()
 		// 先取制品路径，删除成功后再删文件：避免组件删不掉（如仍被运行中任务引用）
 		// 但制品文件已被清空。元数据随 components 的 CASCADE 一并删除。
 		paths, perr := s.Artifact.PathsByComponent(r.Context(), sc, id)

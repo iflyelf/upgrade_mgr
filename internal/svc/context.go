@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,12 +62,31 @@ type ServiceContext struct {
 
 	// consulRef 原子指针：页面修改 Consul 配置后可热重载；可能为 nil（未启用/不可用）。
 	consulRef atomic.Pointer[consul.Client]
+
+	// dbMaxOpenBase / dbMaxIdleBase 是配置文件中的连接池基数。
+	// 运行时会按 artifact.max_concurrent_uploads 自动抬高，但不得把
+	// “自动抬高后的值”误当成新的基数（否则下调上传并发后无法回落）。
+	dbMaxOpenBase int
+	dbMaxIdleBase int
+	// artifactReloadMu 串行化页面设置触发上传并发/锁等待热更新。
+	artifactReloadMu sync.Mutex
 }
 
 // newMaintainer 构造数据库维护器，并注入可通过设置页热更新的审计保留天数。
-func newMaintainer(c *config.Config, db *sql.DB) *maintenance.Maintainer {
+//
+// 必须通过 setting.Service 快照读取：设置页 Apply 会并发写回共享 Config，
+// 直接读 c.Server.AuditRetentionDays 会与写入产生 data race。
+func newMaintainer(c *config.Config, db *sql.DB, settings *setting.Service) *maintenance.Maintainer {
 	m := maintenance.New(db)
-	m.SetAuditRetention(func() int { return c.Server.AuditRetentionDays })
+	m.SetAuditRetention(func() int {
+		if settings != nil {
+			return settings.Snapshot().Server.AuditRetentionDays
+		}
+		if c != nil {
+			return c.Server.AuditRetentionDays
+		}
+		return 0
+	})
 	return m
 }
 
@@ -85,14 +105,25 @@ func New(c *config.Config) *ServiceContext {
 	if err := settings.Load(context.Background()); err != nil {
 		log.Printf("⚠️ 加载应用设置失败（用默认/env）: %v", err)
 	}
+	// 设置加载完成后再按 artifact.max_concurrent_uploads 调整连接池：
+	// 每个并发上传会持有一条 advisory lock 连接，必须预留足够容量的连接池。
+	tuneDBPool(db, c.Database.MaxOpenConns, c.Database.MaxIdleConns, c.Artifact.MaxConcurrentUploads)
 
 	// 未显式配置会话密钥时，生成一次并持久化到 DB，供多副本/重启共享。
 	ensureSessionSecret(db, c)
 
 	compRepo := component.NewRepo(db)
 	artRepo := initArtifactRepo(db, &c.Artifact)
+	artRepo.SetUploadConcurrency(c.Artifact.MaxConcurrentUploads)
+	artRepo.SetLockWait(artifactLockWait(c.Artifact.LockWait))
+	log.Printf("ℹ️ 制品上传配置: 并发上限=%d，跨副本锁等待=%s",
+		c.Artifact.MaxConcurrentUploads, artifactLockWait(c.Artifact.LockWait))
 	gw := agentgw.New(db)
-	taskSvc := task.NewService(db, compRepo, artRepo, func() bool { return c.Agent.AllowExecMode })
+	// 读设置时统一走 Snapshot：设置页 Apply 会并发写回 Config，
+	// 直接读 *Config 字段会与写入产生 data race。
+	taskSvc := task.NewService(db, compRepo, artRepo, func() bool {
+		return settings.Snapshot().Agent.AllowExecMode
+	})
 	taskSvc.SetReconciler(gw.ReconcileTasks)
 	// 组件级权限：无 deploy 权限的用户不能发任务（管理员不受限）。
 	orgSvc := org.NewService(db)
@@ -104,23 +135,26 @@ func New(c *config.Config) *ServiceContext {
 	}
 	// 任务仅创建者可操作（默认关闭，可在设置页开启）；
 	// 团队级策略（teams.owner_only）优先于全局开关。
-	taskSvc.SetOwnerOnlyPolicy(func() bool { return c.Agent.TaskOwnerOnly })
+	// 设置页可热更新任务 owner 策略，必须通过快照读取，避免与 Apply 并发写 Config。
+	taskSvc.SetOwnerOnlyPolicy(func() bool { return settings.Snapshot().Agent.TaskOwnerOnly })
 	taskSvc.SetOwnerPolicyResolver(orgSvc.TeamOwnerPolicy)
 	taskSvc.SetOwnerShareChecker(orgSvc.CanShareTasks)
 	taskSvc.SetTeamMateChecker(orgSvc.SharesTeam)
 	svc := &ServiceContext{
-		Config:     c,
-		DB:         db,
-		Settings:   settings,
-		Syncer:     synclogic.NewSyncer(db),
-		Component:  compRepo,
-		Artifact:   artRepo,
-		Task:       taskSvc,
-		AgentGW:    gw,
-		Metrics:    metrics.NewCollector(db),
-		Maintainer: newMaintainer(c, db),
-		RBAC:       rbac.NewService(db),
-		Audit:      audit.NewLogger(db), // 审计日志
+		Config:        c,
+		DB:            db,
+		Settings:      settings,
+		Syncer:        synclogic.NewSyncer(db),
+		Component:     compRepo,
+		Artifact:      artRepo,
+		Task:          taskSvc,
+		AgentGW:       gw,
+		Metrics:       metrics.NewCollector(db),
+		Maintainer:    newMaintainer(c, db, settings),
+		RBAC:          rbac.NewService(db),
+		Audit:         audit.NewLogger(db), // 审计日志
+		dbMaxOpenBase: c.Database.MaxOpenConns,
+		dbMaxIdleBase: c.Database.MaxIdleConns,
 	}
 	// 可选：Redis（不可用仅降级，不阻塞启动）
 	svc.cacheRef.Store(buildCache(&c.Redis))
@@ -165,6 +199,112 @@ func (s *ServiceContext) GetCache() *cache.Cache {
 		return nil
 	}
 	return s.cacheRef.Load()
+}
+
+// ConfigSnapshot 返回配置的并发安全快照。
+//
+// 设置页保存时会通过 setting.Apply 写回共享的 *config.Config；请求处理路径
+// 必须使用本方法读取可热更新的配置，不能直接读 s.Config.xxx，否则会触发
+// data race（go test -race 可复现）。
+func (s *ServiceContext) ConfigSnapshot() config.Config {
+	if s == nil {
+		return config.Config{}
+	}
+	if s.Settings != nil {
+		return s.Settings.Snapshot()
+	}
+	if s.Config != nil {
+		return *s.Config
+	}
+	return config.Config{}
+}
+
+// ReloadArtifactSettings 用最新页面设置热更新上传并发、锁等待和连接池。
+//
+// 由设置保存 handler 在 artifact.max_concurrent_uploads / artifact.lock_wait
+// 变更后调用；无需重启。上传限流器支持动态调整，锁等待为原子值，
+// 连接池通过 database/sql 的 Set* 方法在线调整。
+func (s *ServiceContext) ReloadArtifactSettings() {
+	if s == nil || s.Settings == nil || s.Artifact == nil {
+		return
+	}
+	s.artifactReloadMu.Lock()
+	defer s.artifactReloadMu.Unlock()
+
+	snap := s.Settings.Snapshot()
+	uploads := snap.Artifact.MaxConcurrentUploads
+	if uploads <= 0 {
+		uploads = 4
+	}
+	if uploads > 64 {
+		uploads = 64
+	}
+	wait := artifactLockWait(snap.Artifact.LockWait)
+	s.Artifact.SetUploadConcurrency(uploads)
+	s.Artifact.SetLockWait(wait)
+	tuneDBPool(s.DB, s.dbMaxOpenBase, s.dbMaxIdleBase, uploads)
+	log.Printf("🔄 制品上传配置已热更新: 并发上限=%d，跨副本锁等待=%s", uploads, wait)
+}
+
+// artifactRuntimeSettings 是可在运行期热更新、且需要跨副本同步设置的键。
+var artifactRuntimeSettings = []string{
+	"artifact.max_concurrent_uploads",
+	"artifact.lock_wait",
+}
+
+// StartArtifactSettingsWatcher 周期性检查数据库中的制品上传运行时配置。
+//
+// 页面保存时当前实例由 handler 立即热更新；其他副本通过该轮询在 interval
+// 内同步（默认 5 秒），无需重启。设置批量保存使用单事务，因此这里要么读到
+// 整批新值，要么读到整批旧值。
+func (s *ServiceContext) StartArtifactSettingsWatcher(ctx context.Context, interval time.Duration) {
+	if s == nil || s.Settings == nil || s.Artifact == nil || s.DB == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var last string
+		syncOnce := func() {
+			vals, err := s.Settings.ReadValues(ctx, artifactRuntimeSettings...)
+			if err != nil {
+				return // 数据库暂不可用：下一轮重试
+			}
+			cur := artifactSettingsFingerprint(vals)
+			if cur == last {
+				return
+			}
+			last = cur
+			if applied := s.Settings.ApplyRuntime(vals); len(applied) > 0 {
+				s.ReloadArtifactSettings()
+				log.Printf("🔄 已同步其他副本的制品上传配置: %s", strings.Join(applied, ", "))
+			}
+		}
+		syncOnce()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				syncOnce()
+			}
+		}
+	}()
+}
+
+// artifactSettingsFingerprint 生成固定顺序的配置指纹，用于判断 DB 值是否变化。
+func artifactSettingsFingerprint(vals map[string]string) string {
+	var b strings.Builder
+	for _, k := range artifactRuntimeSettings {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(vals[k])
+		b.WriteByte('\x00')
+	}
+	return b.String()
 }
 
 // Consul 返回当前 Consul 客户端（可能为 nil）。
@@ -299,6 +439,67 @@ func (s *ServiceContext) runSyncOnce() {
 	if res.CleanupSkipped != "" && res.CleanupSkipped != "未开启自动清理" {
 		log.Printf("⚠️ Consul 清理已跳过: %s", res.CleanupSkipped)
 	}
+}
+
+// tuneDBPool 根据并发制品上传数调整数据库连接池。
+//
+// 每个上传会占用 1 条连接持有 PostgreSQL advisory lock，此外常规查询、
+// 编排器/维护/同步也需要连接。连接池下限 = 上传并发数 + 4 条余量。
+// baseOpen/baseIdle 是配置文件里的基数；运行期自动抬高不会改基数，
+// 因此页面下调并发上传数时可以回落到合理值。配置值 0 表示不限制。
+//
+// 该函数只调用 database/sql 的线程安全 Set* 方法，不修改共享 Config，
+// 可由设置页保存请求在运行期并发调用。
+func tuneDBPool(db *sql.DB, baseOpen, baseIdle, uploads int) {
+	if db == nil {
+		return
+	}
+	if uploads <= 0 {
+		uploads = 4
+	}
+	if uploads > 64 {
+		uploads = 64
+	}
+
+	maxOpen := baseOpen
+	if maxOpen > 0 && maxOpen < 4 {
+		maxOpen = 4
+	}
+	if maxOpen > 0 {
+		needed := uploads + 4
+		if maxOpen < needed {
+			log.Printf("⚠️ database.max_open_conns=%d 小于并发上传所需，运行期调整为 %d（上传 %d + 常规查询余量 4）",
+				maxOpen, needed, uploads)
+			maxOpen = needed
+		}
+	}
+	db.SetMaxOpenConns(maxOpen)
+
+	idle := baseIdle
+	if idle < 0 {
+		idle = 0
+	}
+	if maxOpen > 0 && idle > maxOpen {
+		idle = maxOpen
+	}
+	db.SetMaxIdleConns(idle)
+	if maxOpen == 0 {
+		log.Printf("ℹ️ 数据库连接池: max_open=不限，max_idle=%d（并发上传上限 %d）", idle, uploads)
+	} else {
+		log.Printf("ℹ️ 数据库连接池: max_open=%d，max_idle=%d（并发上传上限 %d）", maxOpen, idle, uploads)
+	}
+}
+
+// artifactLockWait 解析配置的跨副本制品锁等待时长；非法值回退默认 30m。
+func artifactLockWait(raw string) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || d <= 0 {
+		return 30 * time.Minute
+	}
+	if d > 24*time.Hour {
+		return 24 * time.Hour
+	}
+	return d
 }
 
 func mustOpenDB(c *config.Config) *sql.DB {

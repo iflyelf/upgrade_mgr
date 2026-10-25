@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -10,8 +11,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
@@ -34,8 +37,9 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
+		arch := strings.ToLower(strings.TrimSpace(req.Arch))
 		// 架构白名单：amd64/arm64/arm/386，可带 -legacy 后缀
-		if !isValidArch(req.Arch) {
+		if !isValidArch(arch) {
 			httpx.Fail(w, http.StatusBadRequest, "不支持的架构")
 			return
 		}
@@ -43,18 +47,14 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		// 否则攻击者可传入他人 IP，借 hosts 表 ON CONFLICT(ip) DO UPDATE
 		// 改写该主机的 agent_id，从而劫持并接收本应发往该主机的升级指令。
 		ip := clientIP(s, r)
-		// 校验并消费一次性 enroll token（默认要求；内网可信可关闭）。
-		if s.Config.Agent.RequireEnrollToken {
-			if req.EnrollToken == "" || !consumeEnrollToken(s, req.EnrollToken) {
-				auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip,
-					fmt.Errorf("无效或已过期的注册令牌"))
-				httpx.Fail(w, http.StatusUnauthorized, "无效或已过期的注册令牌")
-				return
-			}
-		}
-		agentID := randHex(16)
-		token := randHex(32)
-		secret := randHex(32)
+
+		snap := s.ConfigSnapshot()
+		hostname := cleanAgentText(req.Hostname, 255)
+		osName := strings.ToLower(cleanAgentText(req.OS, 64))
+		osVersion := cleanAgentText(req.OSVersion, 64)
+		kernel := cleanAgentText(req.Kernel, 128)
+		supervisor := cleanAgentText(req.Supervisor, 32)
+		agentVersion := cleanAgentText(req.AgentVersion, 64)
 
 		// 未上报签名能力的旧 Agent 默认 id，保持“服务端升级不要求重装 Agent”。
 		signatureModes := protocol.NormalizeSignatureModes(req.SignatureModes)
@@ -63,23 +63,55 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		capabilities := protocol.NormalizeCapabilities(req.Capabilities)
 		buildVersion, buildHash, buildVariant := normalizeAgentBuild(req.BuildVersion, req.BuildHash, req.BuildVariant)
+		buildVersion = cleanAgentText(buildVersion, 128)
 
-		// 安全：token 仅存哈希（SHA-256，token 为 256bit 随机，抗爆破）；明文只回给 Agent 一次。
-		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO agents (agent_id, ip, token_hash, secret, arch, os, agent_version, supervisor, signature_modes, capabilities, build_version, build_hash, build_variant, status, last_heartbeat_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'online',NOW())`,
-			agentID, ip, agentgw.HashToken(token), secret, req.Arch, req.OS, req.AgentVersion, req.Supervisor,
-			strings.Join(signatureModes, ","), strings.Join(capabilities, ","), buildVersion, buildHash, buildVariant)
+		agentID := randHex(16)
+		token := randHex(32)
+		secret := randHex(32)
+
+		// 注册的多次写入必须原子化：
+		//   - 一次性令牌消费、主机绑定、Agent 创建要么全部成功、要么全部回滚；
+		//   - 避免失败时留下孤儿 Agent 或白白消耗令牌；
+		//   - hosts.ip 全局唯一，跨租户注册必须被拒绝，防止 NAT 后的同 IP
+		//     用其他租户令牌劫持本租户主机的 agent_id。
+		ctx := r.Context()
+		tx, err := s.DB.BeginTx(ctx, nil)
 		if err != nil {
-			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)
+			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, err)
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
 			return
 		}
+		defer tx.Rollback()
+
+		tenantID := int64(1)
+		// 同一 IP 的注册串行化：避免并发重复注册为同一主机写入多个 Agent。
+		// 事务级 advisory lock 在 commit/rollback 时自动释放。
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, ip); err != nil {
+			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, err)
+			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+			return
+		}
+		// 校验并消费一次性 enroll token（默认要求；内网可信可关闭）。
+		if snap.Agent.RequireEnrollToken {
+			tid, ok := consumeEnrollTokenTx(ctx, tx, req.EnrollToken, ip)
+			if !ok {
+				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip,
+					fmt.Errorf("无效或已过期的注册令牌"))
+				httpx.Fail(w, http.StatusUnauthorized, "无效或已过期的注册令牌")
+				return
+			}
+			tenantID = tid
+		}
+
 		// 出口 IP 由 Agent 按路由探测上报；多网卡主机据此展示真实出口地址。
 		// 只做格式校验，不参与主机身份（身份仍是服务端观察到的来源 IP）。
 		exitIP := hostnet.NormalizeExitIP(req.ExitIP)
-		_, err = s.DB.ExecContext(r.Context(), `INSERT INTO hosts (ip, hostname, os_family, os_version, arch, kernel, agent_id, agent_version,
-				agent_build_version, agent_build_hash, agent_build_variant, exit_ip, agent_status, supervisor, source, last_seen)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'online',$13,'agent',NOW())
+
+		// upsert 主机拿到 host_id；冲突且租户不同则不返回行。
+		var hostID int64
+		err = tx.QueryRowContext(ctx, `INSERT INTO hosts (ip, hostname, os_family, os_version, arch, kernel, agent_id, agent_version,
+				agent_build_version, agent_build_hash, agent_build_variant, exit_ip, agent_status, supervisor, source, last_seen, tenant_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'online',$13,'agent',NOW(),$14)
 			ON CONFLICT (ip) DO UPDATE SET hostname=EXCLUDED.hostname, os_family=COALESCE(NULLIF(EXCLUDED.os_family,''),hosts.os_family),
 				arch=COALESCE(NULLIF(EXCLUDED.arch,''),hosts.arch), agent_id=EXCLUDED.agent_id,
 				agent_version=EXCLUDED.agent_version,
@@ -88,16 +120,50 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				agent_build_variant=EXCLUDED.agent_build_variant,
 				exit_ip=CASE WHEN EXCLUDED.exit_ip<>'' THEN EXCLUDED.exit_ip ELSE hosts.exit_ip END,
 				agent_status='online', supervisor=EXCLUDED.supervisor,
-				source='agent', last_seen=NOW()`,
-			ip, req.Hostname, req.OS, req.OSVersion, req.Arch, req.Kernel, agentID, req.AgentVersion,
-			buildVersion, buildHash, buildVariant, exitIP, req.Supervisor)
+				source='agent', last_seen=NOW()
+			WHERE hosts.tenant_id = EXCLUDED.tenant_id
+			RETURNING id`,
+			ip, hostname, osName, osVersion, arch, kernel, agentID, agentVersion,
+			buildVersion, buildHash, buildVariant, exitIP, supervisor, tenantID).Scan(&hostID)
+		if err == sql.ErrNoRows {
+			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip,
+				fmt.Errorf("IP 已属于其他租户"))
+			httpx.Fail(w, http.StatusConflict, "该 IP 已属于其他租户，拒绝注册")
+			return
+		}
 		if err != nil {
-			auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", ip, err)
+			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, err)
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
 			return
 		}
 
-		auditAnon(s, r, audit.ActionAgentRegister, req.Hostname, "agent", agentID, nil)
+		// 注册即视为重新接入：撤销同 IP / 同主机上的旧 Agent 凭据，避免重装/换机后
+		// 旧 token 仍然有效。放在主机 upsert 之后，保持 hosts -> agents 的
+		// 加锁顺序（与 HostDelete/心跳一致），避免并发时死锁。
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM agents WHERE ip=$1 OR host_id=$2`, ip, hostID); err != nil {
+			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, err)
+			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+			return
+		}
+
+		// 安全：token 仅存哈希（SHA-256，token 为 256bit 随机，抗爆破）；明文只回给 Agent 一次。
+		_, err = tx.ExecContext(ctx, `INSERT INTO agents (agent_id, host_id, ip, token_hash, secret, arch, os, agent_version, supervisor, signature_modes, capabilities, build_version, build_hash, build_variant, status, last_heartbeat_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'online',NOW())`,
+			agentID, hostID, ip, agentgw.HashToken(token), secret, arch, osName, agentVersion, supervisor,
+			strings.Join(signatureModes, ","), strings.Join(capabilities, ","), buildVersion, buildHash, buildVariant)
+		if err != nil {
+			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, err)
+			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, err)
+			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+			return
+		}
+
+		auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", agentID, nil)
 		maybeAutoUpdateAgent(s, r, agentID)
 		httpx.OK(w, protocol.RegisterResponse{AgentID: agentID, Token: token, Secret: secret})
 	}
@@ -116,37 +182,25 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
-		status := req.Status
-		if status == "" {
-			status = "online"
-		}
-		// 新 Agent 会在心跳中持续上报签名能力，支持原地升级后无需重新注册即可生效。
-		// 旧 Agent 不发送该字段（nil），不会覆盖数据库中的默认 id。
+		status := normalizeAgentStatus(req.Status)
+		// 签名能力与功能能力：只在本次上报非空时更新，旧 Agent 不覆盖数据库值。
+		modes, caps := "", ""
 		if len(req.SignatureModes) > 0 {
-			if modes := protocol.NormalizeSignatureModes(req.SignatureModes); len(modes) > 0 {
-				_, _ = s.DB.Exec(`UPDATE agents SET signature_modes=$2
-					WHERE agent_id=$1 AND signature_modes IS DISTINCT FROM $2`,
-					agentID, strings.Join(modes, ","))
+			if m := protocol.NormalizeSignatureModes(req.SignatureModes); len(m) > 0 {
+				modes = strings.Join(m, ",")
 			}
 		}
-		// 能力：与签名能力一样支持原地升级后刷新，旧 Agent 不上报则不覆盖。
 		if len(req.Capabilities) > 0 {
-			if caps := protocol.NormalizeCapabilities(req.Capabilities); len(caps) > 0 {
-				_, _ = s.DB.Exec(`UPDATE agents SET capabilities=$2
-					WHERE agent_id=$1 AND capabilities IS DISTINCT FROM $2`,
-					agentID, strings.Join(caps, ","))
+			if c := protocol.NormalizeCapabilities(req.Capabilities); len(c) > 0 {
+				caps = strings.Join(c, ",")
 			}
 		}
 		buildVersion, buildHash, buildVariant := normalizeAgentBuild(req.BuildVersion, req.BuildHash, req.BuildVariant)
-		// 旧 Agent 不上报 build_hash：不能用空值覆盖已有构建信息。
-		// 新 Agent 上报 build_hash 后，即使 variant 为空也会写回（普通构建）。
-		_, _ = s.DB.ExecContext(r.Context(), `UPDATE agents SET last_heartbeat_at=NOW(), status=$2,
-			build_version=CASE WHEN $3<>'' THEN $3 ELSE build_version END,
-			build_hash=CASE WHEN $4<>'' THEN $4 ELSE build_hash END,
-			build_variant=CASE WHEN $4<>'' THEN $5 ELSE build_variant END
-			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant)
 		// 维护窗口内不覆盖 upgrading 状态；RETURNING server_url_override 顺便取出
 		// 该主机的连接地址覆盖，避免每次心跳多一次查询。
+		//
+		// 先更新 hosts、再更新 agents：与 Agent 注册/HostDelete 的
+		// hosts -> agents 加锁顺序一致，避免与注册并发时形成死锁环。
 		var (
 			serverURLOverride string
 			checkRequested    sql.NullTime
@@ -164,6 +218,16 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			hostnet.NormalizeExitIP(req.ExitIP),
 			normalizeServerURL(req.AgentServerURL), normalizeServerURL(req.AgentDefaultServerURL)).
 			Scan(&serverURLOverride, &checkRequested)
+		// 旧 Agent 不上报 build_hash：不能用空值覆盖已有构建信息。
+		// 新 Agent 上报 build_hash 后，即使 variant 为空也会写回（普通构建）。
+		_, _ = s.DB.ExecContext(r.Context(), `UPDATE agents SET last_heartbeat_at=NOW(), status=$2,
+			host_id=COALESCE(host_id,(SELECT id FROM hosts WHERE agent_id=$1 ORDER BY id LIMIT 1)),
+			signature_modes=CASE WHEN $6<>'' THEN $6 ELSE signature_modes END,
+			capabilities=CASE WHEN $7<>'' THEN $7 ELSE capabilities END,
+			build_version=CASE WHEN $3<>'' THEN $3 ELSE build_version END,
+			build_hash=CASE WHEN $4<>'' THEN $4 ELSE build_hash END,
+			build_variant=CASE WHEN $4<>'' THEN $5 ELSE build_variant END
+			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant, modes, caps)
 		// 自升级命令在 Agent 退出前无法上报 success，由新版本心跳按目标 SHA256 确认。
 		if buildHash != "" {
 			markSelfUpdateSuccess(r.Context(), s.DB, agentID, buildHash)
@@ -251,7 +315,7 @@ func AgentPoll(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
-		hold := s.Config.Agent.PollHold
+		hold := s.ConfigSnapshot().Agent.PollHold
 		if hold <= 0 {
 			hold = 20
 		}
@@ -372,19 +436,32 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		// 持久化：存哈希，15 分钟有效期
 		hash := agentgw.HashToken(token)
+		snap := s.ConfigSnapshot()
 		// TTL 取配置（默认 15m），不再硬编码。
 		ttl := 15 * time.Minute
-		if d, e := time.ParseDuration(s.Config.Agent.EnrollTokenTTL); e == nil && d > 0 {
+		if d, e := time.ParseDuration(snap.Agent.EnrollTokenTTL); e == nil && d > 0 {
 			ttl = d
 		}
 		expiresAt := time.Now().Add(ttl)
-		// 创建者取自认证上下文（此路由已被 RequireAdmin 保护），不再硬编码 "admin"。
+		// 创建者/租户取自认证上下文（此路由已被 RequireAdmin 保护），不再硬编码 "admin"。
 		creator := ""
+		tenantID := int64(1)
 		if u, ok := auth.FromContext(r.Context()); ok && u != nil {
 			creator = u.Username
+			if u.TenantID > 0 {
+				tenantID = u.TenantID
+			}
+			// superadmin 可为指定租户生成令牌；普通管理员只能用自己租户。
+			if u.IsSuperAdmin() {
+				if v := strings.TrimSpace(r.URL.Query().Get("tenant_id")); v != "" {
+					if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+						tenantID = n
+					}
+				}
+			}
 		}
-		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO enroll_tokens (token_hash, expires_at, created_by) VALUES ($1, $2, $3)`,
-			hash, expiresAt, creator)
+		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO enroll_tokens (token_hash, expires_at, created_by, tenant_id) VALUES ($1, $2, $3, $4)`,
+			hash, expiresAt, creator, tenantID)
 		if err != nil {
 			auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", err)
 			httpx.Fail(w, http.StatusInternalServerError, "生成令牌失败")
@@ -393,7 +470,6 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", nil)
 
 		// 使用设置页热更新后的快照，避免直接读共享 Config 产生数据竞争。
-		snap := s.Settings.Snapshot()
 		serverURL := installBaseURL(snap.Server.ExternalURL, r, snap.Server.TrustProxy)
 		// 校验 serverURL（防注入）。Linux 命令走 shell，需要额外转义单引号；
 		// Windows 命令用 PowerShell 单引号字符串，转义规则不同，故取原始值。
@@ -536,32 +612,71 @@ func splitBinaryName(name string) (osName, arch string, ok bool) {
 	return "", "", false
 }
 
-// consumeEnrollToken 校验并一次性消费 enroll token（防滥用注册）。
-// 内部做 SHA-256 哈希比对（存储的是哈希），找到且未过期未使用则标记已使用并返回 true。
-func consumeEnrollToken(s *svc.ServiceContext, token string) bool {
-	if token == "" {
-		return false
+// consumeEnrollTokenTx 在校验事务内原子消费 enroll token，返回令牌所属租户。
+//
+// 使用 UPDATE ... RETURNING 而不是「先 SELECT 再 UPDATE」：并发注册时只有一个
+// 事务能把 used_at 从 NULL 改为非空，另一个事务会在行锁释放后重新求值 WHERE，
+// 得到 0 行并失败。令牌消费与后续注册写入在同一事务中，失败会一并回滚。
+func consumeEnrollTokenTx(ctx context.Context, tx *sql.Tx, token, clientIP string) (int64, bool) {
+	if token == "" || tx == nil {
+		return 0, false
 	}
-	hash := agentgw.HashToken(token)
-	// 查询：未使用 + 未过期
-	var id int64
-	err := s.DB.QueryRow(`SELECT id FROM enroll_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at > NOW()`, hash).Scan(&id)
-	if err != nil {
-		return false
+	var tenantID int64
+	err := tx.QueryRowContext(ctx, `
+		UPDATE enroll_tokens
+		SET used_at=NOW(), used_by_ip=$2
+		WHERE token_hash=$1 AND used_at IS NULL AND expires_at > NOW()
+		RETURNING COALESCE(tenant_id, 1)`,
+		agentgw.HashToken(token), clientIP).Scan(&tenantID)
+	if err != nil || tenantID <= 0 {
+		return 0, false
 	}
-	// CAS 原子标记已使用（防并发重复注册）
-	res, err := s.DB.Exec(`UPDATE enroll_tokens SET used_at=NOW() WHERE id=$1 AND used_at IS NULL`, id)
-	if err != nil {
-		return false
+	return tenantID, true
+}
+
+// cleanAgentText 清洗 Agent 上报的短文本：去首尾空白、移除控制字符、
+// 修正非法 UTF-8，并按数据库列宽按字节截断（不会切坏多字节字符）。
+func cleanAgentText(s string, maxBytes int) string {
+	s = strings.TrimSpace(strings.ToValidUTF8(s, ""))
+	if s == "" {
+		return ""
 	}
-	rows, _ := res.RowsAffected()
-	return rows == 1
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	s = strings.TrimSpace(b.String())
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// normalizeAgentStatus 将 Agent 上报状态限制在数据库/页面认识的集合内。
+//
+// 不能直接落库任意字符串：agents.status 列宽有限，脏状态会让心跳失败，
+// 也会让主机列表显示未知状态。未知值按 online 处理（心跳本身即在线证据）。
+func normalizeAgentStatus(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "online", "upgrading", "restarting", "crash_loop", "offline", "unknown":
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return "online"
+	}
 }
 
 // clientIP 返回请求来源 IP。转发头是否可信由 server.trust_proxy 决定，
 // 默认不信任（直接暴露时 XFF 可被任意伪造）。
 func clientIP(s *svc.ServiceContext, r *http.Request) string {
-	return netutil.ClientIP(r, s.Config.Server.TrustProxy)
+	return netutil.ClientIP(r, s.ConfigSnapshot().Server.TrustProxy)
 }
 
 // isValidArch 校验架构白名单（防注入恶意文件名）。
@@ -622,7 +737,7 @@ func AgentBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		dir := s.Config.Server.AgentBinaryDir
+		dir := s.ConfigSnapshot().Server.AgentBinaryDir
 		if dir == "" {
 			dir = "./dist"
 		}

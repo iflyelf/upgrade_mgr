@@ -117,6 +117,11 @@ redis:                        # 可选：页面响应缓存（只读 API），�
 artifact:
   dir: /var/lib/upgrade_mgr/artifacts
   max_size: 0
+  # 并发上传上限（1-64）。每个上传会持有一条 PG advisory lock 连接；
+  # 连接池上限会自动抬到至少“max_concurrent_uploads + 4”。
+  max_concurrent_uploads: 4
+  # 等待其他副本上传/删除同一组件制品的最长时间（1s-24h）。
+  lock_wait: 30m
   storage_type: local         # local/s3/oss
   # S3/MinIO 配置（storage_type=s3 时）
   # s3_endpoint: http://minio:9000

@@ -39,8 +39,11 @@ func normalizeAgentBuild(version, hash, variant string) (string, string, string)
 // agentUpdateResolver 构造 Agent 二进制解析器（SHA256 有全局缓存）。
 func agentUpdateResolver(s *svc.ServiceContext) *agentupdate.Resolver {
 	dir := "./dist"
-	if s != nil && s.Config != nil && strings.TrimSpace(s.Config.Server.AgentBinaryDir) != "" {
-		dir = s.Config.Server.AgentBinaryDir
+	if s != nil {
+		snap := s.ConfigSnapshot()
+		if strings.TrimSpace(snap.Server.AgentBinaryDir) != "" {
+			dir = snap.Server.AgentBinaryDir
+		}
 	}
 	version := ""
 	if s != nil {

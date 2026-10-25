@@ -8,13 +8,24 @@
     { value: 'cool', emoji: '🌊', label: '冷蓝' },
     { value: 'dark', emoji: '🌙', label: '暗黑' }
   ];
+  // 移动端浏览器地址栏/状态栏颜色跟随主题，避免暗色主题下顶部仍是一条浅色。
+  var THEME_COLORS = { warm: '#f5efe6', cool: '#f4f6f8', dark: '#171a1f' };
+
+  function syncThemeColor(t) {
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', THEME_COLORS[t] || THEME_COLORS.warm);
+  }
 
   function setTheme(t) {
     document.documentElement.setAttribute('data-theme', t);
-    localStorage.setItem('upgrade_mgr_theme', t);
+    try { localStorage.setItem('upgrade_mgr_theme', t); } catch (e) {}
+    syncThemeColor(t);
     render();
   }
   function curTheme() { return document.documentElement.getAttribute('data-theme') || 'warm'; }
+
+  // 首屏同步主题色（index.html 的内联脚本已设置 data-theme）。
+  syncThemeColor(curTheme());
 
   function api(path, opts) {
     opts = opts || {};
@@ -274,10 +285,11 @@
     var orgActive = state.view === 'org';
     var opsItems = [];
     if (isAdmin() || isSuperAdmin()) {
-      opsItems.push({ label: '外部文件代缓存', active: state.view === 'extbin', onclick: function () { switchView('extbin'); } });
       opsItems.push({ label: '审计日志', active: state.view === 'audit', onclick: function () { switchView('audit'); } });
     }
+    // 外部文件白名单与系统设置是全局配置，仅 superadmin 可修改（后端同样校验）。
     if (isSuperAdmin()) {
+      opsItems.push({ label: '外部文件代缓存', active: state.view === 'extbin', onclick: function () { switchView('extbin'); } });
       opsItems.push({ label: '系统设置', active: state.view === 'settings', onclick: function () { switchView('settings'); } });
     }
     var helpItems = [
@@ -345,7 +357,7 @@
     var items = [
       { label: '📘 快速上手', run: function () { openHelp('guide'); } },
       { label: '🖥️ 接入主机示例', run: function () { openHelp('enroll'); }, role: 'admin' },
-      { label: '外部文件代缓存', run: function () { switchView('extbin'); }, role: 'admin' },
+      { label: '外部文件代缓存', run: function () { switchView('extbin'); }, role: 'superadmin' },
       { label: '审计日志', run: function () { switchView('audit'); }, role: 'admin' },
       { label: '系统设置', run: function () { switchView('settings'); }, role: 'superadmin' },
       { label: '修改密码', run: function () { switchView('password'); } }
@@ -380,9 +392,10 @@
   function tabs() {
     var items = [['hosts', '主机'], ['components', '组件'], ['artifacts', '制品'], ['tasks', '任务']];
     if (isAdmin() || isSuperAdmin()) {
-      items.push(['org', '人员组织'], ['extbin', '外部文件'], ['audit', '审计日志']);
+      items.push(['org', '人员组织'], ['audit', '审计日志']);
     }
-    if (isSuperAdmin()) items.push(['settings', '设置']);
+    // 全局配置页仅 superadmin 可见。
+    if (isSuperAdmin()) items.push(['extbin', '外部文件'], ['settings', '设置']);
     return h('div', { class: 'tabs mobile-tabs', role: 'tablist' }, items.map(function (it) {
       return h('div', {
         class: 'tab' + (state.view === it[0] ? ' active' : ''),
@@ -1255,6 +1268,8 @@
     setTimeout(function () {
       try {
         if (state.user) return;
+        // 触屏设备不自动聚焦：避免一打开登录页就弹出软键盘并放大页面。
+        if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return;
         if (state.loginName) pEl.focus(); else uEl.focus();
       } catch (e) {}
     }, 0);
@@ -1272,10 +1287,11 @@
       (qEl = h('input', { value: state.q, placeholder: 'IP/出口 IP/隧道地址/主机名/业务组' }, [])),
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
       state.q ? h('button', { class: 'btn ghost', onclick: function () { state.q = ''; state.hostPage = 1; loadHosts(); } }, ['清除']) : null,
-      h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']),
-      // consul_mgr 同步仅管理员可见：后端为 RequireAdmin，非管理员点了必然 403。
+      // 同步会写入/清理全局主机清单，后端要求 superadmin；其他角色不展示入口。
+      isSuperAdmin() ? h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']) : null,
+      // consul_mgr 同步仅 superadmin 可见：后端为 RequireSuperAdmin，其他角色点了必然 403。
       // 点击后先弹窗选择服务组（列表来自 consul_mgr），不在配置里写死 group_id。
-      isAdmin() ? h('button', {
+      isSuperAdmin() ? h('button', {
         class: 'btn ghost', title: '从 consul_mgr 汇总的多套 Consul 同步主机',
         onclick: openConsulMgrSync
       }, ['同步 consul_mgr…']) : null,
@@ -1791,7 +1807,7 @@
             var osName = osEl.value;
             var arch = archEl.value;
             var force = forceEl.checked;
-            api('/api/agent/enroll-token?os=' + encodeURIComponent(osName) + '&arch=' + encodeURIComponent(arch) + (force ? '&force=1' : ''))
+            api('/api/agent/enroll-token?os=' + encodeURIComponent(osName) + '&arch=' + encodeURIComponent(arch) + (force ? '&force=1' : ''), { method: 'POST' })
               .then(function (d) { state.enroll = { os: osName, arch: arch, force: force, base: d.base_url, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
               .catch(function (err) { state.enroll = { os: osName, arch: arch, force: force, err: err.message }; render(); });
           }
@@ -2611,13 +2627,13 @@
         d.showInList ? '是' : '否', d.showInForm ? '是' : '否',
         d.builtin ? '内置' : '自定义',
         d.builtin ? h('span', { class: 'muted' }, ['不可删除'])
-          : h('button', {
+          : (isSuperAdmin() ? h('button', {
             class: 'btn danger small', onclick: function () {
               if (!confirm('删除字段 ' + d.label + '？已填写的值也会一并删除。')) return;
               api('/api/field-defs/user/' + d.id, { method: 'DELETE' })
                 .then(loadOrg).catch(function (e) { alert('删除失败: ' + e.message); });
             }
-          }, ['删除'])
+          }, ['删除']) : h('span', { class: 'muted' }, ['仅 superadmin 可管理']))
       ];
     });
     return h('div', {}, [
@@ -2625,7 +2641,7 @@
         h('h3', {}, ['用户字段定义']),
         hint('用于人员信息（人事字段）。字段键需与 FlyIAM 一致才能接收其同步数据；' +
           '可在「设置 → FlyIAM」配置地址与令牌后点「同步字段」自动对齐。'),
-        h('div', { class: 'toolbar' }, [
+        isSuperAdmin() ? h('div', { class: 'toolbar' }, [
           h('button', {
             class: 'btn', onclick: function () { state.orgNewField = {}; render(); }
           }, ['新增字段']),
@@ -2639,7 +2655,7 @@
                 .catch(function (e) { alert('同步失败: ' + e.message); });
             }
           }, ['从 FlyIAM 同步字段'])
-        ]),
+        ]) : hint('字段定义是全局配置，仅 superadmin 可修改。'),
         simpleTable(['键', '名称', '类型', '列表显示', '表单显示', '来源', '操作'], defs, function (d, i) {
           return rows[i];
         }),
@@ -2662,7 +2678,7 @@
         d.fieldKey, d.label, d.fieldType,
         d.showInList ? '是' : '否', d.showInForm ? '是' : '否',
         d.builtin ? '内置' : '自定义',
-        h('div', { class: 'row-actions' }, [
+        isSuperAdmin() ? h('div', { class: 'row-actions' }, [
           h('button', {
             class: 'btn ghost small', onclick: function () {
               state.orgNewField = Object.assign({}, d);
@@ -2682,7 +2698,7 @@
                   .catch(function (e) { alert('删除失败: ' + e.message); });
               }
             }, ['删除'])
-        ])
+        ]) : h('span', { class: 'muted' }, [d.builtin ? '内置' : '仅 superadmin 可管理'])
       ];
     });
     return h('div', {}, [
@@ -2691,9 +2707,9 @@
         hint('为主机增加自定义字段（如机房、负责人、资产编号）。字段值在「主机 → 编辑」中填写，' +
           '勾选「在列表显示」后会作为主机列表的一列；字段键用于 API 与 CSV 导出，建议用英文。'),
         h('div', { class: 'toolbar' }, [
-          h('button', {
+          isSuperAdmin() ? h('button', {
             class: 'btn', onclick: function () { state.orgNewField = {}; render(); }
-          }, ['新增字段']),
+          }, ['新增字段']) : null,
           h('button', {
             class: 'btn ghost', onclick: function () {
               state.hostFieldDefs = undefined;
@@ -2822,7 +2838,7 @@
         m.enabled ? h('span', { class: 'tag status-success' }, ['启用'])
           : h('span', { class: 'tag' }, ['停用']),
         String(m.sortOrder || 0),
-        h('div', { class: 'row-actions' }, [
+        isSuperAdmin() ? h('div', { class: 'row-actions' }, [
           h('button', {
             class: 'btn ghost small', onclick: function () {
               state.orgMapForm = Object.assign({}, m);
@@ -2845,7 +2861,7 @@
                 .then(reload).catch(function (e) { alert('删除失败: ' + e.message); });
             }
           }, ['删除'])
-        ])
+        ]) : h('span', { class: 'muted' }, ['仅 superadmin 可管理'])
       ];
     });
 
@@ -2856,12 +2872,12 @@
           '「仅补空」只填充本地空值，不覆盖人工维护的内容；「覆盖」则每次同步都以外部值为准。' +
           '不清楚对方有哪些键时，先点「扫描来源键」。'),
         h('div', { class: 'toolbar' }, [
-          h('button', {
+          isSuperAdmin() ? h('button', {
             class: 'btn', onclick: function () { state.orgMapForm = {}; render(); }
-          }, ['新增映射']),
-          h('button', {
+          }, ['新增映射']) : null,
+          isSuperAdmin() ? h('button', {
             class: 'btn ghost', onclick: function () { openMapScan('consul'); }
-          }, ['扫描来源键']),
+          }, ['扫描来源键']) : null,
           h('button', { class: 'btn ghost', onclick: reload }, ['刷新'])
         ]),
         maps.length ? simpleTable(
@@ -2985,7 +3001,7 @@
   function openMapScan(source) {
     state.orgMapScan = { source: source, loading: true, data: null, err: '', picked: {} };
     render();
-    api('/api/host-field-keys?source=' + encodeURIComponent(source))
+    api('/api/host-field-mappings/scan?source=' + encodeURIComponent(source))
       .then(function (d) {
         if (!state.orgMapScan || state.orgMapScan.source !== source) return;
         state.orgMapScan.loading = false;
@@ -3084,7 +3100,7 @@
             overwrite: false
           };
         });
-        api('/api/host-field-keys/import', {
+        api('/api/host-field-mappings/import', {
           method: 'POST',
           body: JSON.stringify({ source: sc.source, keys: items })
         }).then(function (r) {
@@ -4278,6 +4294,33 @@
     var block = h('div', { class: 'table-block' }, [wrap]);
     attachTableTools(table, opts.key, !!opts.sortable, block);
     return block;
+  }
+
+  // tagResponsiveTables 为所有表格的单元格补 data-label（取表头文字）。
+  //
+  // 窄屏下 CSS 会把表格渲染成卡片：td::before 用 data-label 显示字段名。
+  // 放在 applyI18n 之后调用，因此英文模式下标签也会同步为英文。
+  // 不修改列索引/排序逻辑：排序、列显隐仍按原 td 顺序工作。
+  function tagResponsiveTables(root) {
+    if (!root || !root.querySelectorAll) return;
+    var tables = root.querySelectorAll('.table-wrap table');
+    for (var t = 0; t < tables.length; t++) {
+      var table = tables[t];
+      var ths = table.querySelectorAll('thead th');
+      if (!ths.length) continue;
+      var labels = [];
+      for (var i = 0; i < ths.length; i++) labels.push((ths[i].textContent || '').trim());
+      table.classList.add('mobile-cards');
+      var rows = table.querySelectorAll('tbody tr');
+      for (var r = 0; r < rows.length; r++) {
+        var cells = rows[r].children;
+        for (var c = 0; c < cells.length; c++) {
+          var cell = cells[c];
+          if (cell.tagName !== 'TD' || cell.hasAttribute('data-label')) continue;
+          cell.setAttribute('data-label', labels[c] || '');
+        }
+      }
+    }
   }
 
   // attachTableTools 为表格增加「列显隐 / 排序 / 列宽记忆」。
@@ -5660,11 +5703,11 @@
     app.appendChild(topbar());
     app.appendChild(tabs());
     // 前端路由守卫：非管理员即使手工改 hash 也不进入管理页（服务端仍会 403）。
-    if ((state.view === 'org' || state.view === 'extbin' || state.view === 'audit') &&
+    if ((state.view === 'org' || state.view === 'audit') &&
       !(isAdmin() || isSuperAdmin())) {
       state.view = 'hosts';
     }
-    if (state.view === 'settings' && !isSuperAdmin()) {
+    if ((state.view === 'extbin' || state.view === 'settings') && !isSuperAdmin()) {
       state.view = 'hosts';
     }
     var body;
@@ -5694,6 +5737,8 @@
     }
     // i18n 必须放在弹窗之后：否则弹窗内按钮/标题不会被翻译。
     applyI18n(app);
+    // 表格卡片化标签依赖翻译后的表头文字。
+    tagResponsiveTables(app);
     syncHash();
     // 手工触发的局部刷新（如搜索框输入）会重建 DOM，按 id 还原焦点与光标。
     if (state.focusId) {

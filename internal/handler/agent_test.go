@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
@@ -238,5 +239,40 @@ func TestAgentHeartbeatUpdatesSignatureModes(t *testing.T) {
 	}
 	if got != "signed_path,v2" {
 		t.Fatalf("旧 Agent 心跳不应覆盖能力，got %q", got)
+	}
+}
+
+func TestNormalizeAgentStatus(t *testing.T) {
+	cases := map[string]string{
+		"":             "online",
+		"online":       "online",
+		"UPGRADING":    "upgrading",
+		"restarting":   "restarting",
+		"crash_loop":   "crash_loop",
+		"offline":      "offline",
+		"unknown":      "unknown",
+		"hacked' OR 1": "online",
+	}
+	for in, want := range cases {
+		if got := normalizeAgentStatus(in); got != want {
+			t.Fatalf("normalizeAgentStatus(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCleanAgentText(t *testing.T) {
+	if got := cleanAgentText("  host-1\n", 64); got != "host-1" {
+		t.Fatalf("应去除空白与控制字符，got %q", got)
+	}
+	long := strings.Repeat("主机", 100)
+	got := cleanAgentText(long, 10)
+	if len(got) > 10 {
+		t.Fatalf("截断后超过上限: %d", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("截断破坏了 UTF-8: %q", got)
+	}
+	if got := cleanAgentText("bad\xfftext", 64); strings.ContainsRune(got, '\uFFFD') || got != "badtext" {
+		t.Fatalf("非法 UTF-8 应被移除，got %q", got)
 	}
 }

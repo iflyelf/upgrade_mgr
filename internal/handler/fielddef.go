@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"net/http"
 	"sort"
 	"strconv"
@@ -11,6 +12,30 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
+
+// ensureUserInTenant 校验用户名属于当前管理员可见的租户（superadmin 不限）。
+//
+// 用户扩展字段以 username 为键、表本身不带 tenant_id；若不校验，租户管理员
+// 可通过猜用户名读写其他租户人员的字段值。
+func ensureUserInTenant(s *svc.ServiceContext, r *http.Request, username string) error {
+	actor := actorOf(r)
+	if actor == nil {
+		return sql.ErrNoRows
+	}
+	if actor.IsSuperAdmin() {
+		return nil
+	}
+	var tenantID int64
+	err := s.DB.QueryRowContext(r.Context(),
+		`SELECT COALESCE(tenant_id,1) FROM local_users WHERE username=$1`, username).Scan(&tenantID)
+	if err != nil {
+		return err
+	}
+	if tenantID != actor.TenantID {
+		return sql.ErrNoRows
+	}
+	return nil
+}
 
 // fieldDefRepo 按 kind 构造仓储（user / host）。
 func fieldDefRepo(s *svc.ServiceContext, kind string) (*fielddef.Repo, bool) {
@@ -126,6 +151,10 @@ func GetUserFields(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "缺少用户名")
 			return
 		}
+		if err := ensureUserInTenant(s, r, username); err != nil {
+			httpx.Fail(w, http.StatusNotFound, "用户不存在或无权访问")
+			return
+		}
 		repo, ok := fieldDefRepo(s, fielddef.KindUser)
 		if !ok {
 			httpx.Fail(w, http.StatusInternalServerError, "字段仓储不可用")
@@ -151,6 +180,10 @@ func SaveUserFields(s *svc.ServiceContext) http.HandlerFunc {
 		username := strings.TrimSpace(r.PathValue("username"))
 		if username == "" {
 			httpx.Fail(w, http.StatusBadRequest, "缺少用户名")
+			return
+		}
+		if err := ensureUserInTenant(s, r, username); err != nil {
+			httpx.Fail(w, http.StatusNotFound, "用户不存在或无权访问")
 			return
 		}
 		var req struct {
@@ -222,7 +255,12 @@ func ListUserFieldsWithValues(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		// 一次性读出全部字段值，避免按用户逐个查询（N+1）。
-		all, err := repo.UserValuesAll(r.Context())
+		// 只读取当前管理员可见的用户，防止多租户场景泄露其他租户的人员字段。
+		usernames := make([]string, 0, len(users))
+		for _, u := range users {
+			usernames = append(usernames, u.Username)
+		}
+		all, err := repo.UserValuesForUsernames(r.Context(), usernames)
 		if err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return

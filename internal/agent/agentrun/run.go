@@ -703,7 +703,10 @@ func truncateText(s string, maxBytes int) string {
 
 func (a *Agent) postJSON(path string, req, resp any) error {
 	body, _ := json.Marshal(req)
-	httpReq, _ := http.NewRequest("POST", a.cfg.ServerURL+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", a.cfg.ServerURL+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("构建请求失败（server 地址非法: %q）: %w", a.cfg.ServerURL, err)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if a.cfg.Token != "" {
 		// Agent 认证：Bearer <agent_id>:<token>（服务端校验 token 哈希）

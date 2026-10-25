@@ -39,6 +39,9 @@ func UpdateSettings(s *svc.ServiceContext) http.HandlerFunc {
 		if setting.NeedsCacheReload(applied) {
 			s.ReloadCache()
 		}
+		if setting.NeedsArtifactReload(applied) {
+			s.ReloadArtifactSettings()
+		}
 		httpx.OK(w, map[string]any{"applied": applied})
 	}
 }

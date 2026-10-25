@@ -70,6 +70,11 @@ func (s *Service) Promote(ctx context.Context, sc scope.Scope, taskID int64) err
 	if err := s.checkTaskOwner(ctx, sc, taskID); err != nil {
 		return err
 	}
+	// 推进会把下一批主机真正升级：必须重新校验组件 deploy 权限，
+	// 防止授权被回收后仍可通过「推进」继续操作。
+	if err := s.checkTaskDeploy(ctx, sc, taskID); err != nil {
+		return err
+	}
 	tCond, tArgs := sc.Where("", 2)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

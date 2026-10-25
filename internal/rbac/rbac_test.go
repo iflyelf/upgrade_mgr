@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -291,5 +292,53 @@ func TestCreateRejectsWeakPassword(t *testing.T) {
 		Username: uname, Password: "good-password-1", Roles: []string{auth.RoleUser},
 	}); err != nil {
 		t.Fatalf("合法密码应通过: %v", err)
+	}
+}
+
+// TestTenantAdminCannotModifyAdminAccounts 租户管理员不能降级或禁用同租户的
+// superadmin/admin，否则可借此提升权限或瘫痪管理员账号。
+func TestTenantAdminCannotModifyAdminAccounts(t *testing.T) {
+	db := openDB(t)
+	t.Cleanup(func() { db.Close() })
+	svc := NewService(db)
+	ctx := context.Background()
+
+	sfx := time.Now().UnixNano()
+	tid, cl := seedTenant(t, db, fmt.Sprintf("rbac_admin_%d", sfx))
+	defer cl()
+
+	target := fmt.Sprintf("admin_target_%d", sfx)
+	if _, err := db.Exec(`
+		INSERT INTO local_users (username, password_hash, display_name, is_admin, tenant_id, roles)
+		VALUES ($1,'x','target',TRUE,$2,ARRAY['admin','superadmin'])`,
+		target, tid); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec(`DELETE FROM local_users WHERE username=$1`, target)
+
+	tenantAdmin := &auth.User{Username: "tenant_admin", TenantID: tid, Roles: []string{auth.RoleAdmin}}
+
+	if err := svc.SetTenantRoles(ctx, tenantAdmin, target, tid, []string{auth.RoleUser}); err == nil {
+		t.Fatal("租户管理员降级 superadmin 必须被拒绝")
+	}
+	var isAdmin bool
+	var rolesText string
+	if err := db.QueryRow(`SELECT is_admin, COALESCE(roles::text,'{}') FROM local_users WHERE username=$1`,
+		target).Scan(&isAdmin, &rolesText); err != nil {
+		t.Fatal(err)
+	}
+	if !isAdmin || !strings.Contains(rolesText, "superadmin") {
+		t.Fatalf("superadmin 被非法降级: is_admin=%v roles=%s", isAdmin, rolesText)
+	}
+
+	if err := svc.SetDisabled(ctx, tenantAdmin, target, true); err == nil {
+		t.Fatal("租户管理员禁用 superadmin 必须被拒绝")
+	}
+	var disabled bool
+	if err := db.QueryRow(`SELECT disabled FROM local_users WHERE username=$1`, target).Scan(&disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled {
+		t.Fatal("superadmin 被非法禁用")
 	}
 }

@@ -189,9 +189,16 @@ type RedisConfig struct {
 
 // ArtifactConfig 制品本地磁盘存储。
 type ArtifactConfig struct {
-	Dir          string `yaml:"dir"`          // 制品落盘目录（type=local）
-	MaxSize      int64  `yaml:"max_size"`     // 单文件上限（字节），0=不限
-	StorageType  string `yaml:"storage_type"` // local/s3/oss
+	Dir         string `yaml:"dir"`          // 制品落盘目录（type=local）
+	MaxSize     int64  `yaml:"max_size"`     // 单文件上限（字节），0=不限
+	StorageType string `yaml:"storage_type"` // local/s3/oss
+	// MaxConcurrentUploads 本实例并发上传上限（默认 4，范围 1-64）。
+	//
+	// 每个上传会持有一条 PostgreSQL advisory lock 连接，连接池下限会
+	// 自动按“并发上传数 + 4 条常规查询余量”抬高。
+	MaxConcurrentUploads int `yaml:"max_concurrent_uploads"`
+	// LockWait 等待跨副本制品锁的最长时间（默认 30m，范围 1s-24h）。
+	LockWait     string `yaml:"lock_wait"`
 	S3Endpoint   string `yaml:"s3_endpoint"`
 	S3Region     string `yaml:"s3_region"`
 	S3Bucket     string `yaml:"s3_bucket"`
@@ -278,7 +285,10 @@ func Default() *Config {
 			TTL: 10, Prefix: "upgrade_mgr:",
 		},
 		ConsulMgr: ConsulMgrConfig{Timeout: 30},
-		Artifact:  ArtifactConfig{Dir: "/var/lib/upgrade_mgr/artifacts"},
+		Artifact: ArtifactConfig{
+			Dir:                  "/var/lib/upgrade_mgr/artifacts",
+			MaxConcurrentUploads: 4, LockWait: "30m",
+		},
 		Agent: AgentConfig{
 			PollHold: 20, LeaseMax: "1h", ClockSkew: "5m",
 			EnrollTokenTTL: "15m", RequireEnrollToken: true, AllowExecMode: true,
@@ -331,6 +341,19 @@ func Load(path string) (*Config, error) {
 	}
 	if err := extbin.ValidateCIDRs(c.Server.ExternalBinaryAllowCIDRs); err != nil {
 		return nil, fmt.Errorf("external_binary_allow_cidrs 配置错误: %w", err)
+	}
+	if c.Artifact.MaxConcurrentUploads <= 0 {
+		c.Artifact.MaxConcurrentUploads = 4
+	}
+	if c.Artifact.MaxConcurrentUploads > 64 {
+		return nil, fmt.Errorf("artifact.max_concurrent_uploads 应为 1-64（每个上传占用一条 advisory lock 连接）")
+	}
+	if strings.TrimSpace(c.Artifact.LockWait) == "" {
+		c.Artifact.LockWait = "30m"
+	}
+	lockWait, err := time.ParseDuration(strings.TrimSpace(c.Artifact.LockWait))
+	if err != nil || lockWait < time.Second || lockWait > 24*time.Hour {
+		return nil, fmt.Errorf("artifact.lock_wait 应为 1s-24h（示例 30m / 1h）")
 	}
 	return c, nil
 }
@@ -420,6 +443,8 @@ func (c *Config) applyEnv() {
 	}
 
 	setStr(&c.Artifact.Dir, "ARTIFACT_DIR")
+	setInt(&c.Artifact.MaxConcurrentUploads, "ARTIFACT_MAX_CONCURRENT_UPLOADS")
+	setStr(&c.Artifact.LockWait, "ARTIFACT_LOCK_WAIT")
 	setStr(&c.Artifact.StorageType, "ARTIFACT_STORAGE_TYPE")
 	setStr(&c.Artifact.S3Endpoint, "ARTIFACT_S3_ENDPOINT")
 	setStr(&c.Artifact.S3Region, "ARTIFACT_S3_REGION")

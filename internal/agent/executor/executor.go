@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -583,7 +582,10 @@ func artifactFilename(rawURL string) string {
 		if id := artifactIDFromPath(u.Path); id != "" {
 			return "artifact-" + id + ".bin"
 		}
-		if base := path.Base(u.Path); base != "." && base != ".." && base != "/" && base != "" {
+		// 先把 URL 解码后的反斜杠统一成 /，再取基名：Windows 上
+		//   %5c 解码出的 "..\\evil" 否则会被 filepath.Join 当作上级目录。
+		base := filepath.Base(strings.ReplaceAll(u.Path, "\\", "/"))
+		if base != "." && base != ".." && base != "/" && base != "" && !strings.ContainsAny(base, `\\/`) {
 			return base
 		}
 	}
