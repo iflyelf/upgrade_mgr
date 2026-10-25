@@ -17,6 +17,7 @@
   <Product Id="*"
            Name="Upgrade Agent"
            Language="2052"
+           Codepage="936"
            Version="$(var.Version)"
            Manufacturer="iflyelf"
            UpgradeCode="3C9A7E8B-6D0F-4E7B-9F2A-1B5D8C4E6A71">
