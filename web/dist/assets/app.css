@@ -307,10 +307,11 @@ th { position: relative; }
 }
 .main-nav {
   display: flex; align-items: center; gap: 2px;
-  flex: 1; min-width: 0; overflow-x: auto;
-  scrollbar-width: none;
+  flex: 1; min-width: 0;
+  /* 不能设 overflow（含 overflow-x:auto）：会让 overflow-y 也变成 auto，
+     绝对定位的下拉菜单会被父容器裁剪，表现为“点击菜单没反应”。
+     窄屏由下方 @media 关闭整块导航、改用移动端页签。 */
 }
-.main-nav::-webkit-scrollbar { display: none; }
 .nav-link {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 8px 14px; border: 0; border-radius: var(--radius-sm);

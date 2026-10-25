@@ -131,7 +131,6 @@ test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {
   await login(page);
   await openNavMenu(page, '帮助');
   await page.getByRole('menuitem', { name: '快速上手' }).click();
-
   const g = page.locator('.help-modal');
   await expect(g).toBeVisible();
   await g.getByRole('button', { name: 'Windows', exact: true }).click();
@@ -147,4 +146,30 @@ test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {
   await expect(copyBtn).toBeVisible();
   await copyBtn.click();
   await expect(copyBtn).toHaveText('已复制');
+});
+
+// 回归：顶栏下拉曾被 .main-nav 的 overflow-x:auto 裁剪（overflow-y 被强制为 auto），
+// 点击后菜单实际展开但不可见。Playwright 的 click 会自动滚动被裁剪元素，
+// 因此必须显式断言菜单能被真实命中，而不是只断言 click 成功。
+test('顶栏下拉菜单展开后不被父容器裁剪', async ({ page }) => {
+  await login(page);
+
+  for (const label of ['人员组织', '运维', '帮助']) {
+    await openNavMenu(page, label);
+    const menu = page.locator('.nav-dropdown.open > .nav-menu');
+    await expect(menu).toBeVisible();
+    await expect(menu).toBeInViewport();
+
+    // 菜单中心点必须命中菜单自身；被 overflow 裁剪时会命中页面其他元素。
+    const hitInsideMenu = await menu.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return !!(hit && el.contains(hit));
+    });
+    expect(hitInsideMenu, `${label} 菜单被裁剪`).toBe(true);
+
+    // 点击页面空白处关闭，保证下一轮从未展开状态开始。
+    await page.locator('body').click({ position: { x: 5, y: 300 } });
+    await expect(page.locator('.nav-dropdown.open')).toHaveCount(0);
+  }
 });
