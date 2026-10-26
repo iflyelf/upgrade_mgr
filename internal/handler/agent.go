@@ -207,6 +207,7 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 		)
 		_ = s.DB.QueryRowContext(r.Context(), `UPDATE hosts SET last_seen=NOW(),
 			agent_status=CASE WHEN maintenance_until IS NOT NULL AND maintenance_until>NOW() THEN agent_status ELSE $2 END,
+			agent_version=CASE WHEN $3<>'' THEN $3 ELSE agent_version END,
 			agent_build_version=CASE WHEN $4<>'' THEN $3 ELSE agent_build_version END,
 			agent_build_hash=CASE WHEN $4<>'' THEN $4 ELSE agent_build_hash END,
 			agent_build_variant=CASE WHEN $4<>'' THEN $5 ELSE agent_build_variant END,
@@ -221,6 +222,7 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 		// 旧 Agent 不上报 build_hash：不能用空值覆盖已有构建信息。
 		// 新 Agent 上报 build_hash 后，即使 variant 为空也会写回（普通构建）。
 		_, _ = s.DB.ExecContext(r.Context(), `UPDATE agents SET last_heartbeat_at=NOW(), status=$2,
+			agent_version=CASE WHEN $3<>'' THEN $3 ELSE agent_version END,
 			host_id=COALESCE(host_id,(SELECT id FROM hosts WHERE agent_id=$1 ORDER BY id LIMIT 1)),
 			signature_modes=CASE WHEN $6<>'' THEN $6 ELSE signature_modes END,
 			capabilities=CASE WHEN $7<>'' THEN $7 ELSE capabilities END,
