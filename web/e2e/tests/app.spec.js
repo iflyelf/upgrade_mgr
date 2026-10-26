@@ -63,6 +63,25 @@ test('主机页顶部直接展示接入主机示例', async ({ page }) => {
   await expect(page.getByRole('heading', { name: '接入主机（安装 Agent）' })).toBeVisible();
 });
 
+test('自动化令牌可创建并注销', async ({ page }) => {
+  await login(page);
+  await page.getByRole('tab', { name: '自动化令牌' }).click();
+  await expect(page.getByRole('button', { name: '生成自动化令牌' })).toBeVisible();
+
+  const name = 'e2e_auto_' + Date.now();
+  await page.getByPlaceholder('prod-ops-automation').fill(name);
+  await page.getByRole('button', { name: '生成自动化令牌' }).click();
+  await expect(page.getByText('自动化令牌已生成（仅显示一次，请立即复制到自动化平台）：')).toBeVisible();
+
+  const row = page.locator('table tr', { hasText: name });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('永久');
+
+  page.once('dialog', (dialog) => dialog.accept());
+  await row.getByRole('button', { name: '注销' }).click();
+  await expect(row).toContainText('已注销');
+});
+
 test('创建组件并出现在列表', async ({ page }) => {
   await login(page);
   await page.locator('.main-nav').getByRole('button', { name: '组件', exact: true }).click();

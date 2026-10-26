@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -91,13 +92,13 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
 			return
 		}
-		// 校验并消费一次性 enroll token（默认要求；内网可信可关闭）。
+		// 校验并消费一次性/自动化注册令牌（默认要求；内网可信可关闭）。
 		if snap.Agent.RequireEnrollToken {
 			tid, ok := consumeEnrollTokenTx(ctx, tx, req.EnrollToken, ip)
 			if !ok {
 				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip,
-					fmt.Errorf("无效或已过期的注册令牌"))
-				httpx.Fail(w, http.StatusUnauthorized, "无效或已过期的注册令牌")
+					fmt.Errorf("无效、已过期或已失效的注册令牌"))
+				httpx.Fail(w, http.StatusUnauthorized, "无效、已过期或已失效的注册令牌")
 				return
 			}
 			tenantID = tid
@@ -616,20 +617,47 @@ func splitBinaryName(name string) (osName, arch string, ok bool) {
 
 // consumeEnrollTokenTx 在校验事务内原子消费 enroll token，返回令牌所属租户。
 //
-// 使用 UPDATE ... RETURNING 而不是「先 SELECT 再 UPDATE」：并发注册时只有一个
-// 事务能把 used_at 从 NULL 改为非空，另一个事务会在行锁释放后重新求值 WHERE，
-// 得到 0 行并失败。令牌消费与后续注册写入在同一事务中，失败会一并回滚。
+// 一次性令牌（one_time）与自动化令牌（automation）共用一张表：
+//   - one_time：只能消费一次，used_at 从 NULL 变为非空；
+//   - automation：可重复使用，按 max_uses 原子累加 used_count，永久令牌允许
+//     expires_at 为 NULL，可配置 allowed_cidrs 限制来源 IP。
+//
+// 使用单条 UPDATE ... RETURNING 而不是「先 SELECT 再 UPDATE」：并发注册时
+// 行锁保证条件在最新版本上重新求值，不会超过 max_uses，也不会重复消费
+// 一次性令牌。令牌消费与后续注册写入在同一事务中，失败会一并回滚。
 func consumeEnrollTokenTx(ctx context.Context, tx *sql.Tx, token, clientIP string) (int64, bool) {
 	if token == "" || tx == nil {
 		return 0, false
 	}
+	ip := strings.TrimSpace(clientIP)
+	ipForCIDR := ""
+	if ip != "" {
+		if parsed := net.ParseIP(ip); parsed != nil {
+			ipForCIDR = parsed.String()
+		}
+	}
 	var tenantID int64
 	err := tx.QueryRowContext(ctx, `
 		UPDATE enroll_tokens
-		SET used_at=NOW(), used_by_ip=$2
-		WHERE token_hash=$1 AND used_at IS NULL AND expires_at > NOW()
-		RETURNING COALESCE(tenant_id, 1)`,
-		agentgw.HashToken(token), clientIP).Scan(&tenantID)
+		SET used_at = CASE WHEN token_type='one_time' THEN NOW() ELSE used_at END,
+		    used_by_ip = CASE WHEN token_type='one_time' THEN $2 ELSE used_by_ip END,
+		    used_count = CASE WHEN token_type='automation' THEN used_count+1 ELSE used_count END,
+		    last_used_at = CASE WHEN token_type='automation' THEN NOW() ELSE last_used_at END,
+		    last_used_ip = CASE WHEN token_type='automation' THEN $2 ELSE last_used_ip END
+		WHERE token_hash=$1
+		  AND enabled
+		  AND revoked_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > NOW())
+		  AND (
+		        (token_type='one_time' AND used_at IS NULL AND max_uses=1)
+		     OR (token_type='automation' AND (max_uses=0 OR used_count < max_uses))
+		  )
+		  AND (
+		        cardinality(allowed_cidrs)=0
+		     OR NULLIF($3,'')::inet <<= ANY(allowed_cidrs::cidr[])
+		  )
+		RETURNING COALESCE(tenant_id,1)`,
+		agentgw.HashToken(token), ip, ipForCIDR).Scan(&tenantID)
 	if err != nil || tenantID <= 0 {
 		return 0, false
 	}

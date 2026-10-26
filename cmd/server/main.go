@@ -212,6 +212,11 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.Handle("GET /api/agent/enroll-token", middleware.RateLimitMiddleware(enrollLimiter)(middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentEnrollToken(sc)))))
 	// 兼容旧客户端保留 GET；新页面使用 POST（GET 不应产生副作用，也避免顶级导航 CSRF）。
 	mux.Handle("POST /api/agent/enroll-token", middleware.RateLimitMiddleware(enrollLimiter)(middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentEnrollToken(sc)))))
+	// 自动化注册令牌：永久/自定义到期、可限制次数/CIDR、可注销/轮换。
+	mux.Handle("POST /api/agent/enroll-tokens", middleware.RateLimitMiddleware(enrollLimiter)(middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenCreate(sc)))))
+	mux.Handle("GET /api/agent/enroll-tokens", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenList(sc))))
+	mux.Handle("POST /api/agent/enroll-tokens/{id}/revoke", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenRevoke(sc))))
+	mux.Handle("POST /api/agent/enroll-tokens/{id}/rotate", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenRotate(sc))))
 	// Agent 二进制下载（无鉴权，白名单架构）
 	mux.HandleFunc("GET /api/agent/binary/{name}", handler.AgentBinaryDownload(sc))
 	// 白名单外部二进制（控制台代为下载缓存）：供无法 TLS 1.2 的老系统用 HTTP 拉取

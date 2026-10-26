@@ -38,7 +38,7 @@
 - **Agent 自升级**：服务端按二进制 SHA256 判断旧 Agent → 下发 `self_update` → 下载校验 → 备份 → 替换 → exit(75) 触发重启；新版本心跳按目标哈希自动确认成功；watchdog 检测连续崩溃（≥3次）自动回滚旧版本
 - **无需逐台登录**：管理员可在主机页一键升级全部旧 Agent，或开启 `agent.auto_update` 在心跳/注册时自动下发；旧 Agent 的签名路径不匹配会被自动探测并重试，无需手工修改 `agents.signature_modes`
 - **Consul Meta 回写**：升级成功后回写服务实例 Meta（`upgraded_version`），供 consul_mgr 展示最新版本
-- **enroll-token 生成**：管理员生成一次性注册令牌 + 一键安装命令（`GET /api/agent/enroll-token`）
+- **enroll-token 生成**：管理员生成一次性注册令牌 + 一键安装命令（`GET /api/agent/enroll-token`）；另支持页面生成永久/自定义到期、可注销的自动化注册令牌
 - **主机升级历史**：`GET /api/hosts/{ip}/upgrade-history`，展示逐机升级记录
 - **主机管理**：服务端分页（几万台主机不一次性加载）、编辑业务字段、删除主机（未完成任务保护 + Agent 凭据撤销）
 
@@ -380,7 +380,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 > **本方式的下载、目录布局与 systemd 单元没有变化**；已有部署升级只需替换二进制并
 > `systemctl restart upgrade-mgr`。下面补充了新增能力的**可选配置**（不配置即使用默认值）。
-> 首次启动会自动应用迁移 020–028（组织/多租户/审计），旧库无需手工执行 SQL。
+> 首次启动会自动应用迁移 020–031（组织/多租户/审计/自动化令牌），旧库无需手工执行 SQL。
 
 ```bash
 # 1. 下载控制台二进制到 /tmp 并解压
@@ -512,7 +512,7 @@ agent:
 #   service_token: "<FlyIAM 管理员 API 令牌或 SERVICE_TOKEN>"
 EOF
 
-> **迁移与多租户**：首次启动自动应用 001–028。组织/团队/角色/审计新增
+> **迁移与多租户**：首次启动自动应用 001–031。组织/团队/角色/审计新增
 > `tenant_id`，历史数据默认为租户 `1`，单租户部署无需额外操作。
 >
 > **FlyIAM 组织树同步前置条件**：FlyIAM 需包含
@@ -1896,8 +1896,34 @@ POST /api/agent/commands/poll         # 长轮询取指令
 POST /api/agent/commands/{id}/ack     # 指令确认
 POST /api/agent/commands/{id}/stage   # 阶段上报
 POST /api/agent/commands/{id}/report  # 结果上报
-GET /api/agent/enroll-token           # 生成注册令牌（管理员）
+GET /api/agent/enroll-token           # 生成一次性注册令牌（管理员）
+POST /api/agent/enroll-tokens         # 创建自动化令牌（管理员）
+GET /api/agent/enroll-tokens          # 自动化令牌列表（脱敏）
+POST /api/agent/enroll-tokens/{id}/revoke  # 注销自动化令牌
+POST /api/agent/enroll-tokens/{id}/rotate  # 轮换自动化令牌
 ```
+
+自动化令牌与一次性令牌并存：
+
+- **一次性令牌**：保持原有行为，默认 15 分钟、单次使用、每台机器一个；`consumeEnrollTokenTx` 的单次消费逻辑不变。
+- **自动化令牌**：页面「主机 → 接入主机 → 自动化令牌」生成，可永久有效或自定义到期时间；可设置最大使用次数（0=不限）、来源 CIDR；页面可注销/轮换，注销只阻止新注册，不影响已运行 Agent。
+- 创建时完整 token 只返回一次，列表仅显示 `token_prefix`；数据库只保存 SHA-256。
+- 注册接口按 token 类型消费：一次性令牌检查 `used_at IS NULL`，自动化令牌原子累加 `used_count` 并检查 `max_uses`，两者都受 `enabled/expires_at/CIDR` 约束。
+
+创建自动化令牌示例：
+
+```json
+{
+  "name": "prod-ops-automation",
+  "permanent": true,
+  "max_uses": 0,
+  "allowed_cidrs": ["10.0.0.0/8"],
+  "os": "linux",
+  "arch": "amd64"
+}
+```
+
+`permanent` 为 `false` 时可改用 `expires_in: "720h"` 或 `expires_at: "2026-12-31T23:59:59+08:00"`；`max_uses=0` 表示不限制。
 
 注册与心跳请求可携带 `signature_modes`（`id` / `signed_path` / `v2`），服务端据此选择
 legacy `signature` 的 Path；旧 Agent 不传该字段时按 `id` 处理。注册/心跳还可携带
@@ -2007,7 +2033,7 @@ histogram_quantile(0.95, rate(upgrade_mgr_agents_heartbeat_lag_seconds_bucket[5m
 1. **HTTPS 强制**：生产环境务必配置 Nginx HTTPS，避免 token 明文传输
 2. **网络隔离**：控制台与 Agent 通信走内网，避免公网暴露
 3. **强密码**：修改默认管理员密码，显式配置 32+ 字节随机 `session_secret`（留空会生成并持久化到数据库）
-4. **注册令牌**：生产环境开启 `require_enroll_token`；令牌一次性消费、按租户绑定，防止未授权 Agent 注册或跨租户注册
+4. **注册令牌**：生产环境开启 `require_enroll_token`；一次性令牌保持单次使用与短有效期。自动化令牌按自动化平台/租户单独创建，建议设置 `allowed_cidrs` 和 `max_uses`，泄露或不再使用时立即在页面注销/轮换。
 5. **最小权限**：数据库用户仅授予必要权限，避免使用 superuser
 6. **审计日志**：定期检查 `audit_logs` 表，监控敏感操作
 7. **备份恢复**：每日备份数据库，定期演练恢复流程
@@ -2214,7 +2240,8 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - **H5 移动端**：窄屏表格卡片化、`safe-area` 适配、16px 输入框防 iOS 缩放、主题色 meta 同步；320/390/768/1366 宽度实测无横向溢出。
 - **Agent 版本分布修复**：统计优先使用 `build_version`，旧 Agent 回退 `agent_version`；是否最新按目标二进制 SHA256 判断，并在注册/心跳时同步 `agent_version`，解决升级后仍显示 `0.1.0` 的问题。
 - **主机接入入口前置**：完整「接入主机（安装 Agent）」卡片重新放到主机页顶部，保留「帮助 → 接入主机示例」入口；空列表提示同步更新。
-- **验证**：`go vet ./...`、`go test -race -count=1 ./...`（真实 PostgreSQL 16）通过；Playwright 11/11（含移动端 `mobile.spec.js`）；两实例实测 A 保存后 B 在 5 秒内同步且 PID 不变。
+- **自动化注册令牌**：主机页新增「自动化令牌」页签，可生成永久或自定义到期令牌，支持最大次数、来源 CIDR、页面注销/轮换；一次性令牌 15 分钟/单次使用逻辑保持不变。迁移 030/031。
+- **验证**：`go vet ./...`、`go test -race -count=1 ./...`（真实 PostgreSQL 16）通过；Playwright 12/12（含移动端 `mobile.spec.js`）；两实例实测 A 保存后 B 在 5 秒内同步且 PID 不变。
 
 ### 2026-10-23 隧道自检自动化与主机侧回连
 
