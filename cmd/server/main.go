@@ -217,7 +217,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.Handle("GET /api/agent/enroll-tokens", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenList(sc))))
 	mux.Handle("POST /api/agent/enroll-tokens/{id}/revoke", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenRevoke(sc))))
 	mux.Handle("POST /api/agent/enroll-tokens/{id}/rotate", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenRotate(sc))))
-	// Agent 二进制下载（无鉴权，白名单架构）
+	// Agent 二进制下载（无鉴权，白名单架构；支持 kernel 参数自动选择构建）
 	mux.HandleFunc("GET /api/agent/binary/{name}", handler.AgentBinaryDownload(sc))
 	// 白名单外部二进制（控制台代为下载缓存）：供无法 TLS 1.2 的老系统用 HTTP 拉取
 	mux.HandleFunc("GET /api/external/binary/{name}", handler.ExternalBinaryDownload(sc))
