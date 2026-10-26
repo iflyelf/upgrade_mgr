@@ -17,14 +17,19 @@ import (
 )
 
 func TestBuildInstallCommandRemovesStaleBinary(t *testing.T) {
-	cmd := buildInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", false)
+	cmd := buildInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", false, "")
 
-	if !strings.HasPrefix(cmd, "rm -f /tmp/upgrade-agent") {
+	// 验证基本结构
+	if !strings.Contains(cmd, "rm -f /tmp/upgrade-agent") {
 		t.Fatalf("安装命令必须先删除旧二进制，got:\n%s", cmd)
+	}
+	// 验证 URL 包含内核参数
+	if !strings.Contains(cmd, "?kernel=$(uname -r)") {
+		t.Fatalf("安装命令应包含内核版本参数，got:\n%s", cmd)
 	}
 	for _, want := range []string{
 		"wget -c",
-		"'http://10.1.230.50:8090/api/agent/binary/linux-amd64'",
+		"'http://10.1.230.50:8090/api/agent/binary/linux-amd64?kernel=$(uname -r)'",
 		"chmod +x /tmp/upgrade-agent",
 		"install --server 'http://10.1.230.50:8090' --enroll-token 'tok-123'",
 	} {
@@ -116,12 +121,26 @@ func TestInstallBaseURLTLS(t *testing.T) {
 }
 
 func TestBuildInstallCommandForce(t *testing.T) {
-	cmd := buildInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", true)
+	cmd := buildInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", true, "")
 	if !strings.HasSuffix(cmd, "--force") {
 		t.Fatalf("强制重新注册命令应以 --force 结尾，got:\n%s", cmd)
 	}
 	if !strings.Contains(cmd, "--enroll-token 'tok-123' --force") {
 		t.Fatalf("--force 必须与 --enroll-token 同时出现，got:\n%s", cmd)
+	}
+}
+
+func TestBuildInstallCommandLegacy(t *testing.T) {
+	cmd := buildInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", false, "legacy")
+	if !strings.Contains(cmd, "/api/agent/binary/linux-amd64-legacy") {
+		t.Fatalf("legacy 变体应下载 linux-amd64-legacy 二进制，got:\n%s", cmd)
+	}
+	// 验证完整命令结构
+	if !strings.Contains(cmd, "rm -f /tmp/upgrade-agent") {
+		t.Fatalf("应先删除旧二进制，got:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "wget") || !strings.Contains(cmd, "chmod +x") {
+		t.Fatalf("应包含 wget 和 chmod 步骤，got:\n%s", cmd)
 	}
 }
 

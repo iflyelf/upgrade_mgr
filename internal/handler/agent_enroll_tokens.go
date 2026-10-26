@@ -544,5 +544,6 @@ func buildAutomationInstallCommand(s *svc.ServiceContext, r *http.Request, token
 	if osName == "windows" {
 		return buildWindowsInstallCommand(rawURL, arch, token, force), serverURL, nil
 	}
-	return buildInstallCommand(safeURL, arch, token, force), serverURL, nil
+	// 自动化接入时不支持 variant 参数，默认生成普通构建的安装命令
+	return buildInstallCommand(safeURL, arch, token, force, ""), serverURL, nil
 }

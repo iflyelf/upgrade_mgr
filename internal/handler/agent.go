@@ -483,7 +483,12 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		safeURL := shellEscape(rawURL)
 		force := r.URL.Query().Get("force") == "1"
-		installCmd := buildInstallCommand(safeURL, arch, token, force)
+		// 支持通过 variant=legacy 参数生成旧内核兼容的安装命令（CentOS 6 等）
+		variant := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("variant")))
+		if variant != "legacy" {
+			variant = ""
+		}
+		installCmd := buildInstallCommand(safeURL, arch, token, force, variant)
 		if osName == "windows" {
 			installCmd = buildWindowsInstallCommand(rawURL, arch, token, force)
 		}
@@ -520,16 +525,29 @@ func installBaseURL(externalURL string, r *http.Request, trustProxy bool) string
 
 // buildInstallCommand 生成一键安装命令。
 //
-// 必须先删除 /tmp/upgrade-agent：wget -c 会把上一次下载的旧二进制当成
-// 完整文件跳过下载，导致重装后仍运行旧版本（例如仍带 401 缺陷的 Agent）。
-func buildInstallCommand(safeURL, arch, token string, force bool) string {
+// 命令会自动检测内核版本并通过 URL 参数传递给服务端，
+// 服务端根据内核版本自动返回对应的二进制（2.x 内核返回 legacy 构建）。
+func buildInstallCommand(safeURL, arch, token string, force bool, variant string) string {
+	if variant == "legacy" {
+		// 强制使用 legacy 构建
+		cmd := "rm -f /tmp/upgrade-agent \\\n" +
+			"  && wget -c --tries=5 --timeout=30 --waitretry=5 -O /tmp/upgrade-agent \\\n" +
+			"  '" + safeURL + "/api/agent/binary/linux-" + arch + "-legacy' \\\n" +
+			"  && chmod +x /tmp/upgrade-agent \\\n" +
+			"  && /tmp/upgrade-agent install --server '" + safeURL + "' --enroll-token '" + token + "'"
+		if force {
+			cmd += " --force"
+		}
+		return cmd
+	}
+
+	// 自动检测：将内核版本作为 URL 参数传递，服务端自动选择对应构建
 	cmd := "rm -f /tmp/upgrade-agent \\\n" +
 		"  && wget -c --tries=5 --timeout=30 --waitretry=5 -O /tmp/upgrade-agent \\\n" +
-		"  '" + safeURL + "/api/agent/binary/linux-" + arch + "' \\\n" +
+		"  '" + safeURL + "/api/agent/binary/linux-" + arch + "?kernel=$(uname -r)' \\\n" +
 		"  && chmod +x /tmp/upgrade-agent \\\n" +
 		"  && /tmp/upgrade-agent install --server '" + safeURL + "' --enroll-token '" + token + "'"
 	if force {
-		// 显式覆盖目标机已有 AgentID/Token/Secret，重新注册为当前服务端的新 Agent。
 		cmd += " --force"
 	}
 	return cmd
@@ -758,6 +776,9 @@ func shellEscape(rawURL string) string {
 }
 
 // AgentBinaryDownload 提供 Agent 二进制下载（无鉴权，白名单文件）。
+//
+// 支持自动内核检测：当请求 linux-{arch} 且带有 kernel 参数时，
+// 如果内核版本为 2.x，自动重定向到 linux-{arch}-legacy。
 func AgentBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
@@ -767,6 +788,23 @@ func AgentBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+
+		// 自动内核检测：如果请求普通构建且提供了内核版本参数
+		if osName == "linux" && !strings.HasSuffix(name, "-legacy") {
+			kernel := strings.TrimSpace(r.URL.Query().Get("kernel"))
+			if kernel != "" && strings.HasPrefix(kernel, "2.") {
+				// 重定向到 legacy 版本
+				legacyName := name + "-legacy"
+				// 保持原有查询参数
+				redirectURL := r.URL.Path[:len(r.URL.Path)-len(name)] + legacyName
+				if q := r.URL.RawQuery; q != "" {
+					redirectURL += "?" + q
+				}
+				http.Redirect(w, r, redirectURL, http.StatusFound)
+				return
+			}
+		}
+
 		dir := s.ConfigSnapshot().Server.AgentBinaryDir
 		if dir == "" {
 			dir = "./dist"
