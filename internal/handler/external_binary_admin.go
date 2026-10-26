@@ -368,7 +368,8 @@ func TestExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 				log.Printf("⚠️ 清除外部文件缓存失败 %s: %v", target, rmErr)
 			}
 		}
-		probe := probeExternalBinary(probeCtx, *entry, effectiveExternalHosts(cfg), externalAllowRule(cfg))
+		probe := probeExternalBinary(probeCtx, *entry, effectiveExternalHosts(cfg), externalAllowRule(cfg),
+			effectiveExternalProxy(cfg), effectiveExternalProxyHosts(cfg))
 		probe.Name = res.Name
 		probe.URL = entry.URL
 		auditOpDetails(s, r, auditActionExternalBinaryTest, "external_binary", res.Name, entry.URL,
@@ -419,7 +420,8 @@ func RefreshExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		start := time.Now()
 		if err := fetchExternalBinary(r.Context(), entry.URL, target, entry.Script,
-			effectiveExternalHosts(cfg), externalAllowRule(cfg)); err != nil {
+			effectiveExternalHosts(cfg), externalAllowRule(cfg),
+			effectiveExternalProxy(cfg), effectiveExternalProxyHosts(cfg)); err != nil {
 			metrics.ExternalBinaryRequests.WithLabelValues(name, "refresh_error").Inc()
 			metrics.ExternalBinaryDuration.WithLabelValues(name, "error").
 				Observe(time.Since(start).Seconds())
@@ -458,6 +460,8 @@ func RefreshAllExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 		baseDir := externalBinaryBaseDir(cfg)
 		hosts := effectiveExternalHosts(cfg)
 		rule := externalAllowRule(cfg)
+		proxyBase := effectiveExternalProxy(cfg)
+		proxyHosts := effectiveExternalProxyHosts(cfg)
 
 		type itemResult struct {
 			Name      string `json:"name"`
@@ -481,7 +485,8 @@ func RefreshAllExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 					res.Error = rmErr.Error()
 					return
 				}
-				if fetchErr := fetchExternalBinary(r.Context(), e.URL, target, e.Script, hosts, rule); fetchErr != nil {
+				if fetchErr := fetchExternalBinary(r.Context(), e.URL, target, e.Script,
+					hosts, rule, proxyBase, proxyHosts); fetchErr != nil {
 					res.Error = fetchErr.Error()
 					return
 				}
@@ -525,10 +530,25 @@ func boolResult(ok bool) string {
 // 注意：必须用命名返回值，否则 defer 里修改 res 不会写回返回值
 // （`return res` 在 defer 执行前已完成值拷贝，耗时永远为 0）。
 func probeExternalBinary(ctx context.Context, entry extbin.Entry, hosts []string,
-	rule extbin.AllowRule) (res externalBinaryTestResult) {
+	rule extbin.AllowRule, proxyBase string, proxyHosts []string) (res externalBinaryTestResult) {
 	res = externalBinaryTestResult{Name: entry.Name, URL: entry.URL}
 	start := time.Now()
 	defer func() { res.ElapsedMS = time.Since(start).Milliseconds() }()
+	proxied := false
+	// 与真实下载保持一致：代理失败时允许直连兜底，测通即代表缓存可拉取。
+	defer func() {
+		if res.OK || !proxied {
+			return
+		}
+		direct := probeExternalBinary(ctx, entry, hosts, rule, "", nil)
+		if direct.OK {
+			direct.Hint = "加速代理不可用，已直连兜底"
+			res = direct
+			return
+		}
+		direct.Error = fmt.Sprintf("经加速代理失败: %s；直连也失败: %s", res.Error, direct.Error)
+		res = direct
+	}()
 
 	// 与真实下载共用同一校验：测试通过即代表可下载。
 	if err := extbin.CheckHost(entry.URL, hosts, rule); err != nil {
@@ -541,7 +561,19 @@ func probeExternalBinary(ctx context.Context, entry extbin.Entry, hosts []string
 		return res
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, entry.URL, nil)
+	requestURL := entry.URL
+	reqHosts := hosts
+	if proxiedURL, viaProxy := extbin.ProxyURL(entry.URL, proxyBase, proxyHosts); viaProxy {
+		requestURL = proxiedURL
+		proxied = true
+		reqHosts = hostsWithProxyHost(hosts, proxyBase)
+	}
+	if err := extbin.CheckHost(requestURL, reqHosts, rule); err != nil {
+		res.Error = err.Error()
+		res.Hint = "加速代理地址不可用或不在白名单"
+		return res
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		res.Error = err.Error()
 		return res

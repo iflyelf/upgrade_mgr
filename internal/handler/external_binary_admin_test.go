@@ -266,7 +266,7 @@ func TestProbeElapsed(t *testing.T) {
 
 	res := probeExternalBinary(context.Background(),
 		extbin.Entry{Name: "x", URL: srv.URL}, []string{"127.0.0.1"},
-		extbin.AllowRule{AllowPrivate: true})
+		extbin.AllowRule{AllowPrivate: true}, "", nil)
 	if !res.OK {
 		t.Fatalf("应探测成功: %+v", res)
 	}

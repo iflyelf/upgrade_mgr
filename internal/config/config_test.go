@@ -92,3 +92,20 @@ func TestLoadArtifactS3Env(t *testing.T) {
 		t.Fatalf("artifact S3 credentials/ssl not applied: %+v", c.Artifact)
 	}
 }
+
+// TestLoadExternalProxyEnv 外部文件加速代理可由环境变量覆盖。
+func TestLoadExternalProxyEnv(t *testing.T) {
+	t.Setenv("EXTERNAL_BINARY_PROXY", "https://proxy.example/proxy?url=")
+	t.Setenv("EXTERNAL_BINARY_PROXY_HOSTS", "github.com, raw.example.com")
+	c, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Server.ExternalBinaryProxy != "https://proxy.example/proxy?url=" {
+		t.Fatalf("proxy=%q", c.Server.ExternalBinaryProxy)
+	}
+	if len(c.Server.ExternalBinaryProxyHosts) != 2 ||
+		c.Server.ExternalBinaryProxyHosts[1] != "raw.example.com" {
+		t.Fatalf("proxy hosts=%v", c.Server.ExternalBinaryProxyHosts)
+	}
+}

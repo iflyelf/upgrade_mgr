@@ -10,6 +10,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -82,6 +83,14 @@ type ServerConfig struct {
 	// release-assets.githubusercontent.com 等 GitHub 资产重定向域名），
 	// 防止配置被改成内网地址形成 SSRF。
 	ExternalBinaryHosts []string `yaml:"external_binary_hosts"`
+	// ExternalBinaryProxy 外部文件代缓存使用的加速代理地址。
+	//
+	// 默认 https://proxy.xiaonuo.live/proxy?url=；留空表示直连。
+	// 支持以 url= 结尾、{url} 占位符，或普通代理地址（自动追加 ?url=）。
+	ExternalBinaryProxy string `yaml:"external_binary_proxy"`
+	// ExternalBinaryProxyHosts 走加速代理的上游域名；不在列表内（如内网镜像）直连。
+	// 留空表示不使用代理；默认 GitHub/raw 及其 Release 资产域名。
+	ExternalBinaryProxyHosts []string `yaml:"external_binary_proxy_hosts"`
 	// ExternalBinaryTTL 缓存有效期（如 24h）；<=0 使用默认 24h。
 	ExternalBinaryTTL string `yaml:"external_binary_ttl"`
 	// ExternalBinaryAllowPrivate 是否允许代下载内网/环回地址。
@@ -272,7 +281,9 @@ func Default() *Config {
 	return &Config{
 		Server: ServerConfig{
 			Host: "0.0.0.0", Port: 8090, WebEmbedded: true, AgentBinaryDir: "./dist",
-			AuditRetentionDays: 180,
+			AuditRetentionDays:       180,
+			ExternalBinaryProxy:      extbin.DefaultProxyBase,
+			ExternalBinaryProxyHosts: extbin.DefaultProxyHosts(),
 		},
 		Database: DatabaseConfig{
 			Host: "localhost", Port: 5432, User: "postgres", DBName: "upgrade_mgr",
@@ -342,6 +353,12 @@ func Load(path string) (*Config, error) {
 	if err := extbin.ValidateCIDRs(c.Server.ExternalBinaryAllowCIDRs); err != nil {
 		return nil, fmt.Errorf("external_binary_allow_cidrs 配置错误: %w", err)
 	}
+	if proxy := strings.TrimSpace(c.Server.ExternalBinaryProxy); proxy != "" {
+		u, err := url.Parse(proxy)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("external_binary_proxy 必须是 http/https 地址")
+		}
+	}
 	if c.Artifact.MaxConcurrentUploads <= 0 {
 		c.Artifact.MaxConcurrentUploads = 4
 	}
@@ -391,6 +408,10 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("EXTERNAL_BINARY_HOSTS"); v != "" {
 		c.Server.ExternalBinaryHosts = splitTrim(v)
+	}
+	setStr(&c.Server.ExternalBinaryProxy, "EXTERNAL_BINARY_PROXY")
+	if v := os.Getenv("EXTERNAL_BINARY_PROXY_HOSTS"); v != "" {
+		c.Server.ExternalBinaryProxyHosts = splitTrim(v)
 	}
 	setStr(&c.Server.ExternalBinaryTTL, "EXTERNAL_BINARY_TTL")
 	setBool(&c.Server.ExternalBinaryAllowPrivate, "EXTERNAL_BINARY_ALLOW_PRIVATE")

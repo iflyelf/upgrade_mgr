@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
@@ -126,7 +127,7 @@ func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 // TestFetchExternalBinaryRejectsNonWhitelistedHost 上游域名不在白名单时拒绝。
 func TestFetchExternalBinaryRejectsNonWhitelistedHost(t *testing.T) {
 	err := fetchExternalBinary(context.Background(),
-		"https://evil.example.com/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, nil, extbin.AllowRule{})
+		"https://evil.example.com/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, nil, extbin.AllowRule{}, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "白名单") {
 		t.Fatalf("应拒绝非白名单域名，got %v", err)
 	}
@@ -136,7 +137,7 @@ func TestFetchExternalBinaryRejectsNonWhitelistedHost(t *testing.T) {
 func TestFetchExternalBinaryRejectsInternalHost(t *testing.T) {
 	hosts := []string{"127.0.0.1"}
 	err := fetchExternalBinary(context.Background(),
-		"http://127.0.0.1:1/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, hosts, extbin.AllowRule{})
+		"http://127.0.0.1:1/x.exe", filepath.Join(t.TempDir(), "x.exe"), false, hosts, extbin.AllowRule{}, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "内网") {
 		t.Fatalf("应拒绝内网地址，got %v", err)
 	}
@@ -150,5 +151,90 @@ func TestValidateExternalContentWithBOM(t *testing.T) {
 	}
 	if err := validateExternalContent(p, true); err == nil {
 		t.Fatal("带 BOM 的 HTML 应被拒绝")
+	}
+}
+
+// TestFetchExternalBinaryUsesProxyFirst 外部文件缓存必须优先走加速代理，
+// 代理可用时不应直接访问源站。源站与代理用不同端口模拟。
+func TestFetchExternalBinaryUsesProxyFirst(t *testing.T) {
+	var originHits, proxyHits int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&originHits, 1)
+		_, _ = w.Write([]byte("direct-origin"))
+	}))
+	defer origin.Close()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&proxyHits, 1)
+		if r.URL.Path != "/proxy" {
+			t.Errorf("代理请求路径 = %s, want /proxy", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("url"); got != origin.URL+"/install.ps1" {
+			t.Errorf("代理 url 参数 = %q", got)
+		}
+		_, _ = w.Write([]byte("Write-Output proxied"))
+	}))
+	defer proxy.Close()
+
+	target := filepath.Join(t.TempDir(), "install.ps1")
+	err := fetchExternalBinary(context.Background(), origin.URL+"/install.ps1", target, true,
+		[]string{"127.0.0.1"}, extbin.AllowRule{AllowPrivate: true},
+		proxy.URL+"/proxy?url=", []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("经代理下载失败: %v", err)
+	}
+	if got := atomic.LoadInt32(&originHits); got != 0 {
+		t.Fatalf("代理可用时不应直连源站，实际访问 %d 次", got)
+	}
+	if got := atomic.LoadInt32(&proxyHits); got != 1 {
+		t.Fatalf("代理访问次数 = %d, want 1", got)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "Write-Output proxied" {
+		t.Fatalf("缓存内容不符: %q", string(body))
+	}
+}
+
+// TestExternalBinaryDownloadUsesProxy 完整下载接口也必须走代理并落缓存。
+func TestExternalBinaryDownloadUsesProxy(t *testing.T) {
+	var originHits, proxyHits int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&originHits, 1)
+		_, _ = w.Write([]byte("MZdirect"))
+	}))
+	defer origin.Close()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&proxyHits, 1)
+		_, _ = w.Write([]byte("MZproxied"))
+	}))
+	defer proxy.Close()
+
+	cfg := &config.Config{}
+	cfg.Server.AgentBinaryDir = t.TempDir()
+	cfg.Server.ExternalBinaries = map[string]string{"proxied-tool": origin.URL + "/tool.exe"}
+	cfg.Server.ExternalBinaryHosts = []string{"127.0.0.1"}
+	cfg.Server.ExternalBinaryAllowPrivate = true
+	cfg.Server.ExternalBinaryTTL = "24h"
+	cfg.Server.ExternalBinaryProxy = proxy.URL + "/proxy?url="
+	cfg.Server.ExternalBinaryProxyHosts = []string{"127.0.0.1"}
+	sc := &svc.ServiceContext{Config: cfg}
+
+	req := httptest.NewRequest("GET", "/api/external/binary/proxied-tool", nil)
+	req.SetPathValue("name", "proxied-tool")
+	rec := httptest.NewRecorder()
+	ExternalBinaryDownload(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("下载失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "MZproxied" {
+		t.Fatalf("内容不符: %q", rec.Body.String())
+	}
+	if atomic.LoadInt32(&originHits) != 0 {
+		t.Fatal("代理可用时下载接口不应直连源站")
+	}
+	if atomic.LoadInt32(&proxyHits) != 1 {
+		t.Fatalf("代理访问次数 = %d, want 1", proxyHits)
 	}
 }

@@ -40,6 +40,16 @@ server:
   # github.com / raw.githubusercontent.com / proxy.xiaonuo.live。
   # 接口还会拒绝解析到内网/环回地址的主机，防止被当作 SSRF 跳板。
   external_binary_hosts: []
+  # 加速代理（默认先走代理，失败再直连兜底；留空表示完全直连）。
+  # 代理服务接受 ?url=<原始地址>；可用 {url} 占位符自定义拼接。
+  external_binary_proxy: "https://proxy.xiaonuo.live/proxy?url="
+  # 走加速代理的上游域名；内网镜像不要放进来（否则会绕公网代理）。
+  external_binary_proxy_hosts:
+    - github.com
+    - raw.githubusercontent.com
+    - release-assets.githubusercontent.com
+    - github-releases.githubusercontent.com
+    - objects.githubusercontent.com
   # 缓存有效期（env EXTERNAL_BINARY_TTL）；留空默认 24h。
   external_binary_ttl: 24h
   # 是否允许代下载内网/环回地址；默认 false（防 SSRF）。
