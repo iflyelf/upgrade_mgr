@@ -43,9 +43,24 @@ test('帮助菜单包含快速上手与接入主机示例', async ({ page }) => 
   await expect(modal.getByRole('heading', { name: '接入主机示例' })).toBeVisible();
   await expect(modal.getByRole('button', { name: '生成接入命令' })).toBeVisible();
 
-  // 主机页不再内嵌接入卡片，只在帮助弹窗中出现。
+  // 主机页顶部同时内嵌完整接入卡片；帮助菜单入口仍然保留。
   await modal.getByRole('button', { name: '关闭' }).click();
   await expect(page.locator('.help-modal')).toHaveCount(0);
+});
+
+test('主机页顶部直接展示接入主机示例', async ({ page }) => {
+  await login(page);
+  // 主机页默认视图即可看到完整的 OS/架构选择与生成命令按钮。
+  await expect(page.getByRole('heading', { name: '接入主机（安装 Agent）' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '生成接入命令' })).toBeVisible();
+
+  // 帮助菜单仍保留同一入口，关闭弹窗后主机页卡片不消失。
+  await openNavMenu(page, '帮助');
+  await page.getByRole('menuitem', { name: '接入主机示例' }).click();
+  const modal = page.locator('.help-modal');
+  await expect(modal.getByRole('heading', { name: '接入主机示例' })).toBeVisible();
+  await modal.getByRole('button', { name: '关闭' }).click();
+  await expect(page.getByRole('heading', { name: '接入主机（安装 Agent）' })).toBeVisible();
 });
 
 test('创建组件并出现在列表', async ({ page }) => {

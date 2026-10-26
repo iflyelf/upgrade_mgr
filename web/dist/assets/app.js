@@ -49,6 +49,7 @@
   })(), hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
     hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
     agentTargetVersion: '', agentAutoUpdate: false, agentStats: null,
+    agentStatsAt: 0, agentStatsSig: '', agentUpdateActive: false,
     compQ: '', compPage: 1, compSize: 50,
     artifactQ: '', artifactFilterComp: '', artifactPage: 1, artifactSize: 50,
     artifactPages: 1, artifactTotal: 0,
@@ -417,7 +418,7 @@
   }
 
   // openHelp 打开帮助弹窗：quickstart（快速上手）或 enroll（接入主机示例）。
-  // 接入主机示例从主机页移到「帮助」菜单，页面主区域更聚焦列表与操作。
+  // 接入主机示例同时保留在帮助菜单；主机页顶部也直接展示完整接入卡片。
   function openHelp(kind) {
     if (kind === 'enroll' && !isAdmin()) {
       alert('仅管理员可生成接入命令');
@@ -1352,10 +1353,15 @@
     });
     var empty = !state.hostsLoading && !state.hostErr && state.hosts.length === 0
       ? h('div', { class: 'muted empty' }, [
-        state.q ? '没有匹配的主机。' : '还没有主机。从顶部「帮助 → 接入主机示例」生成命令，到目标机器上执行即可。'
+        state.q ? '没有匹配的主机。' : (isAdmin()
+          ? '还没有主机。在上方「接入主机（安装 Agent）」生成命令，到目标机器上执行即可。'
+          : '还没有主机。请联系管理员接入主机。')
       ])
       : null;
     return h('div', {}, [
+      // 主机接入是高频操作：完整接入卡片直接放在主机页顶部，
+      // 「帮助 → 接入主机示例」仍保留，方便从菜单进入。
+      isAdmin() ? enrollCard() : null,
       agentStatsCard(),
       state.hostErr ? h('div', { class: 'card' }, [h('div', { class: 'err', role: 'alert' }, [state.hostErr])]) : null,
       isAdmin() ? agentUpdateCard() : null,
@@ -1376,8 +1382,16 @@
   }
 
   function loadAgentStats() {
-    api('/api/agents/stats')
-      .then(function (d) { state.agentStats = d; render(); })
+    state.agentStatsAt = Date.now();
+    return api('/api/agents/stats')
+      .then(function (d) {
+        // 自动刷新时版本分布通常不变，避免每次轮询都重建 DOM。
+        var sig = JSON.stringify(d || null);
+        if (sig === state.agentStatsSig) return;
+        state.agentStatsSig = sig;
+        state.agentStats = d;
+        render();
+      })
       .catch(function () { state.agentStats = null; });
   }
 
@@ -4163,6 +4177,11 @@
     '设置': 'Settings', '修改密码': 'Change password', '退出': 'Sign out',
     '运维': 'Operations', '帮助': 'Help', '退出登录': 'Sign out',
     '📘 快速上手': '📘 Quick start', '🖥️ 接入主机示例': '🖥️ Enroll host example',
+    '接入主机示例': 'Enroll host example',
+    '接入主机（安装 Agent）': 'Enroll host (install agent)',
+    '生成接入命令': 'Generate enroll command',
+    '目标操作系统': 'Target OS', '目标机器架构': 'Target architecture',
+    '强制重新注册': 'Force re-enrollment',
     '外部文件代缓存': 'External binary cache', '系统设置': 'System settings',
     '用户管理': 'Users', '用户字段': 'User fields', '主机字段': 'Host fields',
     '主机字段定义': 'Host field definitions', '用户字段定义': 'User field definitions',
@@ -5759,8 +5778,12 @@
   var autoBusy = false;
   function loadHosts(page, quiet) {
     if (!quiet) state.view = 'hosts';
-    // 版本分布变化较慢：只在手动刷新/进入页面时拉取，避免自动刷新每 5 秒查询。
-    if (!quiet) loadAgentStats();
+    // 版本分布变化较慢：手动刷新/进入页面时立即拉取；自动刷新时默认 30 秒，
+    // 有 Agent 正在自升级时缩短到 10 秒，便于及时看到剩余旧版本数量。
+    var statsEvery = state.agentUpdateActive ? 10000 : 30000;
+    if (!quiet || !state.agentStatsAt || Date.now() - state.agentStatsAt >= statsEvery) {
+      loadAgentStats();
+    }
     // 主机自定义字段定义：列表列与编辑表单共用；只加载一次，失败后置空数组。
     if (state.hostFieldDefs === undefined) {
       state.hostFieldDefs = null;
@@ -5790,6 +5813,14 @@
         state.agentTargetVersion = d.agent_target_version || '';
         state.agentAutoUpdate = !!d.agent_auto_update;
         state.hostsLoading = false;
+        // 自升级刚结束：立即刷新一次版本分布，不必等下一个 10/30 秒周期。
+        var wasUpdating = state.agentUpdateActive;
+        var nowUpdating = (d.list || []).some(function (x) {
+          var s = x.agent_update_status;
+          return s === 'pending' || s === 'dispatched' || s === 'accepted' || s === 'running';
+        });
+        state.agentUpdateActive = nowUpdating;
+        if (wasUpdating && !nowUpdating) loadAgentStats();
         // 自动刷新成功后清除上一次“加载主机失败”提示；操作类错误（删除/保存失败）
         // 保留给用户查看，不被轮询无声清掉。手动刷新则统一清空。
         var hadLoadErr = state.hostErr.indexOf('加载主机失败') === 0;

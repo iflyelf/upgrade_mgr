@@ -245,7 +245,7 @@ func (a *Agent) register() error {
 		Arch:           a.info.Arch,
 		Kernel:         a.info.Kernel,
 		Supervisor:     a.info.Init,
-		AgentVersion:   "0.1.0",
+		AgentVersion:   a.cfg.Version,
 		BuildVersion:   a.cfg.Version,
 		BuildHash:      a.buildHash,
 		BuildVariant:   a.cfg.Variant,

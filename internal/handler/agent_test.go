@@ -276,3 +276,75 @@ func TestCleanAgentText(t *testing.T) {
 		t.Fatalf("非法 UTF-8 应被移除，got %q", got)
 	}
 }
+
+// TestAgentHeartbeatUpdatesBuildVersion 心跳必须把构建版本同步到
+// agents.agent_version / hosts.agent_version，否则版本分布会一直显示注册时的旧值。
+func TestAgentHeartbeatUpdatesBuildVersion(t *testing.T) {
+	db, sc := setupHostDB(t)
+	sc.Config = config.Default()
+	sc.AgentGW = agentgw.New(db)
+	sc.Settings = setting.NewService(db, sc.Config)
+
+	sfx := time.Now().UnixNano()
+	agentID := fmt.Sprintf("hb-version-%d", sfx)
+	token := fmt.Sprintf("hb-version-token-%d", sfx)
+	hostIP := fmt.Sprintf("stats-hb-%d", sfx)
+	var hostID int64
+	if err := db.QueryRow(`
+		INSERT INTO hosts (ip, hostname, agent_id, agent_version, tenant_id)
+		VALUES ($1,'hb-version',$2,'0.1.0',1) RETURNING id`, hostIP, agentID).Scan(&hostID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO agents (agent_id, host_id, ip, token_hash, secret, agent_version, status)
+		VALUES ($1,$2,$3,$4,'secret','0.1.0','online')`,
+		agentID, hostID, hostIP, agentgw.HashToken(token)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM agents WHERE agent_id=$1`, agentID)
+		db.Exec(`DELETE FROM hosts WHERE id=$1`, hostID)
+	})
+
+	hash := strings.Repeat("b", 64)
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/agent/heartbeat", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+agentID+":"+token)
+		rec := httptest.NewRecorder()
+		middleware.RequireAgentAuth(sc)(http.HandlerFunc(AgentHeartbeat(sc))).ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := call(`{"status":"online","build_version":"1.2.3","build_hash":"` + hash + `","build_variant":"legacy"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("心跳失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	var gotVersion, gotBuild, gotVariant string
+	if err := db.QueryRow(`SELECT agent_version, COALESCE(build_version,''), COALESCE(build_variant,'')
+		FROM agents WHERE agent_id=$1`, agentID).Scan(&gotVersion, &gotBuild, &gotVariant); err != nil {
+		t.Fatal(err)
+	}
+	if gotVersion != "1.2.3" || gotBuild != "1.2.3" || gotVariant != "legacy" {
+		t.Fatalf("agents 构建信息未同步: version=%q build=%q variant=%q", gotVersion, gotBuild, gotVariant)
+	}
+	var gotHostVersion, gotHostBuild string
+	if err := db.QueryRow(`SELECT agent_version, COALESCE(agent_build_version,'')
+		FROM hosts WHERE id=$1`, hostID).Scan(&gotHostVersion, &gotHostBuild); err != nil {
+		t.Fatal(err)
+	}
+	if gotHostVersion != "1.2.3" || gotHostBuild != "1.2.3" {
+		t.Fatalf("hosts 构建信息未同步: version=%q build=%q", gotHostVersion, gotHostBuild)
+	}
+
+	// 旧 Agent 不带构建字段时，不能被空值覆盖。
+	rec = call(`{"status":"online"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("旧格式心跳失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := db.QueryRow(`SELECT agent_version FROM agents WHERE agent_id=$1`, agentID).Scan(&gotVersion); err != nil {
+		t.Fatal(err)
+	}
+	if gotVersion != "1.2.3" {
+		t.Fatalf("空构建信息不应覆盖 agent_version，got %q", gotVersion)
+	}
+}
