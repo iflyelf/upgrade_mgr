@@ -541,10 +541,11 @@ func buildInstallCommand(safeURL, arch, token string, force bool, variant string
 		return cmd
 	}
 
-	// 自动检测：将内核版本作为 URL 参数传递，服务端自动选择对应构建
-	cmd := "rm -f /tmp/upgrade-agent \\\n" +
+	// 自动检测：先获取内核版本到变量，然后用双引号让 shell 展开变量
+	cmd := "KERNEL=$(uname -r) \\\n" +
+		"  && rm -f /tmp/upgrade-agent \\\n" +
 		"  && wget -c --tries=5 --timeout=30 --waitretry=5 -O /tmp/upgrade-agent \\\n" +
-		"  '" + safeURL + "/api/agent/binary/linux-" + arch + "?kernel=$(uname -r)' \\\n" +
+		"  \"" + safeURL + "/api/agent/binary/linux-" + arch + "?kernel=${KERNEL}\" \\\n" +
 		"  && chmod +x /tmp/upgrade-agent \\\n" +
 		"  && /tmp/upgrade-agent install --server '" + safeURL + "' --enroll-token '" + token + "'"
 	if force {

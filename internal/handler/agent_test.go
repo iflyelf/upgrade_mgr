@@ -20,16 +20,18 @@ func TestBuildInstallCommandRemovesStaleBinary(t *testing.T) {
 	cmd := buildInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", false, "")
 
 	// 验证基本结构
+	if !strings.Contains(cmd, "KERNEL=$(uname -r)") {
+		t.Fatalf("安装命令应先获取内核版本，got:\n%s", cmd)
+	}
 	if !strings.Contains(cmd, "rm -f /tmp/upgrade-agent") {
 		t.Fatalf("安装命令必须先删除旧二进制，got:\n%s", cmd)
 	}
-	// 验证 URL 包含内核参数
-	if !strings.Contains(cmd, "?kernel=$(uname -r)") {
-		t.Fatalf("安装命令应包含内核版本参数，got:\n%s", cmd)
+	// 验证 URL 使用双引号以便变量展开
+	if !strings.Contains(cmd, `"http://10.1.230.50:8090/api/agent/binary/linux-amd64?kernel=${KERNEL}"`) {
+		t.Fatalf("安装命令应使用双引号包裹 URL 并引用 KERNEL 变量，got:\n%s", cmd)
 	}
 	for _, want := range []string{
 		"wget -c",
-		"'http://10.1.230.50:8090/api/agent/binary/linux-amd64?kernel=$(uname -r)'",
 		"chmod +x /tmp/upgrade-agent",
 		"install --server 'http://10.1.230.50:8090' --enroll-token 'tok-123'",
 	} {
