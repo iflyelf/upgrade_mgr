@@ -65,6 +65,16 @@ func Check(statePath, binPath string, threshold time.Duration) error {
 		return fmt.Errorf("Agent 尚未注册，跳过看门狗（state 缺少 AgentID）")
 	}
 
+	// Agent 进程仍持有运行锁：进程存活，只是主循环在执行下载/长命令，暂时没有心跳。
+	// 此时既不能计入崩溃（会误触发回滚），也不能再拉起一个进程
+	// （否则新旧两个 Agent 用同一凭据交替心跳，控制台版本反复跳动）。
+	if agentRunning() {
+		if state.CrashCount > 0 {
+			updateState(statePath, 0, state.LastHeartbeat)
+		}
+		return nil
+	}
+
 	// 心跳新鲜 → 存活，重置崩溃计数
 	if time.Since(state.LastHeartbeat) < threshold {
 		if state.CrashCount > 0 {
@@ -99,6 +109,29 @@ func Check(statePath, binPath string, threshold time.Duration) error {
 		return fmt.Errorf("拉起失败: %w", err)
 	}
 	return nil
+}
+
+// runLockName Agent 常驻进程（run）持有的单实例锁。
+// 进程退出（含 exit(75) 自升级、崩溃、被杀）时由内核/系统自动释放。
+const runLockName = "agent.lock"
+
+// AcquireRunLock 获取 Agent 运行锁；ok=false 表示已有其他 Agent 进程在运行。
+func AcquireRunLock() (release func(), ok bool, err error) {
+	return acquireNamedLock(runLockName)
+}
+
+// agentRunning 运行锁被占用即说明有 Agent 进程存活。
+// 锁目录异常时返回 false，退回原有的心跳判断，不影响保活。
+func agentRunning() bool {
+	release, ok, err := acquireNamedLock(runLockName)
+	if err != nil {
+		return false
+	}
+	if !ok {
+		return true
+	}
+	release()
+	return false
 }
 
 // updateState 只修改 crash_count / last_heartbeat，保留完整凭据字段。

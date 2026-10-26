@@ -121,6 +121,11 @@ func runCmd() {
 	}
 
 	run := func(ctx context.Context) error {
+		release, err := waitRunLock(ctx)
+		if err != nil {
+			return nil // 等锁期间收到停止信号，属正常退出
+		}
+		defer release()
 		agent := agentrun.New(cfg)
 		return agent.Run(ctx)
 	}
@@ -147,6 +152,33 @@ func runCmd() {
 	log.Printf("upgrade-agent %s 启动", version)
 	if err := run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("运行失败: %v", err)
+	}
+}
+
+// waitRunLock 保证同一主机只有一个 Agent 常驻进程。
+//
+// 已有实例时阻塞等待而不是退出：systemd/upstart 下退出会触发 3 秒一次的重启风暴；
+// 旧实例退出（如自升级 exit(75)）后本进程立即接管。锁目录异常时不阻塞启动。
+func waitRunLock(ctx context.Context) (func(), error) {
+	logged := false
+	for {
+		release, ok, err := watchdog.AcquireRunLock()
+		if err != nil {
+			log.Printf("⚠️ 获取 Agent 运行锁失败（继续启动，无法防止重复实例）: %v", err)
+			return func() {}, nil
+		}
+		if ok {
+			return release, nil
+		}
+		if !logged {
+			log.Printf("已有 upgrade-agent 进程在运行，等待其退出后再启动")
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 

@@ -23,10 +23,17 @@ var lockDir = agentpath.LockDir()
 // 从而永久禁用 root Agent 的保活与崩溃回滚（拒绝服务 + 掩盖故障）。
 // 因此锁文件放在仅 root 可写的运行目录，并用 O_NOFOLLOW 阻断符号链接替换。
 func acquireLock() (release func(), ok bool, err error) {
-	lockPath, err := ensureLockPath()
+	return acquireNamedLock("watchdog.lock")
+}
+
+// acquireNamedLock 在锁目录下对指定文件加非阻塞排他锁。
+// Go 打开文件默认 O_CLOEXEC，Agent 拉起的脚本子进程不会继承锁。
+func acquireNamedLock(name string) (release func(), ok bool, err error) {
+	dir, err := ensureLockDir()
 	if err != nil {
 		return nil, false, err
 	}
+	lockPath := filepath.Join(dir, name)
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, false, fmt.Errorf("打开锁文件失败（疑似被替换为符号链接）: %w", err)
@@ -51,6 +58,15 @@ func detachProcess(cmd *exec.Cmd) {
 //
 // 若目录已存在但权限过宽（组/其他可写），主动收紧，避免非特权用户抢占锁。
 func ensureLockPath() (string, error) {
+	dir, err := ensureLockDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "watchdog.lock"), nil
+}
+
+// ensureLockDir 确保锁目录存在且仅 root 可写。
+func ensureLockDir() (string, error) {
 	if err := os.MkdirAll(lockDir, 0700); err != nil {
 		return "", fmt.Errorf("创建锁目录失败: %w", err)
 	}
@@ -61,5 +77,5 @@ func ensureLockPath() (string, error) {
 			}
 		}
 	}
-	return filepath.Join(lockDir, "watchdog.lock"), nil
+	return lockDir, nil
 }
