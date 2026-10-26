@@ -148,20 +148,6 @@ func TestExternalBinaryUploadRejectsHTML(t *testing.T) {
 	}
 }
 
-// TestProxyFallbackURL GitHub/raw 才生成代理回退地址。
-func TestProxyFallbackURL(t *testing.T) {
-	if got := proxyFallbackURL("https://github.com/a/b/releases/download/latest/x.exe"); got !=
-		"https://proxy.xiaonuo.live/?url=https://github.com/a/b/releases/download/latest/x.exe" {
-		t.Fatalf("github 回退地址不符: %s", got)
-	}
-	if got := proxyFallbackURL("https://raw.githubusercontent.com/a/b/main/x.ps1"); got == "" {
-		t.Fatal("raw 应生成回退地址")
-	}
-	if got := proxyFallbackURL("https://example.com/x.exe"); got != "" {
-		t.Fatalf("非 GitHub 不应回退: %s", got)
-	}
-}
-
 // TestExternalBinaryScriptServedWithBOM 脚本下载必须自带 UTF-8 BOM。
 //
 // Windows PowerShell 2.0 对无 BOM 的 .ps1 按系统 ANSI(GBK) 解码，含中文会报

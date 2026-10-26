@@ -895,7 +895,7 @@ consul:  # 可选：同步主机清单；编排器不依赖 Consul
 ```
 
 > **配置优先级**：运行期「设置页」写入的 `app_settings` > 环境变量 > 配置文件 > 内置默认值。
-> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_MAX_CONCURRENT_UPLOADS`、`ARTIFACT_LOCK_WAIT`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_MAX_CONCURRENT_UPLOADS`、`ARTIFACT_LOCK_WAIT`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`、`EXTERNAL_BINARY_PROXY`、`EXTERNAL_BINARY_PROXY_HOSTS`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
 
 **配置文件 vs 设置页**：绝大多数配置都能在「设置」页直接改，配置文件只用于首次启动的引导。
 分三类（页面上有对应标记）：
@@ -1354,8 +1354,11 @@ Server 2008 R2 的 PowerShell 2.0/CLR 2.0 不支持 TLS 1.2，无法直连 GitHu
 > **关键修复**：GitHub Release 资产会 302 到 `release-assets.githubusercontent.com`，
 > 旧版默认域名白名单没有它，平台会以「重定向目标被拒绝」返回 502。当前默认已包含
 > `release-assets.githubusercontent.com`、`github-releases.githubusercontent.com`、
-> `objects.githubusercontent.com`；直连失败时还会自动经 `proxy.xiaonuo.live` 重试一次。
-> 如果配置过 `server.external_binary_hosts`，请把上述域名一并加入，或留空使用默认值。
+> `objects.githubusercontent.com`；外部文件缓存默认先经
+> `https://proxy.xiaonuo.live/proxy?url=` 拉取，失败再直连兜底。
+> 可在「设置 → 外部文件代缓存」调整 `server.external_binary_proxy` /
+> `server.external_binary_proxy_hosts`；如果配置过 `server.external_binary_hosts`，
+> 请把上述域名一并加入，或留空使用默认值。
 
 组件健康检查与版本检查使用 PowerShell（与 Agent 的 Windows 解释器一致）：
 
@@ -2240,6 +2243,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 - **H5 移动端**：窄屏表格卡片化、`safe-area` 适配、16px 输入框防 iOS 缩放、主题色 meta 同步；320/390/768/1366 宽度实测无横向溢出。
 - **Agent 版本分布修复**：统计优先使用 `build_version`，旧 Agent 回退 `agent_version`；是否最新按目标二进制 SHA256 判断，并在注册/心跳时同步 `agent_version`，解决升级后仍显示 `0.1.0` 的问题。
 - **主机接入入口前置**：完整「接入主机（安装 Agent）」卡片重新放到主机页顶部，保留「帮助 → 接入主机示例」入口；空列表提示同步更新。
+- **外部文件缓存加速代理**：新增 `server.external_binary_proxy`（默认 `https://proxy.xiaonuo.live/proxy?url=`）与 `server.external_binary_proxy_hosts`。缓存下载、测试下载、刷新缓存均优先走代理，失败再直连兜底；内部镜像域名不在代理列表时保持直连，避免内网地址被发往公网代理。
 - **自动化注册令牌**：主机页新增「自动化令牌」页签，可生成永久或自定义到期令牌，支持最大次数、来源 CIDR、页面注销/轮换；一次性令牌 15 分钟/单次使用逻辑保持不变。迁移 030/031。
 - **验证**：`go vet ./...`、`go test -race -count=1 ./...`（真实 PostgreSQL 16）通过；Playwright 12/12（含移动端 `mobile.spec.js`）；两实例实测 A 保存后 B 在 5 秒内同步且 PID 不变。
 
@@ -2882,6 +2886,9 @@ MIT © iflyelf
   白名单为空时回退内置默认（windows_exporter amd64/arm64 + install.ps1），升级不断流。
 - 新增 `server.external_binary_hosts`（上游域名白名单，默认 github.com /
   raw.githubusercontent.com / proxy.xiaonuo.live）与 `server.external_binary_ttl`（默认 24h）。
+- 2026-10-26 起新增 `server.external_binary_proxy` / `server.external_binary_proxy_hosts`：
+  默认缓存下载先走 `https://proxy.xiaonuo.live/proxy?url=`，失败再直连兜底；
+  设置页可改代理地址/域名，留空代理地址表示完全直连。
 - SSRF 防护：只允许配置内名称、只允许白名单域名、拒绝解析到环回/私网/链路本地地址、
   200MB 上限、内容校验（exe 必须 MZ、脚本不能是 HTML）、同一文件并发下载串行化。
 - 设置页支持多行文本控件（`type: text`），白名单按行编辑；`Snapshot()` 深拷贝 map，

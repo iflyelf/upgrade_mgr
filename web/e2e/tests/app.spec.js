@@ -166,6 +166,9 @@ test('系统设置展示 Redis 缓存状态与操作入口', async ({ page }) =>
   await expect(lockWaitLabel).toBeVisible();
   await expect(uploadLabel).not.toContainText('需重启');
   await expect(lockWaitLabel).not.toContainText('需重启');
+  // 外部文件加速代理必须在页面可配置。
+  await expect(page.locator('label', { hasText: '(server.external_binary_proxy)' })).toBeVisible();
+  await expect(page.locator('label', { hasText: '(server.external_binary_proxy_hosts)' })).toBeVisible();
 });
 
 test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {

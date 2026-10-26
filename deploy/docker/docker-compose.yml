@@ -36,6 +36,8 @@ services:
       # - REDIS_PREFIX=upgrade_mgr:
       # - ARTIFACT_MAX_CONCURRENT_UPLOADS=4   # 每个上传占用一条 advisory lock 连接
       # - ARTIFACT_LOCK_WAIT=30m              # 跨副本同组件上传/删除锁等待上限
+      # - EXTERNAL_BINARY_PROXY=https://proxy.xiaonuo.live/proxy?url=
+      # - EXTERNAL_BINARY_PROXY_HOSTS=github.com,raw.githubusercontent.com
     networks:
       - upgrade-net
     depends_on:

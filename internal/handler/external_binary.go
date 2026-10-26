@@ -58,6 +58,36 @@ func effectiveExternalHosts(cfg *config.Config) []string {
 	return extbin.DefaultHosts
 }
 
+// effectiveExternalProxy 返回加速代理地址；空表示直连。
+func effectiveExternalProxy(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Server.ExternalBinaryProxy)
+}
+
+// effectiveExternalProxyHosts 返回走加速代理的上游域名；空表示不启用代理。
+func effectiveExternalProxyHosts(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Server.ExternalBinaryProxyHosts
+}
+
+// hostsWithProxyHost 把代理主机加入本次请求的域名白名单。
+//
+// 代理地址由管理员配置，属于受信出口；源站域名仍先用原白名单校验，
+// 代理请求本身不应因为漏配 proxy 域名而失败。
+func hostsWithProxyHost(hosts []string, proxyBase string) []string {
+	u, err := neturl.Parse(proxyBase)
+	if err != nil || u.Hostname() == "" {
+		return hosts
+	}
+	out := append([]string(nil), hosts...)
+	out = append(out, u.Hostname())
+	return out
+}
+
 // externalAllowRule 返回内网放行策略。
 //
 // 默认严格（拒绝内网）；内网镜像站通过 allow_private 或 allow_cidrs 显式放行。
@@ -183,7 +213,8 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 			// 同一文件并发请求只下载一次：锁只覆盖下载阶段，拿到后立即释放，
 			// 后续 ServeContent 流式输出不持锁（否则大文件会阻塞同文件的其它请求）。
 			if fetchErr := downloadWithLock(r.Context(), target, *asset,
-				effectiveExternalHosts(cfg), externalAllowRule(cfg), ttl); fetchErr != nil {
+				effectiveExternalHosts(cfg), externalAllowRule(cfg),
+				effectiveExternalProxy(cfg), effectiveExternalProxyHosts(cfg), ttl); fetchErr != nil {
 				log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
 				metrics.ExternalBinaryRequests.WithLabelValues(name, "error").Inc()
 				httpx.Fail(w, http.StatusBadGateway,
@@ -278,14 +309,14 @@ func freshFile(path string, ttl time.Duration) bool {
 //
 // 拿到锁后必须重新检查缓存：可能已有其它请求刚刚下载完成。
 func downloadWithLock(ctx context.Context, target string, asset extbin.Entry,
-	hosts []string, rule extbin.AllowRule, ttl time.Duration) error {
+	hosts []string, rule extbin.AllowRule, proxyBase string, proxyHosts []string, ttl time.Duration) error {
 	unlock := lockExternalTarget(target)
 	defer unlock()
 	if freshFile(target, ttl) {
 		return nil
 	}
 	start := time.Now()
-	err := fetchExternalBinary(ctx, asset.URL, target, asset.Script, hosts, rule)
+	err := fetchExternalBinary(ctx, asset.URL, target, asset.Script, hosts, rule, proxyBase, proxyHosts)
 	result := "success"
 	if err != nil {
 		result = "error"
@@ -297,36 +328,31 @@ func downloadWithLock(ctx context.Context, target string, asset extbin.Entry,
 
 // fetchExternalBinary 下载到临时文件再原子替换，避免并发/中断留下半个文件。
 //
+// 下载顺序：加速代理优先，失败后直连兜底。代理地址和代理域名由设置页配置；
+// 内网镜像不在 proxyHosts 内时保持直连，避免把内网地址发给公网代理。
 // hosts 是允许的上游域名白名单；下载前同时校验域名与目标 IP（拒绝内网），
 // 防止这项能力被当作 SSRF 跳板。
-func fetchExternalBinary(ctx context.Context, source, target string, script bool, hosts []string, rule extbin.AllowRule) error {
-	err := fetchExternalBinaryOnce(ctx, source, target, script, hosts, rule)
-	if err == nil {
-		return nil
-	}
-	// 国内网络兜底：GitHub/raw 直连失败时，自动经 proxy.xiaonuo.live 重试一次。
-	alt := proxyFallbackURL(source)
-	if alt == "" {
+func fetchExternalBinary(ctx context.Context, source, target string, script bool, hosts []string,
+	rule extbin.AllowRule, proxyBase string, proxyHosts []string) error {
+	if err := extbin.CheckHost(source, hosts, rule); err != nil {
 		return err
 	}
-	if altErr := fetchExternalBinaryOnce(ctx, alt, target, script, hosts, rule); altErr != nil {
-		return fmt.Errorf("%v；经 proxy.xiaonuo.live 重试仍失败: %v", err, altErr)
+	proxied, viaProxy := extbin.ProxyURL(source, proxyBase, proxyHosts)
+	if !viaProxy {
+		return fetchExternalBinaryOnce(ctx, source, target, script, hosts, rule)
 	}
-	return nil
-}
 
-// proxyFallbackURL 为 GitHub/raw 地址生成代理回退地址。
-func proxyFallbackURL(source string) string {
-	u, err := neturl.Parse(source)
-	if err != nil {
-		return ""
+	proxyErr := fetchExternalBinaryOnce(ctx, proxied, target, script,
+		hostsWithProxyHost(hosts, proxyBase), rule)
+	if proxyErr == nil {
+		return nil
 	}
-	switch strings.ToLower(u.Hostname()) {
-	case "github.com", "raw.githubusercontent.com":
-		return "https://proxy.xiaonuo.live/?url=" + u.String()
-	default:
-		return ""
+	// 代理不可用时仍保留直连兜底；国内通常直连也会失败，但海外/专线环境可用。
+	if directErr := fetchExternalBinaryOnce(ctx, source, target, script, hosts, rule); directErr != nil {
+		return fmt.Errorf("经加速代理下载失败: %v；直连兜底也失败: %v", proxyErr, directErr)
 	}
+	log.Printf("⚠️ 加速代理下载失败，已直连兜底 %s: %v", source, proxyErr)
+	return nil
 }
 
 func fetchExternalBinaryOnce(ctx context.Context, source, target string, script bool, hosts []string, rule extbin.AllowRule) error {

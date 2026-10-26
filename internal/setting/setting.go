@@ -486,6 +486,25 @@ var Registry = []Item{
 			}
 			c.Server.ExternalBinaryHosts = splitComma(v)
 		}},
+	{Key: "server.external_binary_proxy", Group: "外部文件代缓存",
+		Label:    "加速代理地址（留空直连；默认 https://proxy.xiaonuo.live/proxy?url=）",
+		Type:     "string",
+		Get:      func(c *config.Config) string { return c.Server.ExternalBinaryProxy },
+		Set:      func(c *config.Config, v string) { c.Server.ExternalBinaryProxy = strings.TrimSpace(v) },
+		Validate: validateHTTPURL,
+		Note:     "默认先走加速代理拉取 GitHub/raw，失败再直连兜底；留空表示完全直连。"},
+	{Key: "server.external_binary_proxy_hosts", Group: "外部文件代缓存",
+		Label: "走加速代理的上游域名（逗号分隔；留空不启用代理）",
+		Type:  "string",
+		Get:   func(c *config.Config) string { return strings.Join(c.Server.ExternalBinaryProxyHosts, ",") },
+		Set: func(c *config.Config, v string) {
+			if strings.TrimSpace(v) == "" {
+				c.Server.ExternalBinaryProxyHosts = nil
+				return
+			}
+			c.Server.ExternalBinaryProxyHosts = splitComma(v)
+		},
+		Note: "默认 github.com/raw.githubusercontent.com 及 GitHub Release 资产域名；内网镜像不要加入。"},
 	{Key: "server.external_binary_allow_private", Group: "外部文件代缓存",
 		Label: "允许访问内网/环回地址（内网镜像站需要；建议优先用“放行网段”精确放开）", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Server.ExternalBinaryAllowPrivate) },
