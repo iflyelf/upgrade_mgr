@@ -22,10 +22,15 @@ var lockDir = agentpath.LockDir()
 // Windows 没有 flock；以共享模式 0 打开锁文件，其他进程再次打开会得到
 // ERROR_SHARING_VIOLATION，效果等同于非阻塞排他锁。句柄关闭即释放。
 func acquireLock() (release func(), ok bool, err error) {
-	lockPath, err := ensureLockPath()
-	if err != nil {
-		return nil, false, err
+	return acquireNamedLock("watchdog.lock")
+}
+
+// acquireNamedLock 在锁目录下独占打开指定文件，效果等同非阻塞排他锁。
+func acquireNamedLock(name string) (release func(), ok bool, err error) {
+	if err := os.MkdirAll(lockDir, 0700); err != nil {
+		return nil, false, fmt.Errorf("创建锁目录失败: %w", err)
 	}
+	lockPath := filepath.Join(lockDir, name)
 	p, err := windows.UTF16PtrFromString(lockPath)
 	if err != nil {
 		return nil, false, err
