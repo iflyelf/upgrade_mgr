@@ -209,9 +209,9 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 		_ = s.DB.QueryRowContext(r.Context(), `UPDATE hosts SET last_seen=NOW(),
 			agent_status=CASE WHEN maintenance_until IS NOT NULL AND maintenance_until>NOW() THEN agent_status ELSE $2 END,
 			agent_version=CASE WHEN $3<>'' THEN $3 ELSE agent_version END,
-			agent_build_version=CASE WHEN $4<>'' THEN $3 ELSE agent_build_version END,
+			agent_build_version=CASE WHEN $3<>'' THEN $3 ELSE agent_build_version END,
 			agent_build_hash=CASE WHEN $4<>'' THEN $4 ELSE agent_build_hash END,
-			agent_build_variant=CASE WHEN $4<>'' THEN $5 ELSE agent_build_variant END,
+			agent_build_variant=CASE WHEN $3<>'' THEN $5 ELSE agent_build_variant END,
 			exit_ip=CASE WHEN $6<>'' THEN $6 ELSE exit_ip END,
 			agent_server_url=CASE WHEN $7<>'' THEN $7 ELSE agent_server_url END,
 			agent_default_server_url=CASE WHEN $8<>'' THEN $8 ELSE agent_default_server_url END
