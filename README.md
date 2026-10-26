@@ -13,7 +13,7 @@
 - 主机清单本地化（事实来源为 `hosts` 表），Consul 为可选同步来源（含业务分组 account/app_code/group…）
 - Consul 同步自动清理已移除的纯 Consul 主机（有 Agent/未完成任务时保留；部分或空清单自动跳过）
 - 可切换认证：内置 bcrypt 账号（默认）/ FlyIAM-Casdoor SSO
-- 页面设置化（DB 优先 / env 兜底），改动即时生效
+- 页面设置化（DB 优先 / env 兜底）；多数配置即时生效，启动期绑定项标记为需重启
 - IP 段表达式解析：`10.1.255.24-26,10.1.255.38,10.1.255.0/24,10.1.26.5-10.1.26.7`（含排除、展开上限）
 - 直接 exec 命令执行器（无 shell，防注入）；HMAC 指令签名；sd_notify 僵死检测（供 Agent 保活）
 - 三主题（🌞暖沙米/🌊冷蓝/🌙暗黑）+ Mac 圆角 + H5 自适应，前端 `go:embed` 内嵌单二进制
@@ -48,6 +48,9 @@
   租户隔离查询，支持 admin/user/viewer 角色权限控制
 - **分布式编排器**：基于 PostgreSQL advisory lock，多控制台实例安全并行（每轮仅一个副本推进批次，自动故障转移）；单机与多副本共用同一逻辑，不依赖 Consul
 - **制品外部存储**：抽象 Backend 接口，支持本地/S3(MinIO)/阿里云 OSS 可切换，预签名 URL 下载
+- **制品并行上传与一致性**：组件共享锁 + 制品身份独占锁，不同版本/架构/OS 可并行上传；删除/清空组件持独占锁，等待在途上传并阻止新写入；PostgreSQL advisory lock 保证多副本互斥
+- **运行时配置热更新**：`artifact.max_concurrent_uploads` / `artifact.lock_wait` 页面保存后当前副本立即生效，其他副本约 5 秒内自动同步；连接池按“并发上传数 + 4”自动抬高
+- **安全加固**：写请求 CSRF Origin/Referer 校验、CSP/HSTS/no-store 安全头、Redis 缓存仅成功写后失效、Agent 注册令牌事务化消费与租户绑定、RBAC 防提权、用户扩展字段跨租户隔离、主机字段定义写操作收紧、本地上传临时文件 + fsync + 原子 rename
 
 **P6 数据库自动化**
 - **自动创建**：首次启动自动创建所有表结构，无需手动执行 SQL
@@ -457,6 +460,8 @@ auth:
 artifact:
   dir: /data/artifacts
   storage_type: local
+  max_concurrent_uploads: 4   # 本实例并发上传上限（1-64）
+  lock_wait: 30m              # 跨副本上传/删除同组件制品的锁等待上限
 
 # 可选：Redis 页面缓存（只读 API），也可在「设置 → Redis 缓存」启用并热加载
 # 不可用时自动降级为直连 PostgreSQL，不影响启动与业务
@@ -872,6 +877,8 @@ casdoor:
 artifact:
   dir: /data/artifacts
   storage_type: local  # local/s3/oss
+  max_concurrent_uploads: 4   # 1-64；每个上传占用 1 条 advisory lock 连接
+  lock_wait: 30m              # 跨副本上传/删除锁等待上限（1s-24h）
 
 agent:
   poll_hold: 20
@@ -888,13 +895,14 @@ consul:  # 可选：同步主机清单；编排器不依赖 Consul
 ```
 
 > **配置优先级**：运行期「设置页」写入的 `app_settings` > 环境变量 > 配置文件 > 内置默认值。
-> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_MAX_CONCURRENT_UPLOADS`、`ARTIFACT_LOCK_WAIT`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
 
 **配置文件 vs 设置页**：绝大多数配置都能在「设置」页直接改，配置文件只用于首次启动的引导。
 分三类（页面上有对应标记）：
 
 | 类别 | 页面标记 | 典型项 | 说明 |
 |---|---|---|---|
+| 保存即生效（多副本自动同步） | 无 | `artifact.max_concurrent_uploads`、`artifact.lock_wait` | 当前副本立即热更新；其他副本约 5 秒内轮询 DB 自动同步，无需重启 |
 | 保存即生效 | 无 | `server.external_url`、`consul.*`、`redis.*`、`agent.*`、`consul_mgr.*`、`flyiam.*`、外部文件白名单 | 保存后立即作用于当前副本；Consul/Redis 会自动重建连接 |
 | 保存后需重启 | 🔴 需重启 | 监听地址/端口、`trust_proxy`、`cookie_secure`、`metrics_token`、`session_secret`、认证方式、Casdoor、制品后端 | 这些值在启动时被绑定到中间件/连接池/认证提供方上，改内存不影响已建对象 |
 | 只读展示 | 灰色 只读 | `database.*` | 启动顺序是「先连库 → 再读设置」，数据库参数不可能由页面提供，只展示当前生效值 |
@@ -1782,6 +1790,8 @@ API 创建示例：
 | **原子升级（replace）** | 备份→停服→替换→启服→健康检查，失败自动回滚；script 模式由安装脚本自行处理备份/回滚 |
 | **崩溃自愈** | Watchdog 心跳检测，连续崩溃自动回滚旧版本 |
 | **断点续传** | 制品下载支持 HTTP Range，大文件续传节省带宽 |
+| **制品并行上传** | 组件共享锁 + 制品身份独占锁，不同制品并行；删除/清空组件与上传互斥；跨副本 PostgreSQL advisory lock |
+| **配置热更新** | 制品上传并发/锁等待保存即生效，多副本约 5 秒同步；连接池按上传并发数自适应 |
 | **零依赖** | 静态编译单二进制，无 Python/Ruby 依赖 |
 
 ### 数据模型
@@ -1851,6 +1861,15 @@ GET /api/artifacts?component_id=1      # 列出制品
 POST /api/artifacts                     # 上传制品（multipart/form-data）
 GET /api/artifacts/{id}/download        # 下载制品（支持 Range）
 ```
+
+上传并发与锁模型：
+
+- 每个副本最多同时处理 `artifact.max_concurrent_uploads` 个上传（默认 4，范围 1-64）；槽位在解析 multipart 前获取，避免排队请求先写满临时文件。
+- 上传持「组件共享锁 + 制品身份独占锁」：同组件不同制品可并行，同一 `component/version/arch/os` 仍串行，避免文件与 MD5/SHA256 元数据错配。
+- 删除/清空组件持组件独占锁：等待在途上传完成并阻止新上传，避免删完又被写回。
+- 跨副本通过 PostgreSQL advisory lock 互斥，锁等待上限 `artifact.lock_wait`（默认 30m，范围 1s-24h）。
+- 每个并发上传占用 1 条数据库连接；`database.max_open_conns` 会自动抬到至少“并发上传数 + 4”。
+- 存储路径为 `<component_id>/<version>-<os_family>-<arch>/<filename>`；OS 维度参与路径，避免不同系统同名文件互相覆盖。
 
 ### 任务管理
 
@@ -1988,10 +2007,11 @@ histogram_quantile(0.95, rate(upgrade_mgr_agents_heartbeat_lag_seconds_bucket[5m
 1. **HTTPS 强制**：生产环境务必配置 Nginx HTTPS，避免 token 明文传输
 2. **网络隔离**：控制台与 Agent 通信走内网，避免公网暴露
 3. **强密码**：修改默认管理员密码，显式配置 32+ 字节随机 `session_secret`（留空会生成并持久化到数据库）
-4. **注册令牌**：生产环境开启 `require_enroll_token`，防止未授权 Agent 注册
+4. **注册令牌**：生产环境开启 `require_enroll_token`；令牌一次性消费、按租户绑定，防止未授权 Agent 注册或跨租户注册
 5. **最小权限**：数据库用户仅授予必要权限，避免使用 superuser
 6. **审计日志**：定期检查 `audit_logs` 表，监控敏感操作
 7. **备份恢复**：每日备份数据库，定期演练恢复流程
+8. **反向代理一致性**：写请求会校验 Origin/Referer；反向代理必须保留原始 Host，并正确配置 `server.external_url` / `server.cors_origins`
 
 ---
 
@@ -2053,7 +2073,7 @@ ldd your-binary  # 应为静态链接（not a dynamic executable）
 | 制品存储 | `artifact.storage_type: s3` 或 `oss`；或所有副本挂载同一个 RWX 共享目录 | 默认 `local` 写在容器本地盘，上传和下载命中不同副本会 404 |
 | 编排器 | 无需额外配置；数据库连接可用即可 | PostgreSQL advisory lock 自动保证同一时刻只有一个副本推进批次 |
 | Agent 二进制 | 使用镜像内置的 `/opt/upgrade-mgr/dist/upgrade-agent-linux-<arch>`，或共享 `agent_binary_dir`；接 Windows 主机还需放入 `upgrade-agent-windows-<arch>.exe` | 一键安装命令需要从服务端目录读取二进制，缺失对应平台文件会 404 |
-| 连接池 | `database.max_open_conns` 至少 4（默认 50；小于 4 时自动调整，建议 10+） | 编排器、维护、Consul 同步各自可能持锁并同时查询 |
+| 连接池 | `database.max_open_conns` 应 ≥ `artifact.max_concurrent_uploads + 4`（上传并发默认 4，即下限 8；配置值更小时启动/热更新会自动抬高，建议 10+） | 每个并发上传持有一条 advisory lock 连接；编排器、维护、Consul 同步也需要连接 |
 
 推荐配置：
 
@@ -2062,6 +2082,8 @@ server:
   session_secret: "所有副本一致的 32+ 字节随机串"  # 也可留空，由 DB 持久化共享
 artifact:
   storage_type: s3          # 或 oss；尽量不用 local
+  max_concurrent_uploads: 4
+  lock_wait: 30m
   s3_endpoint: obs.cn-east-3.myhuaweicloud.com
   s3_region: cn-east-3
   s3_bucket: upgrade-mgr
@@ -2108,7 +2130,7 @@ kubectl -n upgrade-mgr rollout status deployment/upgrade-mgr
 
 ### 变更后滚动重启所有副本
 
-**推荐路径：设置页修改 → 滚动重启。** 设置页会把值写入数据库并只立即更新当前副本内存；滚动重启后所有副本在启动时重新加载 `app_settings`，最终一致。
+**推荐路径：设置页修改 → 滚动重启。** 除制品上传运行时配置外，设置页会把值写入数据库并只立即更新当前副本内存；滚动重启后所有副本在启动时重新加载 `app_settings`，最终一致。制品上传并发/锁等待已支持跨副本自动同步：当前副本立即生效，其他副本约 5 秒内同步，无需重启。
 
 ```bash
 kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
@@ -2138,6 +2160,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 ### 启动后确认
 
 - 所有副本日志出现 `✅ 灰度编排器已启动（PostgreSQL advisory lock，单机/多副本通用）`。
+- 所有副本日志出现 `ℹ️ 制品上传配置: 并发上限=4，跨副本锁等待=30m0s`；页面保存后当前副本会输出 `🔄 制品上传配置已热更新`，其他副本会输出 `🔄 已同步其他副本的制品上传配置`。
 - 确认制品后端没有出现“降级为 local”告警；多副本使用本地盘会导致上传/下载命中不同副本时 404。
 - `GET /ready` 返回 200 且 `{"status":"ready"}`；`GET /health` 只表示进程存活。
 - 多副本下任意副本被终止，其他副本下一轮会自动抢到编排锁，任务继续推进。
@@ -2145,7 +2168,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 ### 副本间不一致的点（可接受但需知悉）
 
-- **设置页不是跨副本热更新**：修改只写入当前副本内存和数据库，其他副本不会重新加载；多副本请改完后滚动重启全部副本。
+- **设置页跨副本热更新仅覆盖制品上传运行时配置**：`artifact.max_concurrent_uploads` / `artifact.lock_wait` 由各副本约 5 秒轮询 DB 自动同步；其余设置仍只更新当前副本内存和数据库，多副本请改完后滚动重启全部副本。
 - **限流是进程内内存**：每个副本各算一份，N 个副本的实际阈值约为 N 倍；公网建议在 Ingress/WAF 做全局限流。
 - **指标按副本独立**：Prometheus 需要抓取所有 Pod/容器，不能只抓一个。
 - **会话撤销有最多 30 秒本地缓存**：改密/禁用后，其他副本最迟约 30 秒后拒绝旧会话。
@@ -2170,11 +2193,26 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 2. **多实例部署**：编排器已改为 PostgreSQL advisory lock，不再依赖 Consul Leader；多副本需共享数据库、共享/对象制品存储，并建议使用一致的 `SESSION_SECRET`，见「容器水平扩展（多副本）与滚动重启」。
 
-3. **配置热更新**：设置页只对当前副本即时生效（同时写入 DB）；多副本需在修改后滚动重启全部副本。`app_settings` 优先级高于 YAML/环境变量，切回配置文件前需清理对应 DB 行。部分配置（如认证方式、制品目录）本来就需要重启。
+3. **配置热更新**：`artifact.max_concurrent_uploads` / `artifact.lock_wait` 支持跨副本约 5 秒自动同步，保存后无需重启；其余设置页项只对当前副本即时生效（同时写入 DB），多副本需在修改后滚动重启全部副本。`app_settings` 优先级高于 YAML/环境变量，切回配置文件前需清理对应 DB 行。部分配置（如认证方式、制品目录）本来就需要重启。
 
 4. **制品下载认证**：当前制品下载端点需 Agent Bearer 认证，匿名下载已禁用。
 
 5. **CentOS 6 兼容性**：legacy Agent 已用 Go 1.23 编译并通过单测，但尚未在真实 CentOS 6 主机实测；Go 1.23 已停止安全维护。
+
+6. **制品上传锁等待与连接占用**：等待跨副本锁最长 `artifact.lock_wait`（默认 30m）；每个并发上传持有一条 PostgreSQL 连接，连接池会按“上传并发数 + 4”自动抬高，但不应超过 PostgreSQL `max_connections`。
+
+7. **旧制品路径兼容**：新上传路径包含 `os_family` 维度；历史制品仍按数据库中的原路径下载，不会被自动迁移。同一身份重新上传后会改用新路径，旧对象可能成为孤儿文件，建议后续增加清理任务。
+
+### 2026-10-26 安全加固、制品并行上传与配置热更新
+
+- **制品并行上传**：上传改为「组件共享锁 + 制品身份独占锁」。同一组件下不同版本/架构/OS 的制品可并行，同一 `component/version/arch/os` 仍串行；删除/清空组件持独占锁，等待在途上传并阻止新写入。跨副本仍由 PostgreSQL advisory lock 保证互斥。
+- **存储路径唯一性**：路径改为 `<component>/<version>-<os>-<arch>/<filename>`，把 `os_family` 纳入目录，避免并行上传时不同系统同名文件互相覆盖。
+- **运行时热更新**：`artifact.max_concurrent_uploads`（默认 4，1-64）与 `artifact.lock_wait`（默认 30m，1s-24h）页面保存后当前副本立即生效；其他副本约 5 秒内轮询 DB 自动同步，无需重启。
+- **连接池自适应**：启动时与热更新后自动保证 `database.max_open_conns >= artifact.max_concurrent_uploads + 4`；下调上传并发后按新的“上传数 + 4”重新计算，不会无限增长。
+- **设置原子保存**：一次保存多个设置改为单事务，全部成功才提交，提交后一次性更新内存；任一项失败整批回滚，避免部分生效。
+- **安全加固**：写请求 CSRF Origin/Referer 校验、CSP/HSTS/no-store 安全响应头、Redis 缓存仅在成功写请求后失效、Agent 注册事务化与 enroll token 原子消费、RBAC 防提权、用户扩展字段跨租户隔离、主机字段定义写操作收紧、本地上传临时文件 + fsync + 原子 rename、Agent 安装器参数与文件名路径穿越修复。
+- **H5 移动端**：窄屏表格卡片化、`safe-area` 适配、16px 输入框防 iOS 缩放、主题色 meta 同步；320/390/768/1366 宽度实测无横向溢出。
+- **验证**：`go vet ./...`、`go test -race -count=1 ./...`（真实 PostgreSQL 16）通过；Playwright 10/10（含移动端 `mobile.spec.js`）；两实例实测 A 保存后 B 在 5 秒内同步且 PID 不变。
 
 ### 2026-10-23 隧道自检自动化与主机侧回连
 
@@ -2395,6 +2433,7 @@ scripts/      工具脚本
 
 ## 进度
 
+- [x] **P8**：安全加固、制品并行上传、运行时配置热更新、设置原子保存、H5 移动端完善
 - [x] **P7**：Windows Agent（Server 2008 R2 ~ Windows 11，amd64/arm64）：SCM 服务宿主与安装/卸载、失败自动重启、计划任务看门狗、PowerShell/cmd 脚本执行、Windows 自升级（`.old` 让位 + exit 75）、服务端 OS 维度二进制解析与接入命令、CI 与发布打包
 - [x] **P0**：骨架、配置分层、独立启动、PG schema、IP 解析、Consul 可选同步、内置认证、三主题内嵌前端
 - [x] **P1**：协议定义、Agent 核心包、Agent 主循环（注册/心跳/poll）、服务端 Agent 网关 API
