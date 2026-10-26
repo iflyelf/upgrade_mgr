@@ -53,7 +53,9 @@
     compQ: '', compPage: 1, compSize: 50,
     artifactQ: '', artifactFilterComp: '', artifactPage: 1, artifactSize: 50,
     artifactPages: 1, artifactTotal: 0,
-    guideOpen: null, guideOS: '', quickstart: undefined, quickstartErr: '', enroll: null, preview: null, editingComp: null, taskForm: null, uploadComponent: '',
+    guideOpen: null, guideOS: '', quickstart: undefined, quickstartErr: '', enroll: null,
+    enrollMode: 'one_time', automationList: null, automationErr: '', automationLoading: false, automationCreated: null,
+    preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
     taskDetailOpenLogs: {},
@@ -1792,9 +1794,42 @@
     });
   }
 
-  // enrollCard 生成一次性接入命令，主机执行后自动注册到列表。
+  // enrollCard 包含两种接入令牌：
+  //   - 一次性令牌：保持原有 15 分钟、单次使用、每台机器一个；
+  //   - 自动化令牌：给自动化平台使用，可永久/自定义到期，可限制次数/CIDR，可注销。
   function enrollCard() {
+    var mode = state.enrollMode || 'one_time';
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['接入主机（安装 Agent）']),
+      h('div', { class: 'tabs', role: 'tablist', style: 'margin-bottom:12px' }, [
+        enrollModeTab('one_time', '一次性令牌'),
+        enrollModeTab('automation', '自动化令牌')
+      ]),
+      mode === 'automation' ? automationEnrollBody() : oneTimeEnrollBody()
+    ]);
+  }
+
+  function enrollModeTab(mode, label) {
+    return h('div', {
+      class: 'tab' + (state.enrollMode === mode ? ' active' : ''),
+      role: 'tab', tabindex: '0', 'aria-selected': state.enrollMode === mode ? 'true' : 'false',
+      onclick: function () { setEnrollMode(mode); },
+      onkeydown: function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEnrollMode(mode); }
+      }
+    }, [label]);
+  }
+
+  function setEnrollMode(mode) {
+    state.enrollMode = mode;
+    state.automationErr = '';
+    if (mode === 'automation' && state.automationList === null) loadAutomationTokens();
+    render();
+  }
+
+  function oneTimeEnrollBody() {
     var e = state.enroll;
+    var forceEl = h('input', { type: 'checkbox', checked: !!(e && e.force) }, []);
     var osEl = h('select', { value: (e && e.os) || 'linux' },
       AGENT_OS.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
     var curOS = (e && e.os) || 'linux';
@@ -1808,9 +1843,7 @@
       state.enroll = { os: next, arch: arch, force: forceEl.checked, err: '' };
       render();
     };
-    var forceEl = h('input', { type: 'checkbox', checked: !!(e && e.force) }, []);
-    return h('div', { class: 'card' }, [
-      h('h3', {}, ['接入主机（安装 Agent）']),
+    return h('div', {}, [
       hint('主机信息来自 Agent 注册：IP 取服务端看到的来源地址，主机名、OS、架构、init 系统由 Agent 上报。所以装好客户端，主机就会带着 IP 出现在列表里。'),
       field('目标操作系统', osEl, 'Windows 支持 Server 2008 R2 ~ Windows 11（amd64/arm64）；Windows 安装命令需在“管理员 PowerShell”中执行。'),
       field('目标机器架构', archEl, 'Linux 上执行 uname -m：x86_64 选 amd64，aarch64 选 arm64。Windows 绝大多数为 amd64；arm64 仅用于 Windows on ARM。镜像里默认只带构建架构的 Agent，选其他架构下载可能 404。'),
@@ -1838,6 +1871,186 @@
         hint('目标机已注册时，普通命令会保留原身份（本次令牌不会被使用）；需要覆盖重注册请勾选“强制重新注册”后重新生成。')
       ]) : null
     ]);
+  }
+
+  function automationEnrollBody() {
+    var created = state.automationCreated;
+    var nameEl = h('input', { placeholder: 'prod-ops-automation' }, []);
+    var expiryEl = h('select', { value: 'permanent' }, [
+      h('option', { value: 'permanent' }, ['永久有效']),
+      h('option', { value: '24h' }, ['24 小时']),
+      h('option', { value: '168h' }, ['7 天']),
+      h('option', { value: '720h' }, ['30 天']),
+      h('option', { value: '2160h' }, ['90 天']),
+      h('option', { value: 'custom' }, ['自定义时间'])
+    ]);
+    var customEl = h('input', { type: 'datetime-local' }, []);
+    var customField = field('自定义到期时间', customEl, '使用浏览器本地时间；提交时转换为带时区的 RFC3339。');
+    customField.style.display = 'none';
+    expiryEl.onchange = function () {
+      customField.style.display = expiryEl.value === 'custom' ? '' : 'none';
+    };
+    var maxUsesEl = h('input', { type: 'number', min: '0', step: '1', value: '0' }, []);
+    var cidrEl = h('input', { placeholder: '10.0.0.0/8,192.168.1.0/24' }, []);
+    var osEl = h('select', { value: 'linux' },
+      AGENT_OS.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
+    var archEl = h('select', { value: 'amd64' }, archOptions('linux'));
+    osEl.onchange = function () {
+      var next = osEl.value;
+      var keep = archEl.value;
+      var allowed = (AGENT_ARCHES[next] || []).map(function (a) { return a[0]; });
+      archEl.innerHTML = '';
+      archOptions(next).forEach(function (o) { archEl.appendChild(o); });
+      archEl.value = allowed.indexOf(keep) >= 0 ? keep : 'amd64';
+    };
+    var forceEl = h('input', { type: 'checkbox' }, []);
+
+    var createdBlock = created ? h('div', { class: 'field' }, [
+      hint('自动化令牌已生成（仅显示一次，请立即复制到自动化平台）：'),
+      codeBlock(created.token),
+      created.install_command ? hint('安装命令示例（token 已嵌入）：') : null,
+      created.install_command ? codeBlock(created.install_command) : null,
+      created.expires_at ? hint('到期时间：' + fmtTime(created.expires_at)) : hint('永久有效：不会自动过期，请妥善保管并定期轮换。'),
+      h('button', { type: 'button', class: 'btn ghost small', onclick: function () { state.automationCreated = null; render(); } }, ['关闭提示'])
+    ]) : null;
+
+    var list = state.automationList;
+    var listBlock;
+    if (state.automationLoading) {
+      listBlock = hint('加载中…');
+    } else if (state.automationErr) {
+      listBlock = h('div', { class: 'err', role: 'alert' }, [state.automationErr]);
+    } else if (!list || !list.length) {
+      listBlock = hint('暂无自动化令牌。');
+    } else {
+      listBlock = simpleTable(['名称', 'Token', '租户', '到期', '已用 / 上限', '最后使用', '状态', '操作'], list,
+        function (x) {
+          var status = x.status || (x.enabled ? 'active' : 'revoked');
+          var statusText = { active: '启用', revoked: '已注销', expired: '已过期', exhausted: '已达上限' }[status] || status;
+          var usage = x.max_uses ? x.used_count + ' / ' + x.max_uses : x.used_count + ' / 不限';
+          return [
+            x.name || '-',
+            (x.token_prefix || '-') + '…',
+            String(x.tenant_id || ''),
+            x.expires_at ? fmtTime(x.expires_at) : '永久',
+            usage,
+            x.last_used_at ? fmtTime(x.last_used_at) + (x.last_used_ip ? ' · ' + x.last_used_ip : '') : '-',
+            h('span', { class: 'tag' + (status === 'active' ? ' status-success' : ' status-failed') }, [statusText]),
+            h('div', { class: 'row-actions' }, [
+              x.enabled ? h('button', {
+                type: 'button', class: 'btn ghost small',
+                onclick: function () { revokeAutomationToken(x); }
+              }, ['注销']) : null,
+              x.enabled ? h('button', {
+                type: 'button', class: 'btn ghost small',
+                onclick: function () { rotateAutomationToken(x, osEl.value, archEl.value, forceEl.checked); }
+              }, ['轮换']) : null
+            ])
+          ];
+        });
+    }
+
+    return h('div', {}, [
+      createdBlock,
+      hint('自动化令牌给自动化平台使用：可永久或自定义到期，可限制使用次数和来源 CIDR。注销只阻止新主机注册，不影响已运行 Agent。'),
+      field('令牌名称', nameEl, '用于区分不同自动化平台/环境，例如 prod-ops-automation。'),
+      field('有效期', expiryEl, '永久有效不会自动过期；也可选择固定时长或自定义日期时间。'),
+      customField,
+      field('最大使用次数（0=不限）', maxUsesEl, '达到上限后令牌自动失效；永久令牌建议至少设置来源 CIDR。'),
+      field('IP/CIDR 白名单（可选）', cidrEl, '逗号分隔，例如 10.0.0.0/8,192.168.1.0/24；为空表示不限制来源 IP。'),
+      field('安装命令目标系统', osEl, '令牌本身与操作系统无关；这里只影响生成的安装命令示例。'),
+      field('安装命令架构', archEl, '仅用于生成安装命令示例，不会限制令牌本身。'),
+      field('强制重新注册', forceEl, '安装命令是否带 --force；普通接入不要勾选。'),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          type: 'button', class: 'btn', onclick: function () {
+            var maxUses = parseInt(maxUsesEl.value, 10);
+            if (isNaN(maxUses) || maxUses < 0) {
+              alert('最大使用次数需为 0 或正整数');
+              return;
+            }
+            var payload = {
+              name: nameEl.value,
+              max_uses: maxUses,
+              allowed_cidrs: cidrEl.value.split(',').map(function (v) { return v.trim(); }).filter(Boolean),
+              os: osEl.value,
+              arch: archEl.value,
+              force: forceEl.checked
+            };
+            if (expiryEl.value === 'permanent') {
+              payload.permanent = true;
+            } else if (expiryEl.value === 'custom') {
+              if (!customEl.value) { alert('请选择自定义到期时间'); return; }
+              var dt = new Date(customEl.value);
+              if (isNaN(dt.getTime())) { alert('自定义到期时间格式无效'); return; }
+              payload.expires_at = dt.toISOString();
+            } else {
+              payload.expires_in = expiryEl.value;
+            }
+            api('/api/agent/enroll-tokens', { method: 'POST', body: JSON.stringify(payload) })
+              .then(function (d) {
+                state.automationCreated = d;
+                state.automationErr = '';
+                state.automationList = null;
+                loadAutomationTokens();
+                render();
+              })
+              .catch(function (err) { state.automationErr = err.message; render(); });
+          }
+        }, ['生成自动化令牌']),
+        h('button', {
+          type: 'button', class: 'btn ghost', onclick: function () {
+            state.automationList = null;
+            loadAutomationTokens();
+            render();
+          }
+        }, ['刷新列表'])
+      ]),
+      h('h3', { style: 'margin-top:18px' }, ['自动化令牌列表']),
+      listBlock
+    ]);
+  }
+
+  function loadAutomationTokens() {
+    state.automationLoading = true;
+    state.automationErr = '';
+    return api('/api/agent/enroll-tokens')
+      .then(function (d) {
+        state.automationList = (d && d.list) || [];
+        state.automationLoading = false;
+        render();
+      })
+      .catch(function (e) {
+        state.automationLoading = false;
+        state.automationErr = e.message;
+        state.automationList = [];
+        render();
+      });
+  }
+
+  function revokeAutomationToken(x) {
+    if (!confirm('确定注销自动化令牌“' + (x.name || x.id) + '”吗？注销后只阻止新主机注册，已运行 Agent 不受影响。')) return;
+    api('/api/agent/enroll-tokens/' + x.id + '/revoke', { method: 'POST' })
+      .then(function () {
+        if (state.automationCreated && state.automationCreated.id === x.id) state.automationCreated = null;
+        state.automationList = null;
+        loadAutomationTokens();
+        render();
+      })
+      .catch(function (e) { alert('注销失败: ' + e.message); });
+  }
+
+  function rotateAutomationToken(x, osName, arch, force) {
+    if (!confirm('确定轮换令牌“' + (x.name || x.id) + '”吗？旧 token 会立即失效。')) return;
+    api('/api/agent/enroll-tokens/' + x.id + '/rotate?os=' + encodeURIComponent(osName || 'linux') +
+      '&arch=' + encodeURIComponent(arch || 'amd64') + (force ? '&force=1' : ''), { method: 'POST' })
+      .then(function (d) {
+        state.automationCreated = d;
+        state.automationList = null;
+        loadAutomationTokens();
+        render();
+      })
+      .catch(function (e) { alert('轮换失败: ' + e.message); });
   }
 
   // ---------- 外部文件代缓存（表格页：增删行 + 测试下载） ----------
@@ -4180,6 +4393,18 @@
     '接入主机示例': 'Enroll host example',
     '接入主机（安装 Agent）': 'Enroll host (install agent)',
     '生成接入命令': 'Generate enroll command',
+    '一次性令牌': 'One-time token', '自动化令牌': 'Automation token',
+    '令牌名称': 'Token name', '有效期': 'Expiry',
+    '永久有效': 'Never expires', '自定义时间': 'Custom time',
+    '自定义到期时间': 'Custom expiry',
+    '最大使用次数（0=不限）': 'Max uses (0 = unlimited)',
+    'IP/CIDR 白名单（可选）': 'IP/CIDR allowlist (optional)',
+    '安装命令目标系统': 'Install command target OS',
+    '安装命令架构': 'Install command architecture',
+    '生成自动化令牌': 'Generate automation token', '刷新列表': 'Refresh list',
+    '自动化令牌列表': 'Automation tokens', '暂无自动化令牌。': 'No automation tokens.',
+    '到期': 'Expires', '已用 / 上限': 'Used / limit', '最后使用': 'Last used',
+    '已注销': 'Revoked', '已达上限': 'Limit reached', '注销': 'Revoke', '轮换': 'Rotate',
     '目标操作系统': 'Target OS', '目标机器架构': 'Target architecture',
     '强制重新注册': 'Force re-enrollment',
     '外部文件代缓存': 'External binary cache', '系统设置': 'System settings',
