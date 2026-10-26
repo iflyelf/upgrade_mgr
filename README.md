@@ -109,22 +109,18 @@ export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
 
 **1. 主机 接入 Linux Agent**
 
-- 在「主机」页选择 Linux 与架构（amd64 / arm64 / arm），点「生成接入命令」；令牌一次性、默认 15 分钟有效。
+- 在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。
 - 到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。
-- **CentOS 6 / 旧内核自动适配**：安装命令会自动检测内核版本，2.6.32 等旧内核自动下载 legacy 构建（需服务端 dist 目录包含 `*-legacy` 文件）。
 - 主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。
 - 「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。
 
 ```bash
 # 控制台会生成完整的一键命令；手工执行等价于：
-KERNEL=$(uname -r) \
-  && rm -f /tmp/upgrade-agent \
-  && wget -c --tries=5 --timeout=30 --waitretry=5 -O /tmp/upgrade-agent \
-  "http://<控制台>/api/agent/binary/linux-amd64?kernel=${KERNEL}" \
-  && chmod +x /tmp/upgrade-agent \
-  && sudo /tmp/upgrade-agent install \
-    --server 'http://<控制台>' \
-    --enroll-token '<令牌>'
+curl -fsSL -o /tmp/upgrade-agent 'http://<控制台>/api/agent/binary/linux-amd64'
+chmod +x /tmp/upgrade-agent
+sudo /tmp/upgrade-agent install \
+  --server 'http://<控制台>' \
+  --enroll-token '<令牌>'
 
 sudo /tmp/upgrade-agent status     # 查看注册/连接状态
 sudo /tmp/upgrade-agent diagnose   # 诊断到控制台的链路
@@ -245,22 +241,18 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 **1. Host: enroll Linux agent**
 
-- On Hosts, choose Linux and architecture (amd64 / arm64 / arm), then click Generate command. Tokens are one-time and expire in 15 minutes.
+- On Hosts, choose Linux and architecture (amd64 / arm64 / arm; CentOS 6 uses the legacy build), then click Generate command. Tokens are one-time and expire in 15 minutes.
 - Run the command as root on the target. The agent installs as a systemd service (SysV fallback) and the host appears in the list.
-- **CentOS 6 / old kernel auto-detection**: The install command automatically detects the kernel version; 2.6.32 and other old kernels download the legacy build (requires `*-legacy` files in the server dist directory).
 - Hostname, OS, architecture and egress IP are reported by the agent; multi-NIC hosts are matched by their egress address.
 - Consul sync can also import hosts, but hosts without an agent are skipped when tasks are dispatched.
 
 ```bash
 # The console generates this command; manually it is equivalent to:
-KERNEL=$(uname -r) \
-  && rm -f /tmp/upgrade-agent \
-  && wget -c --tries=5 --timeout=30 --waitretry=5 -O /tmp/upgrade-agent \
-  "http://<console>/api/agent/binary/linux-amd64?kernel=${KERNEL}" \
-  && chmod +x /tmp/upgrade-agent \
-  && sudo /tmp/upgrade-agent install \
-    --server 'http://<console>' \
-    --enroll-token '<token>'
+curl -fsSL -o /tmp/upgrade-agent 'http://<console>/api/agent/binary/linux-amd64'
+chmod +x /tmp/upgrade-agent
+sudo /tmp/upgrade-agent install \
+  --server 'http://<console>' \
+  --enroll-token '<token>'
 
 sudo /tmp/upgrade-agent status     # registration/connection status
 sudo /tmp/upgrade-agent diagnose   # diagnose connectivity to the console
