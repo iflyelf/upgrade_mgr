@@ -64,7 +64,7 @@
 
 Go 1.26（`CGO_ENABLED=0`，交叉编译 linux/amd64、arm64、arm）· 标准库 net/http（Go 1.22 路由）· PostgreSQL(`lib/pq`) · hashicorp/consul/api · redis/go-redis v9（单点/集群/哨兵）· Prometheus · 前端原生内嵌（后续可替换为 Vue3 构建产物）
 
-Agent 构建矩阵：Linux 普通构建（Go 1.26）、Linux legacy（Go 1.23，CentOS 6）、
+Agent 构建矩阵：Linux 普通构建（Go 1.26）、Linux legacy（Go 1.23，旧内核 kernel 2.6.32 等）、
 Windows（Go 1.20，Server 2008 R2 ~ Windows 11，amd64/arm64，依赖 `golang.org/x/sys`）。
 
 ---
@@ -109,7 +109,7 @@ export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
 
 **1. 主机 接入 Linux Agent**
 
-- 在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。
+- 在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。
 - 到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。
 - 主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。
 - 「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。
@@ -131,7 +131,7 @@ sudo /tmp/upgrade-agent diagnose   # 诊断到控制台的链路
 - 组件页顶部「Linux 示例」提供：只执行命令（安装 / 更新 / 卸载）、脚本（安装 / 更新 / 卸载）、二进制替换。
 - 推荐先用「脚本安装」：script_url 指向仓库 examples/node_exporter/install.sh（经 proxy 代理），不需要上传制品。
 - install.sh 支持 install / update / uninstall / status：update 备份旧二进制并在启动失败时回滚，uninstall 传 -y 跳过确认。
-- 脚本自动识别 systemd / SysV：CentOS/RHEL 7+、Rocky、openEuler、Ubuntu 16.04+、Debian 8+、SLES 12+ 写 systemd；CentOS 6、Ubuntu 14.04、Debian 7、SLES 11 写 /etc/init.d。
+- 脚本自动识别 systemd / SysV：CentOS/RHEL 7+、Rocky、openEuler、Ubuntu 16.04+、Debian 8+、SLES 12+ 写 systemd；旧内核系统如 CentOS 6、Ubuntu 14.04、Debian 7、SLES 11 写 /etc/init.d。
 - 「只执行命令」用 exec + script_url + exec_args（install / update / uninstall -y），不下载制品，适合最小化安装。
 - 「二进制替换」用于需要平台备份/回滚的场景：服务注册放在 post_install 脚本里，由平台备份 install_path 下的旧文件。
 - 高级 JSON 的 exec_args / exec_env / exec_timeout / work_dir 控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。
@@ -241,7 +241,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 **1. Host: enroll Linux agent**
 
-- On Hosts, choose Linux and architecture (amd64 / arm64 / arm; CentOS 6 uses the legacy build), then click Generate command. Tokens are one-time and expire in 15 minutes.
+- On Hosts, choose Linux and architecture (amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Tokens are one-time and expire in 15 minutes.
 - Run the command as root on the target. The agent installs as a systemd service (SysV fallback) and the host appears in the list.
 - Hostname, OS, architecture and egress IP are reported by the agent; multi-NIC hosts are matched by their egress address.
 - Consul sync can also import hosts, but hosts without an agent are skipped when tasks are dispatched.
@@ -263,7 +263,7 @@ sudo /tmp/upgrade-agent diagnose   # diagnose connectivity to the console
 - The Components page exposes Linux examples: exec install/update/uninstall, script install/update/uninstall, and binary replacement.
 - Start with Script install: script_url points to examples/node_exporter/install.sh (via proxy), so no artifact upload is required.
 - install.sh supports install / update / uninstall / status. update backs up the old binary and rolls back on startup failure; uninstall -y skips confirmation.
-- The script auto-detects systemd/SysV: CentOS/RHEL 7+, Rocky, openEuler, Ubuntu 16.04+, Debian 8+, SLES 12+ use systemd; CentOS 6, Ubuntu 14.04, Debian 7 and SLES 11 use /etc/init.d.
+- The script auto-detects systemd/SysV: CentOS/RHEL 7+, Rocky, openEuler, Ubuntu 16.04+, Debian 8+, SLES 12+ use systemd; older kernel systems like CentOS 6, Ubuntu 14.04, Debian 7 and SLES 11 use /etc/init.d.
 - Exec-only examples use exec + script_url + exec_args (install / update / uninstall -y) with no artifact.
 - Binary replacement is for platform-managed backup/rollback: register the service in the post_install script and let the platform back up install_path.
 - Advanced JSON fields exec_args / exec_env / exec_timeout / work_dir control execution, e.g. NODE_EXPORTER_VERSION=1.8.2 via exec_env.
@@ -367,7 +367,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 ## 部署方式
 
 > 下载均通过 `https://proxy.xiaonuo.live/?url=` 代理加速，`wget` 支持断点续传(`-c`)。
-> Linux 按需把 `amd64` 换成 `arm64` 或 `arm`；CentOS 6 请使用 `*-legacy` 版本。
+> Linux 按需把 `amd64` 换成 `arm64` 或 `arm`；旧内核（kernel 2.6.32 等）请使用 `*-legacy` 版本。
 > 接入 **Windows 主机**（Server 2008 R2 ~ Windows 11）时，把
 > `upgrade-agent-windows-amd64.exe`（或 `arm64`）放到控制台的 `dist` 目录，否则下载 404。
 > Release 目前同时提供原始 `.exe` 与 `.zip`（旧版本可能只有 zip）。
@@ -380,7 +380,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 > **本方式的下载、目录布局与 systemd 单元没有变化**；已有部署升级只需替换二进制并
 > `systemctl restart upgrade-mgr`。下面补充了新增能力的**可选配置**（不配置即使用默认值）。
-> 首次启动会自动应用迁移 020–032（组织/多租户/审计/自动化令牌/node_exporter 外部文件），旧库无需手工执行 SQL。
+> 首次启动会自动应用迁移 020–033（组织/多租户/审计/自动化令牌/node_exporter 外部文件），旧库无需手工执行 SQL。
 
 ```bash
 # 1. 下载控制台二进制到 /tmp 并解压
@@ -393,7 +393,7 @@ wget -q -c --no-check-certificate -O /tmp/upgrade-agent.tar.gz \
   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64.tar.gz"
 tar -xzf /tmp/upgrade-agent.tar.gz -C /tmp
 
-# 1.1.1 【可选】CentOS 6 / 旧内核兼容版本（kernel 2.6.32）
+# 1.1.1 【可选】旧内核兼容版本（kernel 2.6.32 等，如 CentOS 6）
 #       下载 legacy 版本，安装命令会自动检测内核并选择对应构建
 wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-amd64-legacy.tar.gz \
   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-amd64-legacy.tar.gz"
@@ -409,7 +409,7 @@ wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.exe \
 #   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
 # unzip -o /tmp/upgrade-agent-windows-amd64.zip -d /tmp
 
-# 可选：按需补充其他平台/架构（Windows on ARM、Linux arm64、CentOS 6 其他架构）
+# 可选：按需补充其他平台/架构（Windows on ARM、Linux arm64、旧内核其他架构）
 # wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-arm64.exe \
 #   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-arm64.exe"
 # wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-arm64.tar.gz \
@@ -428,7 +428,7 @@ mv -f /tmp/upgrade-mgr-linux-amd64 /usr/local/bin/upgrade-mgr
 chmod +x /usr/local/bin/upgrade-mgr
 # 文件名必须保持 upgrade-agent-<os>-<arch>[-legacy][.exe]，控制台按此名下发
 mv -f /tmp/upgrade-agent-linux-amd64 /opt/upgrade-mgr/dist/upgrade-agent-linux-amd64
-# CentOS 6 兼容版本（如果下载了）
+# 旧内核兼容版本（如果下载了）
 [ -f /tmp/upgrade-agent-linux-amd64-legacy ] && \
   mv -f /tmp/upgrade-agent-linux-amd64-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-amd64-legacy
 mv -f /tmp/upgrade-agent-windows-amd64.exe /opt/upgrade-mgr/dist/upgrade-agent-windows-amd64.exe
@@ -526,7 +526,7 @@ agent:
 #   service_token: "<FlyIAM 管理员 API 令牌或 SERVICE_TOKEN>"
 EOF
 
-> **迁移与多租户**：首次启动自动应用 001–032。组织/团队/角色/审计新增
+> **迁移与多租户**：首次启动自动应用 001–033。组织/团队/角色/审计新增
 > `tenant_id`，历史数据默认为租户 `1`，单租户部署无需额外操作。
 >
 > **FlyIAM 组织树同步前置条件**：FlyIAM 需包含
@@ -823,7 +823,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows_runner_setup.ps1 `
 |---|---|
 | 控制台二进制 | `upgrade-mgr-linux-{amd64,arm64,arm}.tar.gz` |
 | Agent 二进制 | `upgrade-agent-linux-{amd64,arm64,arm}.tar.gz` |
-| Agent Legacy（CentOS 6） | `upgrade-agent-linux-{amd64,386,arm64}-legacy.tar.gz` |
+| Agent Legacy（旧内核 kernel 2.6.32 等） | `upgrade-agent-linux-{amd64,386,arm64}-legacy.tar.gz` |
 | Agent Windows | `upgrade-agent-windows-{amd64,arm64}.exe`（同时提供 `.zip`） |
 | 华为云 SWR 镜像 | `swr.cn-east-3.myhuaweicloud.com/iflyelf/upgrade-mgr:latest` |
 | DockerHub 镜像（可选） | `iflyelf/upgrade-mgr:latest` |
