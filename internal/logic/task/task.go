@@ -105,6 +105,8 @@ type Service struct {
 	// allowTaskOwnerOnly 为 true 时，非管理员只能操作自己创建的任务。
 	// 用函数读取设置，页面修改后无需重启。
 	allowTaskOwnerOnly func() bool
+	// offlineAfter 返回离线判定阈值（如 "1m"）；编排器用来跳过离线主机。
+	offlineAfter func() string
 	// ownerPolicy 返回用户所属团队的任务操作策略：
 	//   "on"      → 受限（不看全局开关）
 	//   "off"     → 放行（不看全局开关）
@@ -269,6 +271,11 @@ func NewService(db *sql.DB, compRepo *component.Repo, artRepo *artifact.Repo, al
 // SetReconciler 注入指令/逐机状态对账函数（由服务端启动时设置）。
 func (s *Service) SetReconciler(fn func(context.Context) (int, error)) {
 	s.reconcile = fn
+}
+
+// SetOfflineAfter 注入获取离线阈值的函数（编排器跳过离线主机用）。
+func (s *Service) SetOfflineAfter(fn func() string) {
+	s.offlineAfter = fn
 }
 
 // PreviewResult 预览命中主机与分批。
