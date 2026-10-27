@@ -612,9 +612,9 @@ func probeExternalBinary(ctx context.Context, entry extbin.Entry, hosts []string
 				return res
 			}
 		}
-	} else if !strings.HasPrefix(sample, "mz") {
-		res.Error = "下载内容不是 Windows 可执行文件（缺少 MZ 头）"
-		res.Hint = "确认地址指向 .exe 文件本身（GitHub Release 的下载链接）"
+	} else if !extbin.IsExecutable(head) {
+		res.Error = "下载内容不是可执行文件（缺少 PE/ELF 头）"
+		res.Hint = "确认地址指向二进制文件本身（GitHub Release 的下载链接）"
 		return res
 	}
 	res.OK = true
@@ -659,20 +659,12 @@ func externalBinaryBaseDir(cfg *config.Config) string {
 
 // externalBinaryLocalPath 管理员上传的离线文件路径（优先于上游缓存）。
 func externalBinaryLocalPath(baseDir string, e extbin.Entry) string {
-	name := strings.ToLower(e.Name)
-	if !e.Script {
-		name += ".exe"
-	}
-	return filepath.Join(baseDir, ".external-local", name)
+	return filepath.Join(baseDir, ".external-local", e.FileName())
 }
 
 // externalBinaryCachePath 计算缓存文件路径。
 func externalBinaryCachePath(baseDir string, e extbin.Entry) string {
-	name := strings.ToLower(e.Name)
-	if !e.Script {
-		name += ".exe"
-	}
-	return filepath.Join(baseDir, ".external-cache", name)
+	return filepath.Join(baseDir, ".external-cache", e.FileName())
 }
 
 // normalizeHostList 去空、去重、转小写。

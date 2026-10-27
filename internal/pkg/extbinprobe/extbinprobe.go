@@ -188,8 +188,8 @@ func (p *Prober) requestHead(ctx context.Context, e extbin.Entry) error {
 				return fmt.Errorf("内容不是脚本（HTML/XML 页面）")
 			}
 		}
-	} else if !strings.HasPrefix(sample, "mz") {
-		return fmt.Errorf("内容不是 Windows 可执行文件（缺少 MZ 头）")
+	} else if !extbin.IsExecutable(head) {
+		return fmt.Errorf("内容不是可执行文件（缺少 PE/ELF 头）")
 	}
 	return nil
 }

@@ -25,7 +25,10 @@ func TestValidateExternalContent(t *testing.T) {
 		return p
 	}
 
-	// 可执行文件：必须 MZ 开头
+	// 可执行文件：必须是 PE（MZ）或 ELF
+	if err := validateExternalContent(write("ok-elf", "\x7fELF\x02\x01\x01payload"), false); err != nil {
+		t.Fatalf("ELF 内容应通过: %v", err)
+	}
 	if err := validateExternalContent(write("ok.exe", "MZ\x90\x00payload"), false); err != nil {
 		t.Fatalf("PE 内容应通过: %v", err)
 	}
@@ -104,10 +107,11 @@ func TestExternalBinaryDownloadServesCached(t *testing.T) {
 func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 	cfg := config.Default()
 	got := effectiveExternalBinaries(cfg)
-	if len(got) != 5 {
-		t.Fatalf("默认应有 5 条，实际 %d", len(got))
+	if len(got) != 7 {
+		t.Fatalf("默认应有 7 条，实际 %d", len(got))
 	}
-	for _, name := range []string{"windows-exporter-amd64", "windows-exporter-amd64-legacy", "windows-exporter-arm64-legacy"} {
+	for _, name := range []string{"windows-exporter-amd64", "windows-exporter-amd64-legacy", "windows-exporter-arm64-legacy",
+		"node-exporter-linux-amd64", "node-exporter-linux-arm64"} {
 		if _, ok := got[name]; !ok {
 			t.Fatalf("默认应包含 %s", name)
 		}

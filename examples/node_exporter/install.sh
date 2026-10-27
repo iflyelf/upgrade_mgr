@@ -23,6 +23,8 @@
 #   NODE_EXPORTER_VERSION  版本，默认 latest
 #   NODE_EXPORTER_PROXY    下载代理前缀，默认 https://proxy.xiaonuo.live/?url=
 #   NODE_EXPORTER_BASE     下载基础 URL，默认 GitHub iflyelf release 地址
+#   UPGRADE_AGENT_SERVER_URL  平台地址（Agent 执行时自动注入）；GitHub 不通时回退到
+#                          平台 /api/external/binary/node-exporter-linux-<arch>（仅 latest）
 #
 # 平台命令任务示例（卸载）：
 #   url='https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh'
@@ -184,24 +186,93 @@ print_env() {
   esac
 }
 
+# 平台地址：Agent 执行脚本时注入 UPGRADE_AGENT_SERVER_URL；手工执行可自行 export。
+PLATFORM_URL="${UPGRADE_AGENT_SERVER_URL:-}"
+PLATFORM_URL="${PLATFORM_URL%/}"
+# 平台「外部文件」白名单中的名称（与 internal/pkg/extbin 默认条目一致）。
+PLATFORM_ASSET=""
+
+# is_elf 校验下载结果是 ELF 二进制，拦截代理/平台返回的 HTML 错误页。
+# 缺少 od 的极简系统跳过校验，只要求文件非空。
+is_elf() {
+  [ -s "$1" ] || return 1
+  if command -v od >/dev/null 2>&1; then
+    magic="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')"
+    [ "$magic" = "7f454c46" ] || return 1
+  fi
+  return 0
+}
+
+# download 单次下载；每次先删除残留文件，避免不同来源的内容被断点续传拼接。
 download() {
   src="$1"
   dst="$2"
+  rm -f "$dst"
   if command -v curl >/dev/null 2>&1; then
-    if curl -k -fL --connect-timeout 15 --retry 2 -o "$dst" "$src"; then
+    if curl -k -fL --connect-timeout 15 --max-time 600 --retry 2 -o "$dst" "$src"; then
       return 0
     fi
+    rm -f "$dst"
   fi
   if command -v wget >/dev/null 2>&1; then
-    if wget --no-check-certificate -q -c -O "$dst" "$src"; then
+    if wget --no-check-certificate -q --timeout=15 --tries=2 -O "$dst" "$src"; then
       return 0
     fi
+    rm -f "$dst"
   fi
-  echo "下载失败: $src" >&2
-  echo "请确认目标机能访问 proxy.xiaonuo.live，并已安装 curl 或 wget：" >&2
-  echo "  RHEL/CentOS/Rocky/openEuler: yum install -y curl   # 或 dnf install -y curl" >&2
-  echo "  Debian/Ubuntu: apt-get update && apt-get install -y curl" >&2
-  echo "  SUSE: zypper install -y curl" >&2
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    echo "未安装 curl 或 wget：" >&2
+    echo "  RHEL/CentOS/Rocky/openEuler: yum install -y curl   # 或 dnf install -y curl" >&2
+    echo "  Debian/Ubuntu: apt-get update && apt-get install -y curl" >&2
+    echo "  SUSE: zypper install -y curl" >&2
+  fi
+  return 1
+}
+
+# fetch_binary 按顺序尝试：GitHub（直连/代理）→ 平台离线缓存（local=1，不触发平台下载，
+# 快速失败）→ 平台代下载。与 windows_exporter/install.ps1 的平台回退保持一致。
+# 平台白名单只缓存 latest，指定其他版本时不回退平台，避免装错版本。
+fetch_binary() {
+  dst="$1"
+  PLATFORM_ASSET="node-exporter-linux-${ARCH}"
+  primary="${PROXY}${BASE}/node_exporter-linux-${ARCH}"
+  errors=""
+
+  echo "下载（GitHub 直连/代理）${primary}"
+  if download "$primary" "$dst" && is_elf "$dst"; then
+    return 0
+  fi
+  rm -f "$dst"
+  errors="GitHub 直连/代理失败"
+  echo "WARN: GitHub 直连/代理下载失败" >&2
+
+  if [ -n "$PLATFORM_URL" ] && [ "$VERSION" = "latest" ]; then
+    platform="${PLATFORM_URL}/api/external/binary/${PLATFORM_ASSET}"
+    for src in "${platform}?local=1" "$platform"; do
+      case "$src" in
+        *local=1) label="平台离线缓存" ;;
+        *) label="平台代下载" ;;
+      esac
+      echo "下载（${label}）${src}"
+      if download "$src" "$dst" && is_elf "$dst"; then
+        return 0
+      fi
+      rm -f "$dst"
+      errors="${errors}；${label}失败"
+      echo "WARN: ${label}失败" >&2
+    done
+  elif [ -n "$PLATFORM_URL" ]; then
+    errors="${errors}；平台仅缓存 latest，版本 ${VERSION} 不回退平台"
+  else
+    errors="${errors}；未设置 UPGRADE_AGENT_SERVER_URL，跳过平台回退"
+  fi
+
+  echo "下载 node_exporter-linux-${ARCH} 失败：${errors}" >&2
+  echo "处理方式（任选其一）：" >&2
+  echo "  1. 确认目标机能访问 proxy.xiaonuo.live / github.com；" >&2
+  echo "  2. 在控制台「外部文件」为 ${PLATFORM_ASSET} 上传离线文件（node_exporter-linux-${ARCH}），" >&2
+  echo "     或平台可出网时点该行「刷新缓存」预下载；" >&2
+  echo "  3. 用 NODE_EXPORTER_BASE 指向内网镜像（文件名 node_exporter-linux-${ARCH}）。" >&2
   return 1
 }
 
@@ -576,7 +647,7 @@ show_summary() {
 do_install() {
   print_env
   echo "下载 node_exporter-linux-${ARCH}（${VERSION}，静态编译）..."
-  download "${PROXY}${BASE}/node_exporter-linux-${ARCH}" "$TMP_BIN"
+  fetch_binary "$TMP_BIN"
 
   install -d -m 0755 "${METRICS_DIR}"
   install -m 0755 "$TMP_BIN" "$BIN_FILE"
@@ -596,7 +667,7 @@ do_update() {
   fi
   print_env
   echo "检测到已安装版本，执行更新（旧二进制备份到 ${BACKUP_BIN}）..."
-  download "${PROXY}${BASE}/node_exporter-linux-${ARCH}" "$TMP_BIN"
+  fetch_binary "$TMP_BIN"
 
   backup_tmp="${BACKUP_BIN}.new.$$"
   cp -p "$BIN_FILE" "$backup_tmp"
