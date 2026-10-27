@@ -146,6 +146,41 @@ func TestDefaultHostsIncludeReleaseAssets(t *testing.T) {
 	}
 }
 
+func TestIsExecutable(t *testing.T) {
+	cases := []struct {
+		head string
+		want bool
+	}{
+		{"MZ\x90\x00", true},
+		{"\x7fELF\x02\x01", true},
+		{"<!DOCTYPE html>", false},
+		{"ELF", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := IsExecutable([]byte(c.head)); got != c.want {
+			t.Fatalf("IsExecutable(%q)=%v want %v", c.head, got, c.want)
+		}
+	}
+}
+
+func TestEntryFileName(t *testing.T) {
+	cases := []struct {
+		e    Entry
+		want string
+	}{
+		{Entry{Name: "windows-exporter-amd64"}, "windows-exporter-amd64.exe"},
+		{Entry{Name: "node-exporter-linux-amd64"}, "node-exporter-linux-amd64"},
+		{Entry{Name: "Node-Exporter-Linux-ARM64"}, "node-exporter-linux-arm64"},
+		{Entry{Name: "windows-exporter-install.ps1", Script: true}, "windows-exporter-install.ps1"},
+	}
+	for _, c := range cases {
+		if got := c.e.FileName(); got != c.want {
+			t.Fatalf("FileName(%q)=%q want %q", c.e.Name, got, c.want)
+		}
+	}
+}
+
 // TestHostAllowedGitHubAssets 旧配置只列 github.com 时，资产重定向域名也应放行。
 func TestHostAllowedGitHubAssets(t *testing.T) {
 	hosts := []string{"github.com"}

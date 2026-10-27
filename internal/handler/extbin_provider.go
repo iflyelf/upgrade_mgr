@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"strings"
-
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/extbin"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
@@ -48,9 +46,5 @@ func NewExtbinProvider(s *svc.ServiceContext) extbinProvider { return extbinProv
 
 // extbinCacheKey 规范化缓存文件名（供测试断言使用）。
 func extbinCacheKey(e extbin.Entry) string {
-	name := strings.ToLower(e.Name)
-	if !e.Script {
-		name += ".exe"
-	}
-	return name
+	return e.FileName()
 }

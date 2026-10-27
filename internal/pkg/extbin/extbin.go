@@ -7,10 +7,11 @@
 //   - 名称白名单：只允许配置里声明的 name，接口不接受任意 URL；
 //   - 上游域名白名单：只允许 github.com / raw.githubusercontent.com / 代理域名；
 //   - 拒绝解析到环回/私网地址的主机，防止 SSRF 访问内网与云元数据；
-//   - 大小上限与内容校验（exe 必须 MZ，脚本不能是 HTML）。
+//   - 大小上限与内容校验（二进制必须是 PE/ELF，脚本不能是 HTML）。
 package extbin
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/url"
@@ -36,7 +37,16 @@ func DefaultBinaries() map[string]string {
 		"windows-exporter-amd64-legacy": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-amd64-legacy.exe",
 		"windows-exporter-arm64-legacy": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64-legacy.exe",
 		"windows-exporter-install.ps1":  "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
+		// Linux 主机无法访问 GitHub 时，由控制台代缓存 node_exporter（ELF 静态二进制）。
+		"node-exporter-linux-amd64": "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64",
+		"node-exporter-linux-arm64": "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-arm64",
 	}
+}
+
+// IsExecutable 判断文件头是否为可执行文件：Windows PE（MZ）或 Linux ELF。
+// 用于拦截上游返回的 HTML 错误页等非二进制内容。
+func IsExecutable(head []byte) bool {
+	return bytes.HasPrefix(head, []byte("MZ")) || bytes.HasPrefix(head, []byte("\x7fELF"))
 }
 
 // Effective 返回实际生效的白名单：配置非空用配置，否则用内置默认。
@@ -75,8 +85,20 @@ const DefaultTTLSeconds = 24 * 60 * 60
 type Entry struct {
 	Name string
 	URL  string
-	// Script 为 true 表示文本脚本（不做 MZ 校验）。
+	// Script 为 true 表示文本脚本（不做 PE/ELF 校验）。
 	Script bool
+}
+
+// FileName 返回缓存/离线文件名与下载时的文件名。
+//
+// Windows 二进制追加 .exe（兼容已有缓存与离线上传）；名称含 linux 的条目是
+// Linux ELF，不加扩展名，避免目标机下载后得到 xxx.exe。
+func (e Entry) FileName() string {
+	name := strings.ToLower(e.Name)
+	if !e.Script && !strings.Contains(name, "linux") {
+		name += ".exe"
+	}
+	return name
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)

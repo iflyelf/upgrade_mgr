@@ -169,10 +169,7 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		cacheDir := filepath.Join(baseDir, ".external-cache")
 		// 缓存文件名统一使用配置中的名称，避免大小写差异产生两份缓存。
-		fileName := strings.ToLower(asset.Name)
-		if !asset.Script {
-			fileName += ".exe"
-		}
+		fileName := asset.FileName()
 		cacheTarget := filepath.Join(cacheDir, fileName)
 		if err := safepath.EnsureWithin(baseDir, cacheTarget); err != nil {
 			http.NotFound(w, r)
@@ -418,7 +415,7 @@ func fetchExternalBinaryOnce(ctx context.Context, source, target string, script 
 	return os.Rename(tmpPath, target)
 }
 
-// validateExternalContent 校验下载内容：exe 必须 PE（MZ），脚本不能是 HTML 错误页。
+// validateExternalContent 校验下载内容：二进制必须是 PE（MZ）或 ELF，脚本不能是 HTML 错误页。
 func validateExternalContent(path string, script bool) error {
 	head := make([]byte, 64)
 	f, err := os.Open(path)
@@ -444,8 +441,8 @@ func validateExternalContent(path string, script bool) error {
 		}
 		return nil
 	}
-	if !strings.HasPrefix(sample, "mz") {
-		return fmt.Errorf("下载内容不是 Windows 可执行文件（可能是错误页）")
+	if !extbin.IsExecutable(head) {
+		return fmt.Errorf("下载内容不是可执行文件（缺少 PE/ELF 头，可能是错误页）")
 	}
 	return nil
 }
