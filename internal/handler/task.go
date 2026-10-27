@@ -3,6 +3,7 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -538,6 +539,34 @@ func TaskDelete(s *svc.ServiceContext) http.HandlerFunc {
 	return taskAction(s, audit.ActionTaskDelete, func(id int64, r *http.Request) error {
 		return s.Task.Delete(r.Context(), reqScope(r), id)
 	})
+}
+
+// TaskBatchDelete 批量删除任务：POST /api/tasks/batch-delete {"ids":[1,2,3]}。
+//
+// 一次请求完成多个删除，逐个复用 Delete 的校验；每个任务单独写审计，
+// 返回成功列表与逐个失败原因（部分失败也返回 200）。
+func TaskBatchDelete(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		res, err := s.Task.BatchDelete(r.Context(), reqScope(r), req.IDs)
+		if err != nil {
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		for _, id := range res.Deleted {
+			auditOp(s, r, audit.ActionTaskDelete, "task", strconv.FormatInt(id, 10), "", nil)
+		}
+		for _, f := range res.Failed {
+			auditOp(s, r, audit.ActionTaskDelete, "task", strconv.FormatInt(f.ID, 10), "", errors.New(f.Error))
+		}
+		httpx.OK(w, res)
+	}
 }
 
 func TaskPromote(s *svc.ServiceContext) http.HandlerFunc {

@@ -8,6 +8,52 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 )
 
+// MaxBatchDelete 单次批量删除的任务数上限，避免一次请求长时间占用连接。
+const MaxBatchDelete = 500
+
+// BatchDeleteFailure 批量删除中单个任务的失败原因。
+type BatchDeleteFailure struct {
+	ID    int64  `json:"id"`
+	Error string `json:"error"`
+}
+
+// BatchDeleteResult 批量删除结果：成功的 ID 与逐个失败原因。
+type BatchDeleteResult struct {
+	Deleted []int64              `json:"deleted"`
+	Failed  []BatchDeleteFailure `json:"failed"`
+}
+
+// BatchDelete 批量删除任务。
+//
+// 每个任务仍走 Delete 的独立事务，权限、owner、状态与未完成指令校验完全一致；
+// 单个失败不影响其他任务，结果逐个返回。ID 去重，超过上限直接拒绝。
+func (s *Service) BatchDelete(ctx context.Context, sc scope.Scope, ids []int64) (*BatchDeleteResult, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("请选择要删除的任务")
+	}
+	if len(ids) > MaxBatchDelete {
+		return nil, fmt.Errorf("单次最多删除 %d 个任务", MaxBatchDelete)
+	}
+	res := &BatchDeleteResult{Deleted: []int64{}, Failed: []BatchDeleteFailure{}}
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if err := ctx.Err(); err != nil {
+			res.Failed = append(res.Failed, BatchDeleteFailure{ID: id, Error: err.Error()})
+			continue
+		}
+		if err := s.Delete(ctx, sc, id); err != nil {
+			res.Failed = append(res.Failed, BatchDeleteFailure{ID: id, Error: err.Error()})
+			continue
+		}
+		res.Deleted = append(res.Deleted, id)
+	}
+	return res, nil
+}
+
 // Delete 删除任务及其批次、逐机状态和历史指令。
 //
 // 安全约束：
