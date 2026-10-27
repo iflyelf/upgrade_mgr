@@ -29,8 +29,11 @@ type agentStatTarget struct {
 // 避免版本字符串相同但二进制不同的情况被误标为最新。
 func AgentStats(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		snap := s.Settings.Snapshot()
-		offlineAfter := snap.Agent.OfflineAfter
+		offlineAfter := "1m" // 默认值
+		if s.Settings != nil {
+			snap := s.Settings.Snapshot()
+			offlineAfter = snap.Agent.OfflineAfter
+		}
 		// 解析失败时回退默认 1m，避免配置错误导致统计失效。
 		d, err := time.ParseDuration(strings.TrimSpace(offlineAfter))
 		if err != nil || d < 1*time.Second {

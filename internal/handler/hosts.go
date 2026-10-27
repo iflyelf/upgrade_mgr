@@ -64,8 +64,11 @@ type Host struct {
 // ListHosts 主机列表，支持关键字与分组过滤（?q=&app_code=&os_family=&page=&size=）。
 func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		snap := s.Settings.Snapshot()
-		offlineAfter := snap.Agent.OfflineAfter
+		offlineAfter := "1m" // 默认值
+		if s.Settings != nil {
+			snap := s.Settings.Snapshot()
+			offlineAfter = snap.Agent.OfflineAfter
+		}
 		// 解析失败时回退默认 1m，避免配置错误导致列表失效。
 		d, err := time.ParseDuration(strings.TrimSpace(offlineAfter))
 		if err != nil || d < 1*time.Second {

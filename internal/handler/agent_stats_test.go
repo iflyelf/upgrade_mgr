@@ -22,7 +22,11 @@ import (
 func TestAgentStats(t *testing.T) {
 	db, _ := setupHostDB(t)
 	sfx := time.Now().UnixNano()
-	sc := &svc.ServiceContext{DB: db, Version: "1.0.0"}
+	sc := &svc.ServiceContext{
+		DB:      db,
+		Version: "1.0.0",
+		// Settings 为 nil 时 AgentStats 使用默认的 1m 离线阈值
+	}
 
 	var hostID int64
 	if err := db.QueryRow(`

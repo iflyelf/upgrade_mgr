@@ -42,7 +42,7 @@ func TestCreateCommandTask(t *testing.T) {
 	newHost := func(ip, hostname, agentID string) int64 {
 		var id int64
 		if err := db.QueryRowContext(ctx,
-			`INSERT INTO hosts (ip, hostname, arch, os_family, agent_id) VALUES ($1,$2,'amd64','linux',$3) RETURNING id`,
+			`INSERT INTO hosts (ip, hostname, arch, os_family, agent_id, last_seen) VALUES ($1,$2,'amd64','linux',$3,NOW()) RETURNING id`,
 			ip, hostname, agentID).Scan(&id); err != nil {
 			t.Fatalf("建主机失败: %v", err)
 		}
