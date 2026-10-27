@@ -404,6 +404,25 @@ var Registry = []Item{
 		Label: "任务仅创建者可操作（默认开启；团队 owner_only 可为团队成员放开）", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Agent.TaskOwnerOnly) },
 		Set: func(c *config.Config, v string) { c.Agent.TaskOwnerOnly = v == "true" }},
+	{Key: "agent.offline_after", Group: "Agent",
+		Label: "心跳超时阈值（如 1m），超过此时长视为离线", Type: "string",
+		Get: func(c *config.Config) string { return c.Agent.OfflineAfter },
+		Set: func(c *config.Config, v string) { c.Agent.OfflineAfter = strings.TrimSpace(v) },
+		Validate: func(v string) error {
+			d, err := time.ParseDuration(strings.TrimSpace(v))
+			if err != nil || d < 30*time.Second || d > 30*time.Minute {
+				return fmt.Errorf("心跳超时阈值应为 30s-30m（建议 1m，Agent 心跳周期为 30s）")
+			}
+			return nil
+		},
+		Note: "Agent 心跳周期 30s；默认 1m 允许 2 次心跳丢失。主机列表、版本统计、指标都按此阈值判定离线。"},
+
+	// Task / 任务创建
+	{Key: "task.host_selector_fields", Group: "Task",
+		Label: "任务可选主机字段（逗号分隔，如 app_code,biz_group,os_family）", Type: "string",
+		Get: func(c *config.Config) string { return c.Task.HostSelectorFields },
+		Set: func(c *config.Config, v string) { c.Task.HostSelectorFields = strings.TrimSpace(v) },
+		Note: "为空时禁用字段筛选（仅保留 IP 段）；可选字段：app_code、biz_group、os_family、os_type、account、department、vendor、arch、host_type。"},
 
 	// FlyIAM 集成（与 consul_mgr 复用同一部署）
 	{Key: "flyiam.endpoint", Group: "FlyIAM",
