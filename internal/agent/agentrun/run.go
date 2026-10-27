@@ -702,6 +702,10 @@ func truncateText(s string, maxBytes int) string {
 }
 
 func (a *Agent) postJSON(path string, req, resp any) error {
+	return a.postJSONWithRetry(path, req, resp, false)
+}
+
+func (a *Agent) postJSONWithRetry(path string, req, resp any, retried bool) error {
 	body, _ := json.Marshal(req)
 	httpReq, err := http.NewRequest("POST", a.cfg.ServerURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -717,6 +721,23 @@ func (a *Agent) postJSON(path string, req, resp any) error {
 		return err
 	}
 	defer httpResp.Body.Close()
+	if httpResp.StatusCode == http.StatusUnauthorized && !retried {
+		// 401 可能是并发注册导致凭据过期：尝试重新加载磁盘凭据（仅一次）。
+		if a.cfg.StatePath != "" {
+			if diskCfg, loadErr := LoadState(a.cfg.StatePath); loadErr == nil {
+				if diskCfg.AgentID != "" && diskCfg.Token != "" &&
+					(diskCfg.AgentID != a.cfg.AgentID || diskCfg.Token != a.cfg.Token) {
+					log.Printf("⚠️ 401 检测到新凭据，热切换: %s -> %s", a.cfg.AgentID, diskCfg.AgentID)
+					a.cfg.AgentID = diskCfg.AgentID
+					a.cfg.Token = diskCfg.Token
+					a.cfg.Secret = diskCfg.Secret
+					// 递归重试一次（仅一次，避免无限循环）
+					return a.postJSONWithRetry(path, req, resp, true)
+				}
+			}
+		}
+		return fmt.Errorf("HTTP 401")
+	}
 	if httpResp.StatusCode >= 400 {
 		return fmt.Errorf("HTTP %d", httpResp.StatusCode)
 	}
@@ -745,6 +766,19 @@ func (a *Agent) saveState() error {
 	if a.cfg.StatePath == "" {
 		return nil
 	}
+	
+	// 并发注册保护：如果磁盘 AgentID 已经变化，说明另一个 install --force
+	// 重新注册了，当前进程应该退出，让 systemd 重启并加载新凭据。
+	if a.cfg.AgentID != "" {
+		if diskCfg, err := LoadState(a.cfg.StatePath); err == nil {
+			if diskCfg.AgentID != "" && diskCfg.AgentID != a.cfg.AgentID {
+				log.Printf("⚠️ 检测到并发注册（磁盘 AgentID=%s，内存 AgentID=%s），退出以加载新凭据",
+					diskCfg.AgentID, a.cfg.AgentID)
+				os.Exit(0) // 让 systemd 重启进程
+			}
+		}
+	}
+	
 	data, err := json.Marshal(a.cfg)
 	if err != nil {
 		return err
