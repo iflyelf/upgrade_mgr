@@ -232,8 +232,8 @@ download() {
 # fetch_binary 按顺序尝试：GitHub（直连/代理）→ 平台离线缓存（local=1，不触发平台下载，
 # 快速失败）→ 平台代下载。与 windows_exporter/install.ps1 的平台回退保持一致。
 # 平台白名单只缓存 latest，指定其他版本时不回退平台，避免装错版本。
-# 旧内核检测：Go 1.23+ 在 kernel 2.6.32-3.10 上报 "procresize: invalid arg"，
-# 检测到旧内核自动使用 Go 1.17 构建的 legacy 版本。
+# 旧内核检测：Go 1.24+ 在 kernel 2.6.32-3.10 上报 "procresize: invalid arg"，
+# 检测到旧内核自动使用 Go 1.23 构建的 legacy 版本（Go 1.23 是最后支持 2.6.32 的版本）。
 fetch_binary() {
   dst="$1"
   SUFFIX=""
@@ -241,7 +241,7 @@ fetch_binary() {
   KERNEL_MAJOR="$(echo "$KERNEL" | awk -F. '{print $1"."$2}')"
   case "$KERNEL_MAJOR" in
     2.6 | 3.[0-9] | 3.10)
-      echo "检测到旧内核 ${KERNEL}（${KERNEL_MAJOR}），使用 Go 1.17 构建的 legacy 版本"
+      echo "检测到旧内核 ${KERNEL}（${KERNEL_MAJOR}），使用 Go 1.23 构建的 legacy 版本"
       SUFFIX="-legacy"
       ;;
   esac
