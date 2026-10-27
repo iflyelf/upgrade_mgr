@@ -823,23 +823,32 @@
     ].join('\n');
   }
 
-  // installScript(action) 生成“先下载 install.sh 再执行指定动作”的脚本。
-  // 不使用 `bash <(curl ...)`：某些环境把 -c 字符串交给 /bin/sh（dash）解析，
-  // 进程替换 <(...) 是 bash 语法，会报 Syntax error: "(" unexpected。
-  // 组件 exec 模式与任务命令模式共用这段骨架，只改最后一个动作参数。
+  // installScript(action) 生成"先下载 install.sh 再执行指定动作"的脚本。
+  // 优先从平台内网缓存下载，失败后自动切换到外网代理。
   function installScript(action) {
     return [
       '#!/bin/bash',
       'set -e',
-      'url=\'' + INSTALL_SCRIPT_URL + '\'',
+      'b="${UPGRADE_MGR_SERVER:-http://localhost:8090}"',
+      'localUrl="$b' + INSTALL_SCRIPT_PLATFORM_URL + '?local=1"',
+      'platformUrl="$b' + INSTALL_SCRIPT_PLATFORM_URL + '"',
+      'proxyUrl=\'' + INSTALL_SCRIPT_URL + '\'',
       'f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)',
       'trap \'rm -f "$f"\' EXIT',
-      'if command -v curl >/dev/null 2>&1; then',
-      '  curl -fsSL "$url" -o "$f"',
-      'elif command -v wget >/dev/null 2>&1; then',
-      '  wget -qO "$f" "$url"',
-      'else',
-      '  echo "需要 curl 或 wget 下载安装脚本" >&2; exit 1',
+      'download() {',
+      '  if command -v curl >/dev/null 2>&1; then',
+      '    curl -fsSL "$1" -o "$f" 2>/dev/null',
+      '  elif command -v wget >/dev/null 2>&1; then',
+      '    wget -qO "$f" "$1" 2>/dev/null',
+      '  else',
+      '    echo "需要 curl 或 wget" >&2; return 1',
+      '  fi',
+      '}',
+      '# 优先本地缓存 → 平台代理 → 外网代理',
+      'if ! download "$localUrl"; then',
+      '  if ! download "$platformUrl"; then',
+      '    download "$proxyUrl" || { echo "下载失败，请检查网络或在控制台上传离线包" >&2; exit 1; }',
+      '  fi',
       'fi',
       'bash "$f" ' + action
     ].join('\n');
