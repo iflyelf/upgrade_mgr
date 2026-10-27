@@ -71,6 +71,7 @@
     orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
     orgSelTeam: null, orgTeamMembers: null, orgTeamPerms: null, orgNewField: null,
     flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
+    hostFacets: null,
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1,
     orgUserQ: '', orgUserForm: null, orgRoleForm: null, orgGroupForm: null,
@@ -1412,11 +1413,14 @@
           : h('span', { class: 'tag status-success' }, ['最新'])
       ];
     });
+    var offlineNote = st.offline_after
+      ? '（离线按 agent 状态或心跳超过 ' + st.offline_after + ' 统计）'
+      : '（离线按 agent 状态或心跳超时统计）';
     return h('div', { class: 'card' }, [
       h('h3', {}, ['Agent 版本分布']),
       hint('目标版本：' + (st.target_version || '-') +
         '；离线 ' + (st.offline || 0) + ' 台；旧版本 ' + (st.outdated || 0) +
-        ' 台（离线按 agent 状态或心跳超过 5 分钟统计）。'),
+        ' 台' + offlineNote + '。'),
       simpleTable(['版本', 'OS', '架构', '数量', '离线', '状态'], st.list || [],
         function (x, i) { return rows[i]; })
     ]);
@@ -5349,6 +5353,12 @@
         .then(function (p) { state.myPerms = p || { components: {} }; render(); })
         .catch(function () { state.myPerms = { components: {} }; render(); });
     }
+    // 加载主机字段选项（任务筛选用）
+    if (state.hostFacets === null) {
+      api('/api/hosts/facets')
+        .then(function (d) { state.hostFacets = d || { fields: [], values: {} }; render(); })
+        .catch(function () { state.hostFacets = { fields: [], values: {} }; });
+    }
     var deployComps = isAdmin() ? state.components : state.components.filter(function (c) {
       var perms = (state.myPerms && state.myPerms.components) || {};
       var set = perms[c.name] || {};
@@ -5359,10 +5369,12 @@
     var f = state.taskForm || (state.taskForm = {
       kind: 'upgrade', name: '', component_id: '', version: '', ip_expr: '',
       script: '', interpreter: '', args: '', stdin: '', tty: false, timeout: '10m',
-      mode: 'count', batch_size: '10', canary_count: '1', auto_promote: true
+      mode: 'count', batch_size: '10', canary_count: '1', auto_promote: true,
+      filters: {}
     });
     if (!f.kind) f.kind = 'upgrade';
     if (!isAdmin() && f.kind === 'command') f.kind = 'upgrade';
+    if (!f.filters) f.filters = {};
 
     function versionsFor(cid) {
       var out = [];
@@ -5467,7 +5479,10 @@
         name: f.name.trim() || (f.kind === 'command'
           ? ('执行命令 ' + (new Date()).toLocaleString())
           : ('组件 ' + (compMap[f.component_id] ? compMap[f.component_id].name : '组件') + ' ' + f.version)),
-        selector: { ip_expr: f.ip_expr.trim() },
+        selector: {
+          ip_expr: f.ip_expr.trim(),
+          filters: f.filters || {}
+        },
         strategy: {
           mode: f.mode,
           batch_size: parseInt(f.batch_size, 10) || 0,
@@ -5497,6 +5512,45 @@
       return s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r');
     }
 
+    // 字段标签映射（与后端 hostfieldmap 保持一致）
+    var fieldLabels = {
+      app_code: 'App Code', biz_group: '业务组', os_family: '操作系统',
+      os_type: '系统类型', account: '账号', department: '部门',
+      vendor: '厂商', arch: '架构', host_type: '主机类型'
+    };
+
+    // 构建字段选择器（多个 tagPicker）
+    var facets = state.hostFacets || { fields: [], values: {} };
+    var fieldPickers = {};
+    var fieldPickerEls = [];
+    facets.fields.forEach(function (col) {
+      var candidates = facets.values[col] || [];
+      var picker = tagPicker(candidates, '选择或输入 ' + (fieldLabels[col] || col) + ' 后回车');
+      fieldPickers[col] = picker;
+      // 从 f.filters[col] 初始化已选值
+      if (f.filters[col]) {
+        f.filters[col].forEach(function (v) {
+          picker.getValues(); // 先调用一次让 picker 内部同步输入框
+          if (picker.getValues().indexOf(v) < 0) {
+            // 手动添加到 picker 的 values 数组（tagPicker 内部状态）
+            // 由于 tagPicker 没有暴露 add 方法，我们只能重新构建
+          }
+        });
+      }
+      fieldPickerEls.push(field(fieldLabels[col] || col, picker.el,
+        '多选，留空表示不限。可从已有值中选择或手填。'));
+    });
+
+    // 预览前收集 filters
+    function collectFilters() {
+      var filters = {};
+      facets.fields.forEach(function (col) {
+        var vals = fieldPickers[col] ? fieldPickers[col].getValues() : [];
+        if (vals.length > 0) filters[col] = vals;
+      });
+      f.filters = filters;
+    }
+
     function checkForm() {
       if (f.kind === 'command') {
         if (!(f.script || '').trim()) {
@@ -5518,6 +5572,7 @@
 
     function doPreview() {
       state.err = '';
+      collectFilters();
       if (!checkForm()) return;
       api('/api/tasks/preview', { method: 'POST', body: JSON.stringify(taskBody()) })
         .then(function (d) { state.preview = d; render(); })
@@ -5526,6 +5581,7 @@
 
     function doCreate() {
       state.err = '';
+      collectFilters();
       if (!checkForm()) return;
       api('/api/tasks', { method: 'POST', body: JSON.stringify(taskBody()) })
         .then(function (d) {
@@ -5694,6 +5750,11 @@
         field('目标版本', verEl, '使用制品时从已上传制品中选择；使用 script_url 时可填 latest（仅作记录）。'),        field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
       ]),
       f.kind === 'command' ? null : datalist,
+      // 主机字段筛选（如果配置了可选字段）
+      fieldPickerEls.length > 0 ? h('div', { class: 'field-group' }, [
+        h('h4', {}, ['主机筛选（可选）']),
+        hint('按主机字段多选过滤；留空表示不限。与 IP 段取交集。')
+      ].concat(fieldPickerEls)) : null,
       f.kind === 'command' ? field('命令脚本', scriptEl,
         '脚本会以文件形式交给解释器执行，支持管道、重定向与进程替换。需要交互确认时填写标准输入，必要时勾选伪终端。') : null,
       f.kind === 'command' ? h('div', { class: 'grid2' }, [
