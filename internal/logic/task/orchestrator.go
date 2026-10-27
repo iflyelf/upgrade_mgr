@@ -271,7 +271,7 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 	}
 
 	rows, err := o.svc.db.QueryContext(ctx, `
-		SELECT th.id, th.host_id, h.arch, h.os_family, h.agent_id
+		SELECT th.id, th.host_id, h.arch, h.os_family, h.agent_id, h.last_seen
 		FROM task_hosts th JOIN hosts h ON h.id=th.host_id
 		WHERE th.task_id=$1 AND th.batch_index=$2 AND th.status='pending'
 		ORDER BY th.id`, taskID, batchIdx)
@@ -282,11 +282,12 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 	type row struct {
 		thID, hostID  int64
 		arch, os, aid string
+		lastSeen      sql.NullTime
 	}
 	var list []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.thID, &r.hostID, &r.arch, &r.os, &r.aid); err == nil {
+		if err := rows.Scan(&r.thID, &r.hostID, &r.arch, &r.os, &r.aid, &r.lastSeen); err == nil {
 			list = append(list, r)
 		}
 	}
@@ -296,10 +297,26 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 	// 先关闭结果集，后续逐主机事务不再占用额外连接。
 	_ = rows.Close()
 
+	// 获取离线阈值配置
+	offlineAfterStr := "1m"
+	if o.svc.offlineAfter != nil {
+		offlineAfterStr = o.svc.offlineAfter()
+	}
+	offlineAfter, _ := time.ParseDuration(strings.TrimSpace(offlineAfterStr))
+	if offlineAfter < 1*time.Second {
+		offlineAfter = 1 * time.Minute
+	}
+
 	dispatched := 0
 	for _, r := range list {
 		if r.aid == "" {
 			o.markHostSkipped(ctx, r.thID)
+			continue
+		}
+		// 跳过离线主机：last_seen 为空或超过配置阈值。
+		if !r.lastSeen.Valid || time.Since(r.lastSeen.Time) > offlineAfter {
+			o.markHostSkippedWithLog(ctx, r.thID,
+				fmt.Sprintf("主机离线（心跳超过 %s 未更新），已跳过", offlineAfterStr))
 			continue
 		}
 		if kind == KindCommand {

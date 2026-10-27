@@ -64,9 +64,18 @@ type Host struct {
 // ListHosts 主机列表，支持关键字与分组过滤（?q=&app_code=&os_family=&page=&size=）。
 func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		snap := s.Settings.Snapshot()
+		offlineAfter := snap.Agent.OfflineAfter
+		// 解析失败时回退默认 1m，避免配置错误导致列表失效。
+		d, err := time.ParseDuration(strings.TrimSpace(offlineAfter))
+		if err != nil || d < 1*time.Second {
+			d = 1 * time.Minute
+		}
+		offlineInterval := fmt.Sprintf("'%.0f seconds'", d.Seconds())
+
 		q := r.URL.Query()
 		// 租户隔离：恒为第一个条件，确保任何过滤组合下都不会漏过滤。
-		tCond, tArgs := reqScope(r).Where("", 1)
+		tCond, tArgs := reqScope(r).Where("h", 1)
 		var (
 			where = []string{tCond}
 			args  = append([]any{}, tArgs...)
@@ -83,18 +92,30 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 		if kw := strings.TrimSpace(q.Get("q")); kw != "" {
 			// 出口 IP / 隧道地址也参与搜索：运维通常按实际业务网地址找主机。
 			where = append(where,
-				"(ip ILIKE $"+strconv.Itoa(i)+" OR exit_ip ILIKE $"+strconv.Itoa(i)+
-					" OR tunnel_ip ILIKE $"+strconv.Itoa(i)+
-					" OR server_url_override ILIKE $"+strconv.Itoa(i)+
-					" OR hostname ILIKE $"+strconv.Itoa(i)+
-					" OR biz_group ILIKE $"+strconv.Itoa(i)+")")
+				"(h.ip ILIKE $"+strconv.Itoa(i)+" OR h.exit_ip ILIKE $"+strconv.Itoa(i)+
+					" OR h.tunnel_ip ILIKE $"+strconv.Itoa(i)+
+					" OR h.server_url_override ILIKE $"+strconv.Itoa(i)+
+					" OR h.hostname ILIKE $"+strconv.Itoa(i)+
+					" OR h.biz_group ILIKE $"+strconv.Itoa(i)+")")
 			args = append(args, "%"+kw+"%")
 			i++
 		}
-		add("app_code = ", q.Get("app_code"))
-		add("os_family = ", q.Get("os_family"))
-		add("account = ", q.Get("account"))
-		add("agent_status = ", q.Get("agent_status"))
+		add("h.app_code = ", q.Get("app_code"))
+		add("h.os_family = ", q.Get("os_family"))
+		add("h.account = ", q.Get("account"))
+
+		// agent_status 过滤：支持按计算出的有效状态过滤。
+		// 如果过滤值是 offline，需要用 CASE 表达式判断心跳超时。
+		if statusFilter := q.Get("agent_status"); statusFilter != "" {
+			if statusFilter == "offline" {
+				where = append(where,
+					"(h.agent_status='offline' OR h.agent_id='' OR h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+offlineInterval+")")
+			} else {
+				where = append(where, "h.agent_status=$"+strconv.Itoa(i))
+				args = append(args, statusFilter)
+				i++
+			}
+		}
 
 		whereSQL := ""
 		if len(where) > 0 {
@@ -113,7 +134,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 
 		var total int
 		if err := s.DB.QueryRowContext(r.Context(),
-			"SELECT COUNT(1) FROM hosts"+whereSQL, args...).Scan(&total); err != nil {
+			"SELECT COUNT(1) FROM hosts h"+whereSQL, args...).Scan(&total); err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -129,18 +150,18 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 
 		listArgs := append(append([]any{}, args...), size, offset)
 		rows, err := s.DB.QueryContext(r.Context(),
-			`SELECT id, ip, COALESCE(exit_ip,''), COALESCE(tunnel_ip,''),
-			        COALESCE(server_url_override,''),
-			        COALESCE(agent_server_url,''), COALESCE(agent_default_server_url,''),
-			        tunnel_check_ok, COALESCE(tunnel_check_source,''), tunnel_check_at,
-			        COALESCE(tunnel_check_latency_ms,0), COALESCE(tunnel_check_detail,''),
-			        COALESCE(custom_fields,'{}'::jsonb),
-			        hostname, os_family, os_type, arch, account, app_code,
-			        biz_group, department, vendor, host_type, COALESCE(agent_id,''),
-			        agent_version, COALESCE(agent_build_version,''), COALESCE(agent_build_hash,''),
-			        COALESCE(agent_build_variant,''), agent_status, source
-			   FROM hosts`+whereSQL+
-				" ORDER BY ip LIMIT $"+strconv.Itoa(i)+" OFFSET $"+strconv.Itoa(i+1), listArgs...)
+			`SELECT h.id, h.ip, COALESCE(h.exit_ip,''), COALESCE(h.tunnel_ip,''),
+			        COALESCE(h.server_url_override,''),
+			        COALESCE(h.agent_server_url,''), COALESCE(h.agent_default_server_url,''),
+			        h.tunnel_check_ok, COALESCE(h.tunnel_check_source,''), h.tunnel_check_at,
+			        COALESCE(h.tunnel_check_latency_ms,0), COALESCE(h.tunnel_check_detail,''),
+			        COALESCE(h.custom_fields,'{}'::jsonb),
+			        h.hostname, h.os_family, h.os_type, h.arch, h.account, h.app_code,
+			        h.biz_group, h.department, h.vendor, h.host_type, COALESCE(h.agent_id,''),
+			        h.agent_version, COALESCE(h.agent_build_version,''), COALESCE(h.agent_build_hash,''),
+			        COALESCE(h.agent_build_variant,''), h.agent_status, h.source, h.last_seen
+			   FROM hosts h`+whereSQL+
+				" ORDER BY h.ip LIMIT $"+strconv.Itoa(i)+" OFFSET $"+strconv.Itoa(i+1), listArgs...)
 		if err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
@@ -152,6 +173,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			var h Host
 			var checkOK sql.NullBool
 			var checkAt sql.NullTime
+			var lastSeen sql.NullTime
 			var customRaw []byte
 			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerURLOverride,
 				&h.AgentServerURL, &h.DefaultServerURL,
@@ -160,9 +182,16 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 				&h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
 				&h.Account, &h.AppCode, &h.BizGroup, &h.Department, &h.Vendor, &h.HostType,
 				&h.AgentID, &h.AgentVersion, &h.AgentBuildVersion, &h.AgentBuildHash,
-				&h.AgentBuildVariant, &h.AgentStatus, &h.Source); err != nil {
+				&h.AgentBuildVariant, &h.AgentStatus, &h.Source, &lastSeen); err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
+			}
+			// 计算有效状态：如果 last_seen 超时或为空（且有 agent_id），覆盖为 offline。
+			// 没有 agent_id 的主机（来自 Consul 同步）保持 unknown。
+			if h.AgentID != "" {
+				if !lastSeen.Valid || time.Since(lastSeen.Time) > d {
+					h.AgentStatus = "offline"
+				}
 			}
 			if checkOK.Valid {
 				v := checkOK.Bool
