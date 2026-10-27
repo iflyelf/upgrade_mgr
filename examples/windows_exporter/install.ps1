@@ -477,7 +477,12 @@ function Write-DefaultConfig {
     $existing = ''
     if (-not $needWrite) {
         try { $existing = [System.IO.File]::ReadAllText($ConfigFile) } catch { $existing = '' }
-        if ($existing -match '# windows_exporter 配置（由 install\.ps1 生成）') {
+        if ($existing.Trim() -eq '') {
+            # 空文件（0 字节或只有空白）不是有效配置，按缺失处理重新生成，
+            # 否则历史上一次写入失败留下的空文件会被永久“保留”。
+            $needWrite = $true
+            Write-Warn "现有配置 $ConfigFile 为空，将重新生成"
+        } elseif ($existing -match '# windows_exporter 配置（由 install\.ps1 生成）') {
             $flavorMatches = $existing -match ('# flavor:\s*' + [regex]::Escape($script:ExporterFlavor))
             $templateMatches = $existing -match ('# config-version:\s*' + [regex]::Escape($ConfigTemplateVersion))
             if (-not $flavorMatches -or -not $templateMatches) {
@@ -496,10 +501,33 @@ function Write-DefaultConfig {
         Write-Step "生成默认配置 $ConfigFile"
     }
     # 配置里含中文注释：用无 BOM 的 UTF-8 写入。
-    # 不用 Set-Content -Encoding UTF8：PS 5 会写 BOM，YAML 解析器可能报错。
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($ConfigFile, (Get-DefaultConfigContent), $utf8NoBom)
-    Write-Step "配置已按 $($script:ExporterFlavor) 通道生成"
+    # WriteAllText 在 PS 2.0 某些环境下可能静默失败，改用流式写入并检查。
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $content = Get-DefaultConfigContent
+        [System.IO.File]::WriteAllText($ConfigFile, $content, $utf8NoBom)
+        # 验证写入是否成功
+        if (-not (Test-Path $ConfigFile)) {
+            throw "文件未生成"
+        }
+        $size = (Get-Item $ConfigFile).Length
+        if ($size -eq 0) {
+            throw "文件为空（0 字节）"
+        }
+        Write-Step "配置已按 $($script:ExporterFlavor) 通道生成（$size 字节）"
+    } catch {
+        Write-Warn "WriteAllText 失败（$_），尝试 StreamWriter"
+        $sw = $null
+        try {
+            $sw = New-Object System.IO.StreamWriter($ConfigFile, $false, (New-Object System.Text.UTF8Encoding($false)))
+            $sw.Write((Get-DefaultConfigContent))
+            $sw.Close()
+            Write-Step "配置已通过 StreamWriter 生成"
+        } catch {
+            if ($sw -ne $null) { $sw.Close() }
+            Fail "无法写入配置文件 $ConfigFile`: $_" 1
+        }
+    }
 }
 
 function Ensure-Dirs {

@@ -134,8 +134,8 @@
   function copyBaseLabel() {
     return state.lang === 'en' ? 'Copy command' : '复制命令';
   }
-  function copyText(text, btn) {
-    var base = copyBaseLabel();
+  function copyText(text, btn, baseLabel) {
+    var base = baseLabel || copyBaseLabel();
     function done(ok) {
       btn.textContent = ok
         ? (state.lang === 'en' ? 'Copied' : '已复制')
@@ -154,6 +154,18 @@
     var btn = h('button', { type: 'button', class: 'btn ghost small copy-btn', 'aria-label': label }, [label]);
     btn.onclick = function () { copyText(text, btn); };
     return h('div', { class: 'code-wrap' }, [btn, h('pre', { class: 'code' }, [text])]);
+  }
+  // copyLogBtn 日志复制按钮：复制完整日志文本，按钮文字短暂提示结果。
+  function copyLogBtn(text) {
+    var label = state.lang === 'en' ? 'Copy log' : '复制日志';
+    var btn = h('button', { type: 'button', class: 'btn ghost small', 'aria-label': label }, [label]);
+    btn.onclick = function (e) {
+      // 按钮放在 details 内，阻止冒泡避免折叠日志。
+      e.preventDefault();
+      e.stopPropagation();
+      copyText(text, btn, label);
+    };
+    return btn;
   }
   function isAdmin() { return !!(state.user && state.user.IsAdmin); }
   function isSuperAdmin() {
@@ -2273,7 +2285,7 @@
               var text = (nameEl.value || '').trim()
                 ? (window.location.origin + platformURL)
                 : platformURL;
-              copyText(text, this);
+              copyText(text, this, '复制地址');
             }
           }, ['复制地址']),
           h('button', {
@@ -5245,6 +5257,7 @@
     if (d.kind === 'command' && d.command && d.command.script) {
       modal.appendChild(h('details', { class: 'log-details' }, [
         h('summary', {}, ['查看命令脚本']),
+        h('div', { class: 'log-toolbar' }, [copyLogBtn(d.command.script)]),
         h('pre', { class: 'code log-pre' }, [d.command.script])
       ]));
     }
@@ -5296,6 +5309,7 @@
               }
             }, [
               h('summary', {}, ['查看日志' + (latest ? '（' + cmdStatusText(latest.status) + '）' : '')]),
+              h('div', { class: 'log-toolbar' }, [copyLogBtn(logText)]),
               h('pre', { class: 'code log-pre' }, [logText])
             ])
           : h('span', { class: 'muted' }, ['暂无日志']);
@@ -5894,7 +5908,57 @@
       }, ['下一页'])
     ]) : null;
 
+    // 批量删除：只允许勾选可删除（终态/草稿）且有操作权限的任务；逐个调用单删接口，
+    // 复用服务端既有的权限与 owner 校验。
+    var sel = state.taskSelected || (state.taskSelected = {});
+    var selectable = state.tasks.filter(function (x) {
+      return x.can_view !== false && x.can_operate !== false && deletableTask(x);
+    });
+    var selectedIDs = selectable.filter(function (x) { return sel[x.id]; }).map(function (x) { return x.id; });
+    var allChecked = selectable.length > 0 && selectedIDs.length === selectable.length;
+    function batchDelete() {
+      if (!selectedIDs.length) return;
+      if (!confirm('确定删除选中的 ' + selectedIDs.length + ' 个任务吗？\n任务批次、逐机状态和指令日志会一并删除，且无法恢复。')) return;
+      var failed = [];
+      var chain = Promise.resolve();
+      selectedIDs.forEach(function (id) {
+        chain = chain.then(function () {
+          return api('/api/tasks/' + id, { method: 'DELETE' })
+            .then(function () {
+              delete sel[id];
+              if (state.taskDetailId === id) closeTaskDetail(true);
+            })
+            .catch(function (e) { failed.push('#' + id + '：' + e.message); });
+        });
+      });
+      chain.then(function () {
+        if (failed.length) alert('部分任务删除失败：\n' + failed.join('\n'));
+        state.taskPage = 1;
+        loadTasks();
+      });
+    }
+    var batchBar = isAdmin() || selectable.length ? h('div', { class: 'toolbar' }, [
+      h('label', { class: 'check' }, [
+        h('input', {
+          type: 'checkbox', class: 'task-check', checked: allChecked,
+          disabled: selectable.length ? null : '',
+          'aria-label': '全选本页可删除任务',
+          onchange: function (e) {
+            selectable.forEach(function (x) { if (e.target.checked) sel[x.id] = true; else delete sel[x.id]; });
+            render();
+          }
+        }, []),
+        ' 全选本页可删除任务'
+      ]),
+      h('button', {
+        class: 'btn danger small', disabled: selectedIDs.length ? null : '',
+        onclick: batchDelete
+      }, ['批量删除' + (selectedIDs.length ? '（' + selectedIDs.length + '）' : '')]),
+      h('span', { class: 'muted' }, ['仅草稿、成功、失败、已取消、已回滚的任务可删除。'])
+    ]) : null;
+
     var list = h('div', { class: 'card' }, [
+      batchBar,
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, [
           (state.taskFilterComp || state.taskFilterKind || state.taskFilterStatus || state.taskFilterCreator || state.taskQ)
@@ -5922,17 +5986,28 @@
           : null,
         h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
       ]),
-      simpleTable(['ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '创建者', '操作'], state.tasks,
+      simpleTable(['选择', 'ID', '类型', '名称', '组件/命令', '版本', '状态', '进度', '总数', '成功', '失败', '创建者', '操作'], state.tasks,
         function (x) {
           var c = compMap[x.component_id];
           var canView = x.can_view !== false;
+          var canSelect = canView && x.can_operate !== false && deletableTask(x);
+          var checkEl = canSelect
+            ? h('input', {
+                type: 'checkbox', class: 'task-check', checked: !!sel[x.id],
+                'aria-label': '选择任务 #' + x.id,
+                onchange: function (e) {
+                  if (e.target.checked) sel[x.id] = true; else delete sel[x.id];
+                  render();
+                }
+              }, [])
+            : h('span', { class: 'muted' }, ['-']);
           var acts = canView ? [detailBtn(x)] : [];
           if (canView && x.can_operate !== false) acts = acts.concat(taskActions(x));
           if (!acts.length) acts = [h('span', { class: 'muted' }, ['无权限'])];
 
           var pct = x.total ? Math.round(x.success * 100 / x.total) : 0;
           var isCmd = x.kind === 'command';
-          return [x.id,
+          return [checkEl, x.id,
             isCmd ? '命令' : '组件',
             h('a', {
               href: '#', class: 'link',
