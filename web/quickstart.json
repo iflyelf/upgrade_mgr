@@ -74,13 +74,13 @@
           },
           "lines": {
             "zh": [
-              "在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。",
+              "在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。",
               "到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。",
               "主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。",
               "「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。"
             ],
             "en": [
-              "On Hosts, choose Linux and architecture (amd64 / arm64 / arm; CentOS 6 uses the legacy build), then click Generate command. Tokens are one-time and expire in 15 minutes.",
+              "On Hosts, choose Linux and architecture (amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Tokens are one-time and expire in 15 minutes.",
               "Run the command as root on the target. The agent installs as a systemd service (SysV fallback) and the host appears in the list.",
               "Hostname, OS, architecture and egress IP are reported by the agent; multi-NIC hosts are matched by their egress address.",
               "Consul sync can also import hosts, but hosts without an agent are skipped when tasks are dispatched."
@@ -108,7 +108,7 @@
               "组件页顶部「Linux 示例」提供：只执行命令（安装 / 更新 / 卸载）、脚本（安装 / 更新 / 卸载）、二进制替换。",
               "推荐先用「脚本安装」：script_url 指向仓库 examples/node_exporter/install.sh（经 proxy 代理），不需要上传制品。",
               "install.sh 支持 install / update / uninstall / status：update 备份旧二进制并在启动失败时回滚，uninstall 传 -y 跳过确认。",
-              "脚本自动识别 systemd / SysV：CentOS/RHEL 7+、Rocky、openEuler、Ubuntu 16.04+、Debian 8+、SLES 12+ 写 systemd；CentOS 6、Ubuntu 14.04、Debian 7、SLES 11 写 /etc/init.d。",
+              "脚本自动识别 systemd / SysV：CentOS/RHEL 7+、Rocky、openEuler、Ubuntu 16.04+、Debian 8+、SLES 12+ 写 systemd；旧内核系统如 CentOS 6、Ubuntu 14.04、Debian 7、SLES 11 写 /etc/init.d。",
               "「只执行命令」用 exec + script_url + exec_args（install / update / uninstall -y），不下载制品，适合最小化安装。",
               "「二进制替换」用于需要平台备份/回滚的场景：服务注册放在 post_install 脚本里，由平台备份 install_path 下的旧文件。",
               "高级 JSON 的 exec_args / exec_env / exec_timeout / work_dir 控制脚本执行；例如用 exec_env 指定 NODE_EXPORTER_VERSION=1.8.2。",
@@ -118,7 +118,7 @@
               "The Components page exposes Linux examples: exec install/update/uninstall, script install/update/uninstall, and binary replacement.",
               "Start with Script install: script_url points to examples/node_exporter/install.sh (via proxy), so no artifact upload is required.",
               "install.sh supports install / update / uninstall / status. update backs up the old binary and rolls back on startup failure; uninstall -y skips confirmation.",
-              "The script auto-detects systemd/SysV: CentOS/RHEL 7+, Rocky, openEuler, Ubuntu 16.04+, Debian 8+, SLES 12+ use systemd; CentOS 6, Ubuntu 14.04, Debian 7 and SLES 11 use /etc/init.d.",
+              "The script auto-detects systemd/SysV: CentOS/RHEL 7+, Rocky, openEuler, Ubuntu 16.04+, Debian 8+, SLES 12+ use systemd; older kernel systems like CentOS 6, Ubuntu 14.04, Debian 7 and SLES 11 use /etc/init.d.",
               "Exec-only examples use exec + script_url + exec_args (install / update / uninstall -y) with no artifact.",
               "Binary replacement is for platform-managed backup/rollback: register the service in the post_install script and let the platform back up install_path.",
               "Advanced JSON fields exec_args / exec_env / exec_timeout / work_dir control execution, e.g. NODE_EXPORTER_VERSION=1.8.2 via exec_env.",
