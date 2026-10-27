@@ -393,6 +393,13 @@ th { position: relative; }
 .detail-stat > .tag { white-space: nowrap; }
 .detail-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 .detail-stat { min-width: 0; }
+/* 长组件名/任务名（如「Windows Exporter（Win 脚本安装）」）不再溢出卡片：允许在格内换行 */
+.detail-stat { white-space: normal; overflow-wrap: anywhere; flex-wrap: wrap; }
+.modal-head h3 { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+/* 日志复制按钮 */
+.log-toolbar { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+/* 任务列表批量选择 */
+.task-check { width: 16px; height: 16px; cursor: pointer; }
 
 /* 表格内状态/时间等短值不换行，避免列被压成两行 */
 td .tag, td .muted, .row-actions, td .log-details summary { white-space: nowrap; }
