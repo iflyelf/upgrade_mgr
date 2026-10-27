@@ -260,6 +260,42 @@ func (s *Service) checkTaskOwner(ctx context.Context, sc scope.Scope, taskID int
 	return fmt.Errorf("该任务由 %s 创建，仅创建者或管理员可操作", createdBy)
 }
 
+// ownerChecker 返回按创建者校验操作权限的函数，规则与 checkTaskOwner 一致。
+//
+// 批量操作时先解析一次操作者与策略，再对每个任务的 created_by 调用；
+// 同一创建者的团队共享结果会缓存，避免成百上千次重复查询。
+// 返回 nil 表示不受限（管理员、后台调用或策略为 inherit）。
+func (s *Service) ownerChecker(ctx context.Context) func(createdBy string) error {
+	actor, _ := auth.FromContext(ctx)
+	if actor == nil || actor.IsAdmin || actor.IsSuperAdmin() || actor.HasRole(auth.RoleAdmin) {
+		return nil
+	}
+	mode := s.ownerModeFor(ctx, actor.Username)
+	if mode == "inherit" {
+		return nil
+	}
+	shareCache := map[string]bool{}
+	return func(createdBy string) error {
+		if createdBy == "" || createdBy == actor.Username {
+			return nil
+		}
+		if mode == "off" {
+			ok, cached := shareCache[createdBy]
+			if !cached && s.shareAllowed != nil {
+				if allowed, err := s.shareAllowed(ctx, actor.Username, createdBy); err == nil {
+					ok = allowed
+				}
+				shareCache[createdBy] = ok
+			}
+			if ok {
+				return nil
+			}
+			return fmt.Errorf("该任务由 %s 创建，仅创建者、同团队成员或管理员可操作", createdBy)
+		}
+		return fmt.Errorf("该任务由 %s 创建，仅创建者或管理员可操作", createdBy)
+	}
+}
+
 // NewService 创建任务服务。allowExecMode 为 nil 时视为禁止。
 func NewService(db *sql.DB, compRepo *component.Repo, artRepo *artifact.Repo, allowExecMode func() bool) *Service {
 	if allowExecMode == nil {
