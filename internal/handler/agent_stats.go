@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentupdate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -27,12 +29,24 @@ type agentStatTarget struct {
 // 避免版本字符串相同但二进制不同的情况被误标为最新。
 func AgentStats(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		snap := s.Settings.Snapshot()
+		offlineAfter := snap.Agent.OfflineAfter
+		// 解析失败时回退默认 1m，避免配置错误导致统计失效。
+		d, err := time.ParseDuration(strings.TrimSpace(offlineAfter))
+		if err != nil || d < 1*time.Second {
+			d = 1 * time.Minute
+		}
+		offlineInterval := fmt.Sprintf("'%.0f seconds'", d.Seconds())
+
 		tCond, tArgs := reqScope(r).Where("h", 1)
 		// 兼容历史数据：早期注册未回填 agents.host_id，此时按 agent_id 关联主机；
 		// 新数据优先使用 agents.host_id（避免同 agent_id 多主机时重复计数）。
 		//
 		// variant 使用与自升级相同的推导：旧 Agent 未上报 build_variant 时，
 		// 2.x 内核按 legacy 处理，否则按普通构建。
+		//
+		// offline 判定：agent.status='offline' 或心跳超时（last_heartbeat_at 为空
+		// 或超过配置的 offline_after 阈值）。
 		rows, err := s.DB.QueryContext(r.Context(), `
 			SELECT COALESCE(NULLIF(a.build_version,''), NULLIF(a.agent_version,''), '') AS version,
 			       COALESCE(a.os,''), COALESCE(a.arch,''),
@@ -44,7 +58,7 @@ func AgentStats(s *svc.ServiceContext) http.HandlerFunc {
 			       COUNT(*) FILTER (
 			           WHERE a.status='offline'
 			              OR a.last_heartbeat_at IS NULL
-			              OR a.last_heartbeat_at < NOW() - INTERVAL '5 minutes'
+			              OR a.last_heartbeat_at < NOW() - INTERVAL `+offlineInterval+`
 			       ) AS offline
 			  FROM agents a
 			  JOIN hosts h ON h.id = a.host_id OR (a.host_id IS NULL AND h.agent_id = a.agent_id)
@@ -148,6 +162,7 @@ func AgentStats(s *svc.ServiceContext) http.HandlerFunc {
 		httpx.OK(w, map[string]any{
 			"target_version": targetVersion, "total": total, "offline": offline,
 			"outdated": outdated, "list": list,
+			"offline_after": offlineAfter,
 		})
 	}
 }

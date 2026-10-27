@@ -19,6 +19,7 @@ import (
 // 键包含会话 cookie 哈希，天然按用户隔离，不会串租户数据。
 var cacheablePaths = map[string]bool{
 	"/api/hosts":               true,
+	"/api/hosts/facets":        true,
 	"/api/agents/stats":        true,
 	"/api/components":          true,
 	"/api/artifacts":           true,
