@@ -701,6 +701,7 @@
 
   // INSTALL_SCRIPT_URL：node_exporter 安装脚本（经 proxy 代理），组件示例与任务示例共用。
   var INSTALL_SCRIPT_URL = 'https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh';
+  var INSTALL_SCRIPT_PLATFORM_URL = '/api/external/binary/node-exporter-install.sh';
 
   // WINDOWS_INSTALL_SCRIPT_URL：windows_exporter 安装脚本（PowerShell，经 proxy 代理）。
   // 与 Linux 的 install.sh 对齐：install / update / uninstall / status 四个动作。
@@ -860,7 +861,7 @@
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        script_url: INSTALL_SCRIPT_URL,
+        script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['install'],
         exec_timeout: '30m',
         health_cmd: [['pgrep', '-x', 'node_exporter']],
@@ -877,7 +878,7 @@
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        script_url: INSTALL_SCRIPT_URL,
+        script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['update'],
         exec_timeout: '30m',
         health_cmd: [['pgrep', '-x', 'node_exporter']],
@@ -894,7 +895,7 @@
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        script_url: INSTALL_SCRIPT_URL,
+        script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['uninstall', '-y'],
         exec_timeout: '30m'
       }
@@ -902,7 +903,7 @@
     {
       key: 'node_exporter_script',
       label: 'node_exporter_script（脚本安装，Agent 下载后执行）',
-      desc: '直接使用真实可用的 script_url（通过 proxy.xiaonuo.live 代理本仓库 examples/node_exporter/install.sh），不需要上传制品。Agent 下载脚本后用 Shell 执行；脚本会自行从 iflyelf/node_exporter latest 下载静态二进制（当前 1.12.1，仅 amd64/arm64），并按目标机 init 写 systemd unit 或 SysV init。script 模式与命令任务默认可用（由 agent.allow_exec_mode 控制，默认开启，可在“设置”里关闭）；高级配置 JSON 已预填 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd，post_install 脚本文本框也填入了一段可选的安装后检查示例，可直接修改参考。若不想依赖外链，删除高级 JSON 中的 script_url，改为上传 examples/node_exporter/install.sh 作为制品即可。',
+      desc: '直接使用真实可用的 script_url（优先从平台 /api/external/binary 下载，外网不通时自动切换），不需要上传制品。Agent 下载脚本后用 Shell 执行；脚本会自行从 iflyelf/node_exporter latest 下载静态二进制（当前 1.12.1，仅 amd64/arm64），并按目标机 init 写 systemd unit 或 SysV init。script 模式与命令任务默认可用（由 agent.allow_exec_mode 控制，默认开启，可在"设置"里关闭）；高级配置 JSON 已预填 script_url、exec_env、exec_timeout、health_cmd 与 version_cmd，post_install 脚本文本框也填入了一段可选的安装后检查示例，可直接修改参考。若不想依赖外链，删除高级 JSON 中的 script_url，改为上传 examples/node_exporter/install.sh 作为制品即可。',
       comp: {
         name: 'node_exporter_script', display_name: 'Node Exporter（脚本安装）', deploy_mode: 'script',
         binary_name: 'node_exporter',
@@ -936,7 +937,7 @@
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter',
         service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
-        script_url: INSTALL_SCRIPT_URL,
+        script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['update'],
         exec_env: ['NODE_EXPORTER_VERSION=latest'],
         exec_timeout: '10m',
@@ -953,7 +954,7 @@
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter',
         service_name: '', service_mgr: 'auto', enabled: true,
-        script_url: INSTALL_SCRIPT_URL,
+        script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['uninstall', '-y'],
         exec_timeout: '10m'
       }
@@ -961,7 +962,7 @@
     {
       key: 'windows_exporter_script',
       label: 'windows_exporter_script（Windows 脚本安装）',
-      desc: 'Windows 专用示例：script_url 指向本仓库 examples/windows_exporter/install.ps1（经 proxy 代理）。Agent 在 Windows 主机上默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行，脚本按系统版本自动选择 exe：Windows 10/Server 2016+ 用 latest，Windows 7/Server 2008 R2~2012 R2 用 legacy（v0.23.1 + Go 1.20，默认启用 hardware_info），注册 Windows 服务 windows_exporter、创建防火墙规则并写入默认配置。适合 Windows Server 2008 R2 ~ Windows 11；需要 PowerShell 2.0+（系统自带）。',
+      desc: 'Windows 专用示例：script_url 指向平台 /api/external/binary（自动代理外网或返回本地上传文件）。Agent 在 Windows 主机上默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行，脚本按系统版本自动选择 exe：Windows 10/Server 2016+ 用 latest，Windows 7/Server 2008 R2~2012 R2 用 legacy（v0.23.1 + Go 1.20，默认启用 hardware_info），注册 Windows 服务 windows_exporter、创建防火墙规则并写入默认配置。适合 Windows Server 2008 R2 ~ Windows 11；需要 PowerShell 2.0+（系统自带）。',
       comp: {
         name: 'windows_exporter_script', display_name: 'Windows Exporter（Win 脚本安装）', deploy_mode: 'script',
         binary_name: 'windows_exporter',

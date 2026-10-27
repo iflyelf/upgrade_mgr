@@ -107,10 +107,11 @@ func TestExternalBinaryDownloadServesCached(t *testing.T) {
 func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 	cfg := config.Default()
 	got := effectiveExternalBinaries(cfg)
-	if len(got) != 9 {
-		t.Fatalf("默认应有 9 条，实际 %d", len(got))
+	if len(got) != 10 {
+		t.Fatalf("默认应有 10 条，实际 %d", len(got))
 	}
 	for _, name := range []string{"windows-exporter-amd64", "windows-exporter-amd64-legacy", "windows-exporter-arm64-legacy",
+		"windows-exporter-install.ps1", "node-exporter-install.sh",
 		"node-exporter-linux-amd64", "node-exporter-linux-arm64", "node-exporter-linux-amd64-legacy", "node-exporter-linux-arm64-legacy"} {
 		if _, ok := got[name]; !ok {
 			t.Fatalf("默认应包含 %s", name)
