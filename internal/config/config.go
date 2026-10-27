@@ -33,6 +33,7 @@ type Config struct {
 	Redis    RedisConfig    `yaml:"redis"`
 	Artifact ArtifactConfig `yaml:"artifact"`
 	Agent    AgentConfig    `yaml:"agent"`
+	Task     TaskConfig     `yaml:"task"`
 	FlyIAM   FlyIAMConfig   `yaml:"flyiam"`
 	// ConsulMgr 可选：从 consul_mgr 同步主机（多服务组、多套 Consul）。
 	ConsulMgr ConsulMgrConfig `yaml:"consul_mgr"`
@@ -245,6 +246,16 @@ type AgentConfig struct {
 	// TaskOwnerOnly 为 true 时，非管理员只能操作自己创建的任务（启动/暂停/推进/
 	// 取消/重试/删除）。默认 false（保持既有协作行为）。
 	TaskOwnerOnly bool `yaml:"task_owner_only"`
+	// OfflineAfter Agent 心跳超时阈值（如 1m）：last_seen 超过此时长视为离线。
+	// 默认 1m（允许 2 次心跳周期 30s 丢失），最小 30s、最大 30m。
+	OfflineAfter string `yaml:"offline_after"`
+}
+
+// TaskConfig 任务创建相关。
+type TaskConfig struct {
+	// HostSelectorFields 任务创建时可选的主机筛选字段（逗号分隔），如 app_code,biz_group,os_family。
+	// 为空时禁用字段筛选（仅保留 IP 段），前端不显示分组下拉。
+	HostSelectorFields string `yaml:"host_selector_fields"`
 }
 
 // FlyIAMConfig FlyIAM 服务间集成（与 consul_mgr 复用同一部署）。
@@ -308,6 +319,12 @@ func Default() *Config {
 			TaskOwnerOnly: true,
 			// 默认全量，保持既有行为；做灰度时改为 5/10/50 等。
 			AutoUpdatePercent: 100,
+			// 离线判定阈值：心跳周期 30s，默认 1m 允许 2 次丢失。
+			OfflineAfter: "1m",
+		},
+		Task: TaskConfig{
+			// 默认提供常用字段；为空则禁用（仅保留 IP 段选择）。
+			HostSelectorFields: "app_code,biz_group,os_family,account",
 		},
 		Log: LogConfig{Level: "info"},
 	}
@@ -340,6 +357,10 @@ func Load(path string) (*Config, error) {
 	skew, err := time.ParseDuration(strings.TrimSpace(c.Agent.ClockSkew))
 	if err != nil || skew < 30*time.Second || skew > 30*time.Minute {
 		return nil, fmt.Errorf("agent.clock_skew 应为 30s-30m（建议 5m）")
+	}
+	offAfter, err := time.ParseDuration(strings.TrimSpace(c.Agent.OfflineAfter))
+	if err != nil || offAfter < 30*time.Second || offAfter > 30*time.Minute {
+		return nil, fmt.Errorf("agent.offline_after 应为 30s-30m（建议 1m）")
 	}
 	// 统一去掉结尾斜杠，避免拼接出 //api/... 导致 404。
 	c.Server.ExternalURL = strings.TrimRight(c.Server.ExternalURL, "/")
@@ -481,6 +502,8 @@ func (c *Config) applyEnv() {
 	setBool(&c.Agent.TaskOwnerOnly, "AGENT_TASK_OWNER_ONLY")
 	setInt(&c.Agent.AutoUpdatePercent, "AGENT_AUTO_UPDATE_PERCENT")
 	setStr(&c.Agent.ClockSkew, "AGENT_CLOCK_SKEW")
+	setStr(&c.Agent.OfflineAfter, "AGENT_OFFLINE_AFTER")
+	setStr(&c.Task.HostSelectorFields, "TASK_HOST_SELECTOR_FIELDS")
 	setStr(&c.FlyIAM.Endpoint, "FLYIAM_ENDPOINT")
 	setStr(&c.FlyIAM.ServiceToken, "FLYIAM_SERVICE_TOKEN")
 	setStr(&c.ConsulMgr.Endpoint, "CONSUL_MGR_ENDPOINT")
