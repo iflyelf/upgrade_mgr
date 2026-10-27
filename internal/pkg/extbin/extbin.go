@@ -38,7 +38,8 @@ func DefaultBinaries() map[string]string {
 		"windows-exporter-arm64-legacy": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64-legacy.exe",
 		"windows-exporter-install.ps1":  "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
 		// Linux 主机无法访问 GitHub 时，由控制台代缓存 node_exporter（ELF 静态二进制）。
-		"node-exporter-linux-amd64": "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64",
+		"node-exporter-install.sh":      "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh",
+		"node-exporter-linux-amd64":     "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64",
 		"node-exporter-linux-arm64": "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-arm64",
 		// 旧内核专用（kernel 2.6.32-3.10）：Go 1.23+ 在旧内核上会报 "procresize: invalid arg"。
 		// Go 1.17 是最后支持 kernel 2.6.32 的版本，使用单独的 legacy 工作流构建。
