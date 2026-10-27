@@ -14,8 +14,11 @@ import (
 // 字段列表取自 task.host_selector_fields 设置；为空时返回空列表。
 func HostFacets(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		snap := s.Settings.Snapshot()
-		fieldsStr := strings.TrimSpace(snap.Task.HostSelectorFields)
+		fieldsStr := ""
+		if s.Settings != nil {
+			snap := s.Settings.Snapshot()
+			fieldsStr = strings.TrimSpace(snap.Task.HostSelectorFields)
+		}
 		if fieldsStr == "" {
 			httpx.OK(w, map[string]any{"fields": []string{}, "values": map[string][]string{}})
 			return
