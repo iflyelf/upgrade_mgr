@@ -125,6 +125,9 @@ func New(c *config.Config) *ServiceContext {
 		return settings.Snapshot().Agent.AllowExecMode
 	})
 	taskSvc.SetReconciler(gw.ReconcileTasks)
+	taskSvc.SetOfflineAfter(func() string {
+		return settings.Snapshot().Agent.OfflineAfter
+	})
 	// 组件级权限：无 deploy 权限的用户不能发任务（管理员不受限）。
 	orgSvc := org.NewService(db)
 	if fn := org.DeployAuthorizer(orgSvc); fn != nil {
