@@ -267,6 +267,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", middleware.RequireAuth(auth, handler.TaskCancel(sc)))
 	mux.HandleFunc("POST /api/tasks/{id}/retry", middleware.RequireAuth(auth, handler.TaskRetry(sc)))
 	mux.HandleFunc("DELETE /api/tasks/{id}", middleware.RequireAuth(auth, handler.TaskDelete(sc)))
+	mux.HandleFunc("POST /api/tasks/batch-delete", middleware.RequireAuth(auth, handler.TaskBatchDelete(sc)))
 
 	// 主机
 	mux.HandleFunc("GET /api/agents/stats", middleware.RequireAuth(auth, handler.AgentStats(sc)))

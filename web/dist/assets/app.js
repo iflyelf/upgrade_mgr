@@ -5919,23 +5919,22 @@
     function batchDelete() {
       if (!selectedIDs.length) return;
       if (!confirm('确定删除选中的 ' + selectedIDs.length + ' 个任务吗？\n任务批次、逐机状态和指令日志会一并删除，且无法恢复。')) return;
-      var failed = [];
-      var chain = Promise.resolve();
-      selectedIDs.forEach(function (id) {
-        chain = chain.then(function () {
-          return api('/api/tasks/' + id, { method: 'DELETE' })
-            .then(function () {
-              delete sel[id];
-              if (state.taskDetailId === id) closeTaskDetail(true);
-            })
-            .catch(function (e) { failed.push('#' + id + '：' + e.message); });
+      // 一次请求完成批量删除，服务端逐个校验并返回成功列表与失败原因。
+      api('/api/tasks/batch-delete', { method: 'POST', body: JSON.stringify({ ids: selectedIDs }) })
+        .then(function (res) {
+          res = res || {};
+          (res.deleted || []).forEach(function (id) {
+            delete sel[id];
+            if (state.taskDetailId === id) closeTaskDetail(true);
+          });
+          var failed = (res.failed || []).map(function (f) { return '#' + f.id + '：' + f.error; });
+          if (failed.length) alert('部分任务删除失败：\n' + failed.join('\n'));
+        })
+        .catch(function (e) { alert('批量删除失败: ' + e.message); })
+        .then(function () {
+          state.taskPage = 1;
+          loadTasks();
         });
-      });
-      chain.then(function () {
-        if (failed.length) alert('部分任务删除失败：\n' + failed.join('\n'));
-        state.taskPage = 1;
-        loadTasks();
-      });
     }
     var batchBar = isAdmin() || selectable.length ? h('div', { class: 'toolbar' }, [
       h('label', { class: 'check' }, [
