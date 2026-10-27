@@ -283,6 +283,10 @@ type PreviewResult struct {
 	TotalHosts int      `json:"total_hosts"`
 	Batches    []int    `json:"batches"`    // 各批次主机数
 	SampleIPs  []string `json:"sample_ips"` // 前若干个 IP 预览
+	// TargetOS 任务目标系统（linux/windows），空表示无法判断、不按系统过滤。
+	TargetOS string `json:"target_os"`
+	// SkippedOS 因系统不匹配被跳过的主机数。
+	SkippedOS int `json:"skipped_os"`
 }
 
 // SetActor 注入当前操作者（供权限校验，不支持从 JSON 伪造）。
@@ -373,11 +377,12 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 	if kind != KindUpgrade && kind != KindCommand {
 		return nil, fmt.Errorf("不支持的任务类型 %q", kind)
 	}
-	var compName string
+	var compName, targetOS string
 	if kind == KindCommand {
 		if !isPrivilegedActor(req.actor) {
 			return nil, fmt.Errorf("命令任务仅管理员可预览")
 		}
+		targetOS = commandTargetOS(req.Command)
 	} else if kind == KindUpgrade {
 		if req.ComponentID == 0 {
 			return nil, fmt.Errorf("component_id 必填")
@@ -390,12 +395,15 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 			return nil, err
 		}
 		compName = comp.Name
+		targetOS = componentTargetOS(comp)
 	}
 
 	hosts, err := s.matchHosts(ctx, sc, req.Selector)
 	if err != nil {
 		return nil, err
 	}
+	// Linux 任务跳过 Windows 主机，Windows 任务跳过 Linux 主机。
+	hosts, skippedOS := filterHostsByOS(hosts, targetOS)
 	// 与创建一致：预览也不能越过团队授权的主机分组范围。
 	if kind == KindUpgrade && compName != "" {
 		if err := s.checkHostGroups(ctx, req.actor, compName, hosts); err != nil {
@@ -415,7 +423,8 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 		}
 		sample = append(sample, h.ip)
 	}
-	return &PreviewResult{TotalHosts: len(hosts), Batches: batches, SampleIPs: sample}, nil
+	return &PreviewResult{TotalHosts: len(hosts), Batches: batches, SampleIPs: sample,
+		TargetOS: targetOS, SkippedOS: skippedOS}, nil
 }
 
 // Create 创建任务：落库 upgrade_tasks + task_hosts + task_batches。
@@ -427,7 +436,7 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 	if kind != KindUpgrade && kind != KindCommand {
 		return 0, fmt.Errorf("不支持的任务类型 %q", kind)
 	}
-	var compName string
+	var compName, targetOS string
 	if kind == KindUpgrade {
 		if req.ComponentID == 0 || req.Version == "" {
 			return 0, fmt.Errorf("component_id 与 version 必填")
@@ -442,7 +451,9 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 			return 0, err
 		}
 		compName = comp.Name
+		targetOS = componentTargetOS(comp)
 	} else {
+		targetOS = commandTargetOS(req.Command)
 		// 命令任务没有组件，无法用组件 deploy 权限约束；仅管理员可创建，
 		// 避免获得任意主机写入权限的普通用户执行任意脚本。
 		if !isPrivilegedActor(req.actor) {
@@ -468,6 +479,11 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 	hosts, err := s.matchHosts(ctx, sc, req.Selector)
 	if err != nil {
 		return 0, err
+	}
+	// Linux 任务跳过 Windows 主机，Windows 任务跳过 Linux 主机。
+	hosts, skippedOS := filterHostsByOS(hosts, targetOS)
+	if len(hosts) == 0 && skippedOS > 0 {
+		return 0, fmt.Errorf("命中的 %d 台主机系统均与 %s 任务不匹配，已全部跳过", skippedOS, osLabel(targetOS))
 	}
 	if len(hosts) == 0 {
 		return 0, fmt.Errorf("目标选择器未命中任何主机")
@@ -545,6 +561,8 @@ type hostRow struct {
 	// appCode / bizGroup 用于团队授权的主机分组校验。
 	appCode  string
 	bizGroup string
+	// osFamily 用于按任务目标系统过滤（Linux 任务跳过 Windows 主机，反之亦然）。
+	osFamily string
 }
 
 // matchHosts 解析 selector：IP 段展开 ∩ 分组过滤 − 排除。
@@ -567,7 +585,7 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 		i++
 	}
 
-	q := "SELECT id, ip, COALESCE(exit_ip,''), COALESCE(app_code,''), COALESCE(biz_group,'') " +
+	q := "SELECT id, ip, COALESCE(exit_ip,''), COALESCE(app_code,''), COALESCE(biz_group,''), COALESCE(os_family,'') " +
 		"FROM hosts WHERE " + join(where, " AND ")
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -582,15 +600,15 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 	all := map[int64]hostRow{}
 	for rows.Next() {
 		var id int64
-		var ip, exitIP, appCode, bizGroup string
-		if err := rows.Scan(&id, &ip, &exitIP, &appCode, &bizGroup); err != nil {
+		var ip, exitIP, appCode, bizGroup, osFamily string
+		if err := rows.Scan(&id, &ip, &exitIP, &appCode, &bizGroup, &osFamily); err != nil {
 			return nil, err
 		}
 		byIP[ip] = append(byIP[ip], id)
 		if exitIP != "" && exitIP != ip {
 			byIP[exitIP] = append(byIP[exitIP], id)
 		}
-		all[id] = hostRow{id: id, ip: ip, exitIP: exitIP, appCode: appCode, bizGroup: bizGroup}
+		all[id] = hostRow{id: id, ip: ip, exitIP: exitIP, appCode: appCode, bizGroup: bizGroup, osFamily: osFamily}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

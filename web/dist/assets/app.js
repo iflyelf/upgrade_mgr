@@ -4869,7 +4869,7 @@
           ])
         ]),
         h('div', { class: 'grid2' }, [
-          field('OS 匹配 (os_match)', osEl, '仅记录，当前版本不参与匹配。'),
+          field('OS 匹配 (os_match)', osEl, '填 linux 或 windows 指定任务目标系统，不匹配的主机会被跳过；留空时按 script_url 扩展名、exec_path、install_path 自动判断。'),
           field('架构匹配 (arch_match)', archEl, '仅记录，当前版本不参与匹配。')
         ]),
         field('高级配置 JSON（可选）', advEl, '支持 ' + ADV_KEYS.join('、') + '；命令是二维数组，例如 [["/bin/sh","-c","echo hi"]]。script 或 exec 模式可用 script_url 指定 HTTP(S) 脚本地址（设置后不再要求上传制品）；exec + script_url 时 exec_args 作为脚本参数传入，例如 ["install"]。post_install 脚本请填到下方单独文本框。'),
@@ -5730,6 +5730,10 @@
       previewBox = h('div', { class: 'preview' }, [
         h('div', { class: p.total_hosts ? '' : 'err' }, [
           '预览：命中 ' + p.total_hosts + ' 台主机，分 ' + batches.length + ' 批'
+        ]),
+        h('div', { class: 'hint' }, [
+          '任务系统：' + (p.target_os === 'windows' ? 'Windows' : p.target_os === 'linux' ? 'Linux' : '未识别（不按系统过滤）') +
+          (p.skipped_os ? '；已跳过 ' + p.skipped_os + ' 台系统不匹配的主机' : '')
         ]),
         h('div', { class: 'hint' }, ['每批台数：' + (batches.length ? batches.join(' / ') : '-')]),
         h('div', { class: 'hint' }, ['示例 IP：' + (sample.join(', ') || '-') + (sample.length >= 20 ? ' …' : '')])

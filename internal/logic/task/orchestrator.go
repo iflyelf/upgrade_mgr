@@ -247,11 +247,13 @@ func (o *Orchestrator) batchProgress(ctx context.Context, taskID int64, batchIdx
 func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, version string, batchIdx int, tenantID int64, kind string, command []byte) error {
 	var comp protocol.ComponentSpec
 	var cmdSpec protocol.CommandSpec
+	var targetOS string
 	if kind == KindCommand {
 		// 命令任务不依赖组件定义，但仍需 tenant 作用域检查主机归属。
 		if err := json.Unmarshal(command, &cmdSpec); err != nil {
 			return fmt.Errorf("解析命令任务失败: %w", err)
 		}
+		targetOS = commandTargetOS(cmdSpec)
 	} else {
 		sc := scope.New(tenantID, false)
 		c, err := o.svc.compRepo.Get(ctx, sc, compID)
@@ -259,6 +261,7 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 			return err
 		}
 		comp = toComponentSpec(c)
+		targetOS = componentTargetOS(c)
 
 		// 安全：强制校验 AllowExecMode（exec/replace_exec/script 可执行任意命令；
 		// 该开关默认开启，管理员可在设置页关闭）。
@@ -311,6 +314,12 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 	for _, r := range list {
 		if r.aid == "" {
 			o.markHostSkipped(ctx, r.thID)
+			continue
+		}
+		// Linux 任务跳过 Windows 主机，Windows 任务跳过 Linux 主机（兼容创建前已存在的任务）。
+		if osMismatch(targetOS, r.os) {
+			o.markHostSkippedWithLog(ctx, r.thID,
+				fmt.Sprintf("%s 任务不在 %s 主机上执行，已跳过", osLabel(targetOS), osLabel(hostOS(r.os))))
 			continue
 		}
 		// 跳过离线主机：last_seen 为空或超过配置阈值。
