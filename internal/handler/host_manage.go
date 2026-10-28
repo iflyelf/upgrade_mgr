@@ -324,13 +324,28 @@ func hostInternalErr(err error) *deleteError {
 
 // deleteHost 在单个事务内删除一台主机，返回主机 IP（查不到时为空）。
 func deleteHost(ctx context.Context, s *svc.ServiceContext, sc scope.Scope, id int64) (string, *deleteError) {
-	var ip, agentID string
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return "", hostInternalErr(err)
 	}
 	defer tx.Rollback()
+	ip, derr := deleteHostTx(ctx, tx, sc, id)
+	if derr != nil {
+		return ip, derr
+	}
+	if err := tx.Commit(); err != nil {
+		return ip, hostInternalErr(err)
+	}
+	return ip, nil
+}
 
+// deleteHostTx 在调用方事务内删除一台主机（不提交）。
+//
+// 异步删除作业用它把「删除本批主机」与「记录作业进度」放进同一事务，
+// 每台主机前设 SAVEPOINT，单台失败只回滚该台。
+func deleteHostTx(ctx context.Context, tx *sql.Tx, sc scope.Scope, id int64) (string, *deleteError) {
+	var ip, agentID string
+	var err error
 	cond, condArgs := sc.Where("", 2)
 	// 先做无锁的租户/存在性检查：跨租户主机直接视为不存在，
 	// 避免为了加锁而触碰他人的子表数据。
@@ -405,9 +420,6 @@ func deleteHost(ctx context.Context, s *svc.ServiceContext, sc scope.Scope, id i
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ip, hostNotFound(sql.ErrNoRows)
-	}
-	if err := tx.Commit(); err != nil {
-		return ip, hostInternalErr(err)
 	}
 	return ip, nil
 }

@@ -61,69 +61,78 @@ type Host struct {
 	Source            string            `json:"source"`
 }
 
+// hostOfflineAfter 返回离线判定阈值；解析失败时回退默认 1m，避免配置错误导致列表失效。
+func hostOfflineAfter(s *svc.ServiceContext) time.Duration {
+	offlineAfter := "1m"
+	if s.Settings != nil {
+		offlineAfter = s.Settings.Snapshot().Agent.OfflineAfter
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(offlineAfter))
+	if err != nil || d < 1*time.Second {
+		d = 1 * time.Minute
+	}
+	return d
+}
+
+// hostListFilter 按查询参数构造主机列表的 WHERE 子句（表别名 h）。
+//
+// 列表与「按筛选条件全选」共用，保证两者命中的主机集合一致。
+// 返回 WHERE 子句、参数，以及下一个可用的占位符序号。
+func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int) {
+	offlineInterval := fmt.Sprintf("'%.0f seconds'", hostOfflineAfter(s).Seconds())
+
+	q := r.URL.Query()
+	// 租户隔离：恒为第一个条件，确保任何过滤组合下都不会漏过滤。
+	tCond, tArgs := reqScope(r).Where("h", 1)
+	var (
+		where = []string{tCond}
+		args  = append([]any{}, tArgs...)
+		i     = len(tArgs) + 1
+	)
+	add := func(cond, val string) {
+		if val == "" {
+			return
+		}
+		where = append(where, cond+"$"+strconv.Itoa(i))
+		args = append(args, val)
+		i++
+	}
+	if kw := strings.TrimSpace(q.Get("q")); kw != "" {
+		// 出口 IP / 隧道地址也参与搜索：运维通常按实际业务网地址找主机。
+		where = append(where,
+			"(h.ip ILIKE $"+strconv.Itoa(i)+" OR h.exit_ip ILIKE $"+strconv.Itoa(i)+
+				" OR h.tunnel_ip ILIKE $"+strconv.Itoa(i)+
+				" OR h.server_url_override ILIKE $"+strconv.Itoa(i)+
+				" OR h.hostname ILIKE $"+strconv.Itoa(i)+
+				" OR h.biz_group ILIKE $"+strconv.Itoa(i)+")")
+		args = append(args, "%"+kw+"%")
+		i++
+	}
+	add("h.app_code = ", q.Get("app_code"))
+	add("h.os_family = ", q.Get("os_family"))
+	add("h.account = ", q.Get("account"))
+
+	// agent_status 过滤：支持按计算出的有效状态过滤。
+	// 如果过滤值是 offline，需要用 CASE 表达式判断心跳超时。
+	if statusFilter := q.Get("agent_status"); statusFilter != "" {
+		if statusFilter == "offline" {
+			where = append(where,
+				"(h.agent_status='offline' OR h.agent_id='' OR h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+offlineInterval+")")
+		} else {
+			where = append(where, "h.agent_status=$"+strconv.Itoa(i))
+			args = append(args, statusFilter)
+			i++
+		}
+	}
+	return " WHERE " + strings.Join(where, " AND "), args, i
+}
+
 // ListHosts 主机列表，支持关键字与分组过滤（?q=&app_code=&os_family=&page=&size=）。
 func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		offlineAfter := "1m" // 默认值
-		if s.Settings != nil {
-			snap := s.Settings.Snapshot()
-			offlineAfter = snap.Agent.OfflineAfter
-		}
-		// 解析失败时回退默认 1m，避免配置错误导致列表失效。
-		d, err := time.ParseDuration(strings.TrimSpace(offlineAfter))
-		if err != nil || d < 1*time.Second {
-			d = 1 * time.Minute
-		}
-		offlineInterval := fmt.Sprintf("'%.0f seconds'", d.Seconds())
-
+		d := hostOfflineAfter(s)
 		q := r.URL.Query()
-		// 租户隔离：恒为第一个条件，确保任何过滤组合下都不会漏过滤。
-		tCond, tArgs := reqScope(r).Where("h", 1)
-		var (
-			where = []string{tCond}
-			args  = append([]any{}, tArgs...)
-			i     = len(tArgs) + 1
-		)
-		add := func(cond, val string) {
-			if val == "" {
-				return
-			}
-			where = append(where, cond+"$"+strconv.Itoa(i))
-			args = append(args, val)
-			i++
-		}
-		if kw := strings.TrimSpace(q.Get("q")); kw != "" {
-			// 出口 IP / 隧道地址也参与搜索：运维通常按实际业务网地址找主机。
-			where = append(where,
-				"(h.ip ILIKE $"+strconv.Itoa(i)+" OR h.exit_ip ILIKE $"+strconv.Itoa(i)+
-					" OR h.tunnel_ip ILIKE $"+strconv.Itoa(i)+
-					" OR h.server_url_override ILIKE $"+strconv.Itoa(i)+
-					" OR h.hostname ILIKE $"+strconv.Itoa(i)+
-					" OR h.biz_group ILIKE $"+strconv.Itoa(i)+")")
-			args = append(args, "%"+kw+"%")
-			i++
-		}
-		add("h.app_code = ", q.Get("app_code"))
-		add("h.os_family = ", q.Get("os_family"))
-		add("h.account = ", q.Get("account"))
-
-		// agent_status 过滤：支持按计算出的有效状态过滤。
-		// 如果过滤值是 offline，需要用 CASE 表达式判断心跳超时。
-		if statusFilter := q.Get("agent_status"); statusFilter != "" {
-			if statusFilter == "offline" {
-				where = append(where,
-					"(h.agent_status='offline' OR h.agent_id='' OR h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+offlineInterval+")")
-			} else {
-				where = append(where, "h.agent_status=$"+strconv.Itoa(i))
-				args = append(args, statusFilter)
-				i++
-			}
-		}
-
-		whereSQL := ""
-		if len(where) > 0 {
-			whereSQL = " WHERE " + strings.Join(where, " AND ")
-		}
+		whereSQL, args, i := hostListFilter(s, r)
 
 		page := atoiDefault(q.Get("page"), 1)
 		size := atoiDefault(q.Get("size"), 20)
