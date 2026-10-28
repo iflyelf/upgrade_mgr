@@ -147,6 +147,7 @@ const (
 	ActionTaskRetry       = "task.retry"
 	ActionTaskDelete      = "task.delete"
 	ActionArtifactUpload  = "artifact.upload"
+	ActionArtifactDelete  = "artifact.delete"
 	ActionAgentRegister   = "agent.register"
 	ActionAgentSelfUpdate = "agent.self_update"
 	ActionEnrollToken     = "enroll_token.create"

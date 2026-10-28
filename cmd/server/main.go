@@ -194,6 +194,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/consul-mgr/test", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.TestConsulMgr(sc))))
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
+	mux.HandleFunc("POST /api/hosts/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostBatchDelete(sc))))
 	mux.HandleFunc("POST /api/hosts/{id}/tunnel-test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostTunnelTest(sc))))
 	// Agent 自升级：管理员触发 + 查看最近状态；自动升级由 agent.auto_update 设置控制。
 	mux.HandleFunc("POST /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdate(sc))))
@@ -252,6 +253,8 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/artifacts", middleware.RequireAuth(auth, handler.ArtifactList(sc)))
 	mux.HandleFunc("GET /api/artifacts/paged", middleware.RequireAuth(auth, handler.ArtifactListPaged(sc)))
 	mux.HandleFunc("POST /api/artifacts", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ArtifactUpload(sc))))
+	mux.HandleFunc("DELETE /api/artifacts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ArtifactDelete(sc))))
+	mux.HandleFunc("POST /api/artifacts/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ArtifactBatchDelete(sc))))
 	// 制品下载：Agent 用 Bearer token 或匿名内网访问（P2 放开，P3 收敛为签名 URL）
 	// 制品下载：Agent 专用（Bearer 认证 + 租户作用域），防匿名拖取二进制
 	mux.Handle("GET /api/artifacts/{id}/download", agentAuth(http.HandlerFunc(handler.ArtifactDownload(sc))))

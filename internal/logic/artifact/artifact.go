@@ -463,6 +463,61 @@ func (r *Repo) PurgeByComponent(ctx context.Context, sc scope.Scope, componentID
 	return err
 }
 
+// ErrArtifactInUse 制品仍被未结束的任务或指令使用。
+var ErrArtifactInUse = fmt.Errorf("制品正被运行中/已暂停的任务或未完成的指令使用，请先取消任务或等待完成后再删除")
+
+// Delete 删除单个制品（元数据 + 存储对象），返回被删除的制品。
+//
+// 与上传共用组件级独占锁：删除期间同组件不会写入新制品，也不会删到正在上传的文件。
+// 以下情况拒绝删除（返回 ErrArtifactInUse）：
+//   - 同组件同版本的任务处于 running / paused（后续批次仍要按版本匹配制品）；
+//   - 有未完成指令引用该制品（Agent 可能正在下载）。
+//
+// 先删元数据再删文件：文件删除失败只告警，不会出现「记录还在但文件已没」。
+func (r *Repo) Delete(ctx context.Context, sc scope.Scope, id int64) (*Artifact, error) {
+	a, err := r.Get(ctx, sc, id)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := r.LockComponent(ctx, a.ComponentID)
+	if err != nil {
+		return a, err
+	}
+	defer lock.Unlock()
+
+	var inUse bool
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM upgrade_tasks
+			 WHERE component_id=$1 AND version=$2 AND status IN ('running','paused')
+		) OR EXISTS (
+			SELECT 1 FROM commands
+			 WHERE status IN ('pending','dispatched','accepted','running')
+			   AND payload->'artifact'->>'id' = $3
+		)`, a.ComponentID, a.Version, fmt.Sprint(id)).Scan(&inUse); err != nil {
+		return a, err
+	}
+	if inUse {
+		return a, ErrArtifactInUse
+	}
+
+	cond, targs := sc.Where("", 2)
+	var path string
+	err = r.db.QueryRowContext(ctx,
+		`DELETE FROM artifacts WHERE id=$1 AND `+cond+` RETURNING path`,
+		append([]any{id}, targs...)...).Scan(&path)
+	if err == sql.ErrNoRows {
+		return a, fmt.Errorf("制品不存在")
+	}
+	if err != nil {
+		return a, err
+	}
+	if path != "" {
+		r.RemoveObjects([]string{path})
+	}
+	return a, nil
+}
+
 // PathsByComponent 返回组件下全部制品的存储路径（只读，不删除）。
 //
 // 删除组件时应先取路径、再删组件（元数据随外键 CASCADE 消失）、最后删文件；

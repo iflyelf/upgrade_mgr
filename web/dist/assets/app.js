@@ -1360,12 +1360,25 @@
     var listHostDefs = (state.hostFieldDefs || [])
       .filter(function (d) { return d.showInList; })
       .sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
+    // 批量删除：管理员可单选/多选本页主机（后端同样要求管理员）。
+    var hostSel = isAdmin() ? batchSelection({
+      stateKey: 'hostSelected', items: state.hosts, noun: '主机', unit: '台',
+      url: '/api/hosts/batch-delete',
+      confirmText: '删除后将级联删除这些主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n存在未完成任务或指令的主机会被跳过。',
+      label: function (x) { return x.ip; },
+      onDone: function (wholePage) {
+        if (wholePage && state.hostPage > 1) state.hostPage--;
+        loadHosts();
+      }
+    }) : null;
     var cols = ['IP', '主机名', 'OS', 'ARCH', '业务组', 'app_code', 'Agent', '来源']
       .concat(listHostDefs.map(function (d) { return d.label; }));
+    if (hostSel) cols.unshift('选择');
     if (isAdmin()) cols.push('操作');
     var head = h('tr', {}, cols.map(function (t) { return h('th', { scope: 'col' }, [t]); }));
     var rows = state.hosts.map(function (x) {
       var cells = [
+        hostSel ? h('td', {}, [hostSel.cell(x)]) : null,
         h('td', {}, [ipCell(x)]), h('td', {}, [x.hostname || '-']),
         h('td', {}, [x.os_type || x.os_family || '-']), h('td', {}, [x.arch || '-']),
         h('td', {}, [x.biz_group || '-']), h('td', {}, [x.app_code || '-']),
@@ -1424,6 +1437,7 @@
       isAdmin() ? hostForm() : null,
       h('div', { class: 'card' }, [
         toolbar,
+        hostSel && state.hosts.length ? hostSel.bar : null,
         (function () {
           var hostTable = h('table', {}, [h('thead', {}, [head]), h('tbody', {}, rows)]);
           var hostWrap = h('div', { class: 'table-wrap' }, [hostTable]);
@@ -4579,6 +4593,97 @@
     });
   }
 
+  // batchSelection 本页单选/多选 + 批量删除（主机、制品共用）。
+  //
+  // 勾选状态按 ID 存在 state[opts.stateKey] 中，自动刷新重绘不会丢失；
+  // 只统计当前页仍存在的行，翻页/搜索后不会误删看不到的数据。
+  // 服务端逐个复核权限与状态，部分失败时汇总展示失败原因。
+  //
+  // opts: { stateKey, items, noun, unit, url, confirmText, label(x), onDone(pageEmptied) }
+  function batchSelection(opts) {
+    var sel = state[opts.stateKey] || (state[opts.stateKey] = {});
+    var busyKey = opts.stateKey + 'Busy';
+    var busy = !!state[busyKey];
+    var ids = opts.items.filter(function (x) { return sel[x.id]; }).map(function (x) { return x.id; });
+    var allChecked = opts.items.length > 0 && ids.length === opts.items.length;
+    function toggle(id, on) {
+      if (on) sel[id] = true; else delete sel[id];
+      render();
+    }
+    function run() {
+      if (!ids.length || busy) return;
+      if (!confirm('确定删除选中的 ' + ids.length + ' ' + opts.unit + opts.noun + '吗？\n' + opts.confirmText)) return;
+      state[busyKey] = true;
+      render();
+      var deletedCount = 0;
+      api(opts.url, { method: 'POST', body: JSON.stringify({ ids: ids }) })
+        .then(function (res) {
+          res = res || {};
+          var deleted = res.deleted || [];
+          deletedCount = deleted.length;
+          var failed = res.failed || [];
+          var byID = {};
+          opts.items.forEach(function (x) { byID[x.id] = x; });
+          var msg = '已删除 ' + deleted.length + ' ' + opts.unit + opts.noun + '。';
+          if (failed.length) {
+            msg += '\n' + failed.length + ' ' + opts.unit + '删除失败：\n' + failed.slice(0, 20).map(function (f) {
+              return (byID[f.id] ? opts.label(byID[f.id]) : '#' + f.id) + '：' + f.error;
+            }).join('\n') + (failed.length > 20 ? '\n…' : '');
+          }
+          alert(msg);
+          // 失败的保持勾选，便于处理后重试。
+          state[opts.stateKey] = {};
+          failed.forEach(function (f) { state[opts.stateKey][f.id] = true; });
+        })
+        .catch(function (e) { alert('批量删除失败: ' + e.message); })
+        .then(function () {
+          state[busyKey] = false;
+          // 本页全部删除成功时回退一页，避免停在空页。
+          opts.onDone(deletedCount > 0 && deletedCount === opts.items.length);
+        });
+    }
+    return {
+      // 行首勾选框；「全选本页」放在工具栏，与任务页一致。
+      cell: function (x) {
+        return h('input', {
+          type: 'checkbox', class: 'task-check', checked: !!sel[x.id],
+          disabled: busy ? '' : null,
+          'aria-label': '选择' + opts.noun + ' ' + opts.label(x),
+          onchange: function (e) { toggle(x.id, e.target.checked); }
+        }, []);
+      },
+      bar: h('div', { class: 'toolbar' }, [
+        h('label', { class: 'check' }, [
+          h('input', {
+            type: 'checkbox', class: 'task-check', checked: allChecked,
+            disabled: opts.items.length && !busy ? null : '',
+            'aria-label': '全选本页' + opts.noun,
+            onchange: function (e) {
+              opts.items.forEach(function (x) {
+                if (e.target.checked) sel[x.id] = true; else delete sel[x.id];
+              });
+              render();
+            }
+          }, []),
+          ' 全选本页'
+        ]),
+        ids.length && !busy
+          ? h('button', {
+              class: 'btn ghost small', type: 'button',
+              onclick: function () { state[opts.stateKey] = {}; render(); }
+            }, ['取消选择'])
+          : null,
+        h('button', {
+          class: 'btn danger small', type: 'button',
+          disabled: ids.length && !busy ? null : '', onclick: run
+        }, [busy ? '删除中…' : ('批量删除' + (ids.length ? '（' + ids.length + '）' : ''))]),
+        h('span', { class: 'muted' }, [ids.length
+          ? '已选中 ' + ids.length + ' ' + opts.unit + opts.noun + '（仅限本页）。'
+          : '勾选一个或多个' + opts.noun + '后可批量删除。'])
+      ])
+    };
+  }
+
   function simpleTable(cols, rows, cells, opts) {
     if (!Array.isArray(rows)) rows = [];
     var head = h('tr', {}, cols.map(function (t) { return h('th', { scope: 'col' }, [t]); }));
@@ -5199,6 +5304,35 @@
       }, ['下一页'])
     ]) : null;
 
+    function artLabel(x) {
+      var c = compMap[x.component_id];
+      return (c ? c.name : '#' + x.component_id) + ' ' + x.version + ' / ' + x.arch +
+        (x.os_family ? ' / ' + x.os_family : '');
+    }
+    // 批量删除：管理员可单选/多选本页制品（后端同样要求管理员）。
+    var artSel = isAdmin() ? batchSelection({
+      stateKey: 'artifactSelected', items: state.artifacts, noun: '制品', unit: '个',
+      url: '/api/artifacts/batch-delete',
+      confirmText: '制品文件会从存储中删除，无法恢复。\n正被运行中/已暂停任务使用的制品会被跳过。',
+      label: artLabel,
+      onDone: function (pageEmptied) {
+        loadArtifacts(pageEmptied && state.artifactPage > 1 ? state.artifactPage - 1 : state.artifactPage);
+      }
+    }) : null;
+    function deleteArtifact(x) {
+      if (!confirm('确定删除制品 ' + artLabel(x) + ' 吗？\n制品文件会从存储中删除，无法恢复。')) return;
+      api('/api/artifacts/' + x.id, { method: 'DELETE' })
+        .then(function () {
+          if (state.artifactSelected) delete state.artifactSelected[x.id];
+          var page = state.artifacts.length === 1 && state.artifactPage > 1
+            ? state.artifactPage - 1 : state.artifactPage;
+          loadArtifacts(page);
+        })
+        .catch(function (e) { alert('删除失败: ' + e.message); });
+    }
+    var artCols = ['ID', '组件', '版本', 'ARCH', 'OS', '文件名', '大小', 'MD5', '备注'];
+    if (artSel) artCols = ['选择'].concat(artCols, ['操作']);
+
     var table = h('div', { class: 'card' }, [
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, ['共 ' + state.artifactTotal + ' 个制品（版本 × 架构，md5 校验）']),
@@ -5206,12 +5340,13 @@
         h('label', { class: 'muted' }, ['搜索：', artQEl]),
         h('span', { class: 'muted' }, ['任务匹配 arch 相同或 all、os_family 相同或为空的制品'])
       ]),
-      simpleTable(['ID', '组件', '版本', 'ARCH', 'OS', '文件名', '大小', 'MD5', '备注'], state.artifacts,
+      artSel && state.artifacts.length ? artSel.bar : null,
+      simpleTable(artCols, state.artifacts,
         function (x) {
           var c = compMap[x.component_id];
-          return [
-            x.id,
-            c ? c.name : x.component_id,
+          var cells = [
+            String(x.id),
+            c ? c.name : String(x.component_id),
             x.version,
             x.arch,
             x.os_family || '通用',
@@ -5220,6 +5355,16 @@
             (x.md5 || '').slice(0, 12),
             x.notes || '-'
           ];
+          if (artSel) {
+            cells.unshift(artSel.cell(x));
+            cells.push(h('div', { class: 'row-actions' }, [
+              h('button', {
+                class: 'btn danger small', type: 'button',
+                onclick: function () { deleteArtifact(x); }
+              }, ['删除'])
+            ]));
+          }
+          return cells;
         },
         { key: 'artifacts' }),
       state.artifacts.length === 0 ? h('div', { class: 'muted empty' }, [

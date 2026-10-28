@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
 
@@ -216,120 +218,196 @@ func HostDelete(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "主机 ID 无效")
 			return
 		}
-
-		var ip, agentID string
-		var opErr error
-		defer func() {
-			auditOp(s, r, audit.ActionHostDelete, "host", strconv.FormatInt(id, 10), ip, opErr)
-		}()
-
-		tx, err := s.DB.BeginTx(r.Context(), nil)
-		if err != nil {
-			opErr = err
-			httpx.FailErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		defer tx.Rollback()
-
-		cond, condArgs := reqScope(r).Where("", 2)
-		// 先做无锁的租户/存在性检查：跨租户主机直接视为不存在，
-		// 避免为了加锁而触碰他人的子表数据。
-		err = tx.QueryRowContext(r.Context(),
-			`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1 AND `+cond,
-			append([]any{id}, condArgs...)...).Scan(&ip, &agentID)
-		if errors.Is(err, sql.ErrNoRows) {
-			opErr = err
-			httpx.Fail(w, http.StatusNotFound, "主机不存在或无权访问")
-			return
-		}
-		if err != nil {
-			opErr = err
-			httpx.FailErr(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		// 锁顺序必须与 Report/UpdateStage 的 task_hosts -> commands -> hosts 一致。
-		// 若反过来先锁 hosts 再级联删除子表，会与正在落终态的 Agent 上报形成
-		// “上报持有 task_hosts 等 hosts，删除持有 hosts 等 task_hosts”的死锁。
-		for _, q := range []string{
-			`SELECT 1 FROM task_hosts WHERE host_id=$1 FOR UPDATE`,
-			`SELECT 1 FROM commands WHERE host_id=$1 FOR UPDATE`,
-		} {
-			rows, qerr := tx.QueryContext(r.Context(), q, id)
-			if qerr != nil {
-				opErr = qerr
-				httpx.FailErr(w, http.StatusInternalServerError, qerr)
-				return
+		ip, derr := deleteHost(r.Context(), s, reqScope(r), id)
+		auditOp(s, r, audit.ActionHostDelete, "host", strconv.FormatInt(id, 10), ip, errOrNil(derr))
+		if derr != nil {
+			if derr.internal {
+				httpx.FailErr(w, derr.status, derr.err)
+			} else {
+				httpx.Fail(w, derr.status, derr.msg)
 			}
-			rows.Close()
-			if qerr = rows.Err(); qerr != nil {
-				opErr = qerr
-				httpx.FailErr(w, http.StatusInternalServerError, qerr)
-				return
-			}
-		}
-
-		// 最后锁主机行并复查，防止检查后被重新注册/改租户。
-		err = tx.QueryRowContext(r.Context(),
-			`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1 AND `+cond+` FOR UPDATE`,
-			append([]any{id}, condArgs...)...).Scan(&ip, &agentID)
-		if errors.Is(err, sql.ErrNoRows) {
-			opErr = err
-			httpx.Fail(w, http.StatusNotFound, "主机不存在或无权访问")
-			return
-		}
-		if err != nil {
-			opErr = err
-			httpx.FailErr(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		var activeTasks, activeCommands int
-		if err := tx.QueryRowContext(r.Context(), `
-			SELECT
-				(SELECT COUNT(1) FROM task_hosts
-				  WHERE host_id=$1 AND status IN ('pending','running')),
-				(SELECT COUNT(1) FROM commands
-				  WHERE host_id=$1 AND status IN ('pending','dispatched','accepted','running'))`,
-			id).Scan(&activeTasks, &activeCommands); err != nil {
-			opErr = err
-			httpx.FailErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		if activeTasks > 0 || activeCommands > 0 {
-			opErr = fmt.Errorf("主机仍有未完成任务或指令（任务 %d，指令 %d）", activeTasks, activeCommands)
-			httpx.Fail(w, http.StatusConflict,
-				"主机存在未完成的任务或指令，请先取消任务或等待执行完成后再删除")
-			return
-		}
-
-		// 撤销 Agent 凭据；Agent 进程仍会运行，但后续请求将无法通过认证。
-		//
-		// 历史注册逻辑只写入 agents.ip，不一定回填 agents.host_id，
-		// 因此同时按 host_id / ip / 当前 agent_id 清理，避免留下旧 token。
-		if _, err := tx.ExecContext(r.Context(),
-			`DELETE FROM agents WHERE host_id=$1 OR ip=$2 OR agent_id=$3`,
-			id, ip, agentID); err != nil {
-			opErr = err
-			httpx.FailErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		res, err := tx.ExecContext(r.Context(), `DELETE FROM hosts WHERE id=$1`, id)
-		if err != nil {
-			opErr = err
-			httpx.FailErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			opErr = sql.ErrNoRows
-			httpx.Fail(w, http.StatusNotFound, "主机不存在或无权访问")
-			return
-		}
-		if err := tx.Commit(); err != nil {
-			opErr = err
-			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}
 		httpx.OK(w, map[string]any{"id": id, "ip": ip})
 	}
+}
+
+// maxHostBatchDelete 单次批量删除的主机数上限（与分页最大条数一致）。
+const maxHostBatchDelete = 500
+
+// HostBatchDelete 批量删除主机：POST /api/hosts/batch-delete {"ids":[1,2,3]}。
+//
+// 逐台复用单台删除的校验与事务（租户隔离、未完成任务/指令拒绝、撤销 Agent 凭据），
+// 每台单独写审计；某台失败不影响其他主机，返回成功列表与逐台失败原因。
+func HostBatchDelete(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		ids := uniquePositiveIDs(req.IDs)
+		if len(ids) == 0 {
+			httpx.Fail(w, http.StatusBadRequest, "请选择要删除的主机")
+			return
+		}
+		if len(ids) > maxHostBatchDelete {
+			httpx.Fail(w, http.StatusBadRequest, fmt.Sprintf("单次最多删除 %d 台主机", maxHostBatchDelete))
+			return
+		}
+		type failure struct {
+			ID    int64  `json:"id"`
+			IP    string `json:"ip,omitempty"`
+			Error string `json:"error"`
+		}
+		deleted := make([]int64, 0, len(ids))
+		failed := []failure{}
+		sc := reqScope(r)
+		for _, id := range ids {
+			if r.Context().Err() != nil {
+				failed = append(failed, failure{ID: id, Error: "请求已取消"})
+				continue
+			}
+			ip, derr := deleteHost(r.Context(), s, sc, id)
+			auditOp(s, r, audit.ActionHostDelete, "host", strconv.FormatInt(id, 10), ip, errOrNil(derr))
+			if derr != nil {
+				failed = append(failed, failure{ID: id, IP: ip, Error: derr.msg})
+				continue
+			}
+			deleted = append(deleted, id)
+		}
+		httpx.OK(w, map[string]any{"deleted": deleted, "failed": failed})
+	}
+}
+
+// uniquePositiveIDs 去重并过滤非法 ID，保留输入顺序。
+func uniquePositiveIDs(in []int64) []int64 {
+	seen := make(map[int64]bool, len(in))
+	out := make([]int64, 0, len(in))
+	for _, id := range in {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// deleteError 删除失败：status/msg 返回给客户端，err 为审计用的原始错误。
+// internal=true 表示内部错误，客户端消息需经 FailErr 脱敏。
+type deleteError struct {
+	status   int
+	msg      string
+	err      error
+	internal bool
+}
+
+func (e *deleteError) Error() string { return e.err.Error() }
+
+// errOrNil 避免把 nil *deleteError 转成非 nil 的 error 接口值。
+func errOrNil(e *deleteError) error {
+	if e == nil {
+		return nil
+	}
+	return e
+}
+
+func hostNotFound(err error) *deleteError {
+	return &deleteError{status: http.StatusNotFound, msg: "主机不存在或无权访问", err: err}
+}
+
+func hostInternalErr(err error) *deleteError {
+	return &deleteError{status: http.StatusInternalServerError, msg: "删除失败（服务端错误）", err: err, internal: true}
+}
+
+// deleteHost 在单个事务内删除一台主机，返回主机 IP（查不到时为空）。
+func deleteHost(ctx context.Context, s *svc.ServiceContext, sc scope.Scope, id int64) (string, *deleteError) {
+	var ip, agentID string
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return "", hostInternalErr(err)
+	}
+	defer tx.Rollback()
+
+	cond, condArgs := sc.Where("", 2)
+	// 先做无锁的租户/存在性检查：跨租户主机直接视为不存在，
+	// 避免为了加锁而触碰他人的子表数据。
+	err = tx.QueryRowContext(ctx,
+		`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1 AND `+cond,
+		append([]any{id}, condArgs...)...).Scan(&ip, &agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", hostNotFound(err)
+	}
+	if err != nil {
+		return "", hostInternalErr(err)
+	}
+
+	// 锁顺序必须与 Report/UpdateStage 的 task_hosts -> commands -> hosts 一致。
+	// 若反过来先锁 hosts 再级联删除子表，会与正在落终态的 Agent 上报形成
+	// “上报持有 task_hosts 等 hosts，删除持有 hosts 等 task_hosts”的死锁。
+	for _, q := range []string{
+		`SELECT 1 FROM task_hosts WHERE host_id=$1 FOR UPDATE`,
+		`SELECT 1 FROM commands WHERE host_id=$1 FOR UPDATE`,
+	} {
+		rows, qerr := tx.QueryContext(ctx, q, id)
+		if qerr != nil {
+			return ip, hostInternalErr(qerr)
+		}
+		rows.Close()
+		if qerr = rows.Err(); qerr != nil {
+			return ip, hostInternalErr(qerr)
+		}
+	}
+
+	// 最后锁主机行并复查，防止检查后被重新注册/改租户。
+	err = tx.QueryRowContext(ctx,
+		`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1 AND `+cond+` FOR UPDATE`,
+		append([]any{id}, condArgs...)...).Scan(&ip, &agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", hostNotFound(err)
+	}
+	if err != nil {
+		return ip, hostInternalErr(err)
+	}
+
+	var activeTasks, activeCommands int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(1) FROM task_hosts
+			  WHERE host_id=$1 AND status IN ('pending','running')),
+			(SELECT COUNT(1) FROM commands
+			  WHERE host_id=$1 AND status IN ('pending','dispatched','accepted','running'))`,
+		id).Scan(&activeTasks, &activeCommands); err != nil {
+		return ip, hostInternalErr(err)
+	}
+	if activeTasks > 0 || activeCommands > 0 {
+		return ip, &deleteError{
+			status: http.StatusConflict,
+			msg:    "主机存在未完成的任务或指令，请先取消任务或等待执行完成后再删除",
+			err:    fmt.Errorf("主机仍有未完成任务或指令（任务 %d，指令 %d）", activeTasks, activeCommands),
+		}
+	}
+
+	// 撤销 Agent 凭据；Agent 进程仍会运行，但后续请求将无法通过认证。
+	//
+	// 历史注册逻辑只写入 agents.ip，不一定回填 agents.host_id，
+	// 因此同时按 host_id / ip / 当前 agent_id 清理，避免留下旧 token。
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM agents WHERE host_id=$1 OR ip=$2 OR agent_id=$3`,
+		id, ip, agentID); err != nil {
+		return ip, hostInternalErr(err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM hosts WHERE id=$1`, id)
+	if err != nil {
+		return ip, hostInternalErr(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ip, hostNotFound(sql.ErrNoRows)
+	}
+	if err := tx.Commit(); err != nil {
+		return ip, hostInternalErr(err)
+	}
+	return ip, nil
 }
