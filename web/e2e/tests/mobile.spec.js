@@ -99,3 +99,26 @@ test.describe('H5 移动端自适应', () => {
     await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f5efe6');
   });
 });
+
+// 多分辨率回归：最窄手机（320）与平板竖屏（768，表格不卡片化、导航已折叠）
+// 下所有页面都不能出现横向溢出。
+const OVERFLOW_VIEWS = ['hosts', 'components', 'artifacts', 'tasks', 'audit', 'extbin', 'settings', 'org'];
+for (const vp of [{ width: 320, height: 640 }, { width: 768, height: 1024 }]) {
+  test.describe(`${vp.width}px 无横向溢出`, () => {
+    test.use({ viewport: vp, isMobile: true, hasTouch: true });
+
+    test('全部页面', async ({ page }) => {
+      await login(page);
+      for (const view of OVERFLOW_VIEWS) {
+        await page.goto('/#/' + view);
+        await page.reload();
+        await page.waitForTimeout(500);
+        const r = await page.evaluate(() => {
+          const vw = (window.visualViewport && window.visualViewport.width) || window.innerWidth;
+          return { sw: document.documentElement.scrollWidth, vw };
+        });
+        expect(r.sw, `${view} 页面宽度 ${r.sw} 超出视口 ${r.vw}`).toBeLessThanOrEqual(r.vw + 1);
+      }
+    });
+  });
+}
