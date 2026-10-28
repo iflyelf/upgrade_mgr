@@ -745,6 +745,7 @@
       "$ErrorActionPreference = 'Stop'",
       "# 平台地址优先（2008 R2 可用 HTTP，不依赖 GitHub/TLS 1.2）",
       "$base = $env:UPGRADE_AGENT_SERVER_URL",
+      "if (-not $base) { $base = $env:UPGRADE_MGR_SERVER }",
       "if (-not $base) { $base = '" + consoleBase + "' }",
       "$localUrl = ''",
       "$fullUrl = ''",
@@ -835,32 +836,62 @@
     ].join('\n');
   }
 
+  // consoleBaseURL 当前控制台地址，作为脚本里平台地址的最后兜底（老 Agent 未注入环境变量时）。
+  function consoleBaseURL() {
+    try {
+      if (location && location.origin && location.origin !== 'null' &&
+          /^https?:/i.test(location.origin)) {
+        return location.origin.replace(/\/+$/, '');
+      }
+    } catch (e) { }
+    return '';
+  }
+
   // installScript(action) 生成"先下载 install.sh 再执行指定动作"的脚本。
   // 优先从平台内网缓存下载，失败后自动切换到外网代理。
+  //
+  // 平台地址取 Agent 注入的 UPGRADE_AGENT_SERVER_URL（Agent 当前实际连通的地址），
+  // 与 install.sh / Windows 示例一致；UPGRADE_MGR_SERVER 由服务端下发时按主机注入
+  // （兼容老 Agent），两者都为空时才用控制台页面地址兜底，不再回退到 localhost。
   function installScript(action) {
     return [
       '#!/bin/bash',
       'set -e',
-      'b="${UPGRADE_MGR_SERVER:-http://localhost:8090}"',
-      'localUrl="$b' + INSTALL_SCRIPT_PLATFORM_URL + '?local=1"',
-      'platformUrl="$b' + INSTALL_SCRIPT_PLATFORM_URL + '"',
+      'b="${UPGRADE_AGENT_SERVER_URL:-${UPGRADE_MGR_SERVER:-' + consoleBaseURL() + '}}"',
+      'b="${b%/}"',
       'proxyUrl=\'' + INSTALL_SCRIPT_URL + '\'',
       'f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)',
       'trap \'rm -f "$f"\' EXIT',
       'download() {',
       '  if command -v curl >/dev/null 2>&1; then',
-      '    curl -fsSL "$1" -o "$f" 2>/dev/null',
+      '    curl -fsSL --connect-timeout 10 "$1" -o "$f"',
       '  elif command -v wget >/dev/null 2>&1; then',
-      '    wget -qO "$f" "$1" 2>/dev/null',
+      '    wget -q -T 30 -O "$f" "$1"',
       '  else',
       '    echo "需要 curl 或 wget" >&2; return 1',
       '  fi',
       '}',
-      '# 优先本地缓存 → 平台代理 → 外网代理',
-      'if ! download "$localUrl"; then',
-      '  if ! download "$platformUrl"; then',
-      '    download "$proxyUrl" || { echo "下载失败，请检查网络或在控制台上传离线包" >&2; exit 1; }',
-      '  fi',
+      'errors=""',
+      'try() {',
+      '  echo "下载 install.sh（$1）$2"',
+      '  if download "$2" && [ -s "$f" ] && head -c 2 "$f" | grep -q "#!"; then return 0; fi',
+      '  errors="${errors}\\n  $1: $2"',
+      '  echo "WARN: $1 失败" >&2',
+      '  return 1',
+      '}',
+      '# 优先平台离线缓存 → 平台代下载 → 外网代理',
+      'ok=0',
+      'if [ -n "$b" ]; then',
+      '  try "平台离线缓存" "$b' + INSTALL_SCRIPT_PLATFORM_URL + '?local=1" && ok=1',
+      '  [ "$ok" = 1 ] || { try "平台代下载" "$b' + INSTALL_SCRIPT_PLATFORM_URL + '" && ok=1; }',
+      'else',
+      '  echo "WARN: 未获取到平台地址（UPGRADE_AGENT_SERVER_URL 为空），跳过平台下载" >&2',
+      'fi',
+      '[ "$ok" = 1 ] || { try "外网代理" "$proxyUrl" && ok=1; }',
+      'if [ "$ok" != 1 ]; then',
+      '  printf "下载 install.sh 失败，已尝试：%b\\n" "$errors" >&2',
+      '  echo "请在控制台「外部文件代缓存」为 node-exporter-install.sh 上传脚本或点「刷新缓存」后重试。" >&2',
+      '  exit 1',
       'fi',
       'bash "$f" ' + action
     ].join('\n');

@@ -274,7 +274,8 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 	}
 
 	rows, err := o.svc.db.QueryContext(ctx, `
-		SELECT th.id, th.host_id, h.arch, h.os_family, h.agent_id, h.last_seen
+		SELECT th.id, th.host_id, h.arch, h.os_family, h.agent_id, h.last_seen,
+		       COALESCE(h.agent_server_url,'')
 		FROM task_hosts th JOIN hosts h ON h.id=th.host_id
 		WHERE th.task_id=$1 AND th.batch_index=$2 AND th.status='pending'
 		ORDER BY th.id`, taskID, batchIdx)
@@ -286,11 +287,12 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 		thID, hostID  int64
 		arch, os, aid string
 		lastSeen      sql.NullTime
+		agentURL      string
 	}
 	var list []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.thID, &r.hostID, &r.arch, &r.os, &r.aid, &r.lastSeen); err == nil {
+		if err := rows.Scan(&r.thID, &r.hostID, &r.arch, &r.os, &r.aid, &r.lastSeen, &r.agentURL); err == nil {
 			list = append(list, r)
 		}
 	}
@@ -343,7 +345,8 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 					"Agent 版本过低，不支持执行命令任务；请先升级 Agent")
 				continue
 			}
-			payload := protocol.CommandPayload{Command: &cmdSpec, ToVersion: version}
+			spec := withPlatformEnv(cmdSpec, o.svc.hostPlatformURL(r.agentURL))
+			payload := protocol.CommandPayload{Command: &spec, ToVersion: version}
 			pj, _ := json.Marshal(payload)
 			ok, err := o.dispatchHostWithType(ctx, taskID, r.thID, r.hostID, r.aid, protocol.CmdRunCommand, pj)
 			if err != nil {
@@ -377,8 +380,11 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 				}
 			}
 		}
+		// 组件的 exec_args/脚本同样可能引用 UPGRADE_MGR_SERVER；按主机补上实际可达的平台地址。
+		hostComp := comp
+		hostComp.ExecEnv = appendPlatformEnv(comp.ExecEnv, o.svc.hostPlatformURL(r.agentURL))
 		payload := protocol.CommandPayload{
-			Component: comp, ToVersion: version,
+			Component: hostComp, ToVersion: version,
 			Artifact: art,
 		}
 		pj, _ := json.Marshal(payload)

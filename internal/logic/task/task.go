@@ -107,6 +107,8 @@ type Service struct {
 	allowTaskOwnerOnly func() bool
 	// offlineAfter 返回离线判定阈值（如 "1m"）；编排器用来跳过离线主机。
 	offlineAfter func() string
+	// externalURL 返回 server.external_url；下发脚本时主机未上报连接地址则用它兜底。
+	externalURL func() string
 	// ownerPolicy 返回用户所属团队的任务操作策略：
 	//   "on"      → 受限（不看全局开关）
 	//   "off"     → 放行（不看全局开关）

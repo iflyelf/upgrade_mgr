@@ -130,7 +130,7 @@ if ($env:WINDOWS_EXPORTER_FLAVOR) { $Flavor = $env:WINDOWS_EXPORTER_FLAVOR }
 # 最后一个用 Go 1.20 构建、支持 Windows 7 / Server 2008 R2 的官方版本。
 $LegacyVersion = '0.23.1'
 # 默认配置模板版本：模板内容变更时递增，旧脚本生成的配置会自动备份并升级。
-$ConfigTemplateVersion = '2'
+$ConfigTemplateVersion = '3'
 if ($env:WINDOWS_EXPORTER_LISTEN_PORT) { $ListenPort = [int]$env:WINDOWS_EXPORTER_LISTEN_PORT }
 # 自定义下载基础地址（末尾不要带斜杠），默认 iflyelf release。
 $script:BaseUrl = ''
@@ -287,6 +287,8 @@ function Stop-ServiceIfRunning {
 # 平台地址：Agent 执行脚本时会注入 UPGRADE_AGENT_SERVER_URL。
 # 无法访问外网（或系统不支持 TLS 1.2）时，改从平台自身下载（平台代缓存，可用 HTTP）。
 $PlatformURL = $env:UPGRADE_AGENT_SERVER_URL
+# UPGRADE_MGR_SERVER 由服务端下发任务时注入（主机实际可达的平台地址），兼容未注入前者的老 Agent。
+if (-not $PlatformURL) { $PlatformURL = $env:UPGRADE_MGR_SERVER }
 if ($env:WINDOWS_EXPORTER_PLATFORM_URL) { $PlatformURL = $env:WINDOWS_EXPORTER_PLATFORM_URL }
 
 function Test-DownloadedFile([string]$Path) {
@@ -430,7 +432,7 @@ function Get-DefaultConfigContent {
     if ($script:ExporterFlavor -eq 'legacy') {
         return @"
 # windows_exporter 配置（由 install.ps1 生成）
-# config-version: 2
+# config-version: 3
 # flavor: legacy（windows_exporter v0.23.1 / Go 1.20，支持 Server 2008 R2 ~ 2012 R2）
 # 注意：旧系统通道不支持 physical_disk；hardware_info 默认启用（本仓库 legacy 资产）。
 collectors:
@@ -441,25 +443,26 @@ collector:
     services-where: "Name='windows_exporter' OR Name='upgrade-agent'"
 "@
     }
-    return @"
+    # latest 默认配置与 examples/windows_exporter/config.yaml 保持一致（含 service.exclude 清单）。
+    # 用单引号 here-string：正则里的 $ 不能被 PowerShell 展开；textfile 目录用占位符替换。
+    # 修改 config.yaml 的规则时同步这里（examples/examples_test.go 会校验两者一致）。
+    $template = @'
 # windows_exporter 配置（由 install.ps1 生成）
-# config-version: 2
+# config-version: 3
 # flavor: latest（windows_exporter latest，支持 Windows 10 / Server 2016+）
-# 采集器与 textfile 目录可在此调整；修改后重启服务生效。
+# 规则与 examples/windows_exporter/config.yaml 一致；修改后重启服务生效。
 collectors:
   enabled: cpu,logical_disk,physical_disk,memory,os,hardware_info,net,service,textfile
 
 collector:
   textfile:
     directories:
-      - $TextfileDir
+      - __TEXTFILE_DIR__
   service:
-    # 只采集业务服务时可改为 include（正则），例如：
-    # include: "myapp|myagent"
-    # 需要屏蔽大量系统服务时使用 exclude；完整示例见
-    # examples/windows_exporter/config.yaml
-    include: "windows_exporter|upgrade-agent"
-"@
+    # 屏蔽系统服务与常见第三方后台服务，只保留业务服务指标。
+    exclude: '(?i)^(AJRouter|ALG|AppIDSvc|Appinfo|AppMgmt|AppReadiness|AppVClient|AppXSvc|AudioEndpointBuilder|Audiosrv|AxInstSV|BFE|BITS|BrokerInfrastructure|BTAGService|BthAvctpSvc|bthserv|camsvc|CertPropSvc|ClipSVC|COMSysApp|ConsentUxUserSvc.*|CoreMessagingRegistrar|CryptSvc|CscService|DcomLaunch|defragsvc|DeviceAssociationService|DeviceInstall|Dhcp|DiagTrack|DmEnrollmentSvc|dmwappushservice|Dnscache|DoSvc|dot3svc|DPS|Eaphost|EFS|embeddedmode|EntAppSvc|EventLog|EventSystem|fdPHost|FDResPub|FontCache.*|FrameServer|gpsvc|GraphicsPerfSvc|hidserv|HvHost|icssvc|IKEEXT|InstallService|iphlpsvc|KeyIso|KPSSVC|KtmRm|LanmanServer|LanmanWorkstation|lfsvc|LicenseManager|lltdsvc|lmhosts|LSM|MapsBroker|mpssvc|MSDTC|MSiSCSI|msiserver|NcaSvc|NcbService|Netlogon|Netman|netprofm|NetSetupSvc|NetTcpPortSharing|NgcCtnrSvc|NgcSvc|NlaSvc|nsi|PcaSvc|PerfHost|PhoneSvc|PimIndexMaintenanceSvc.*|pla|PlugPlay|PolicyAgent|Power|PrintNotify|PrintWorkflowUserSvc.*|ProfSvc|PushToInstall|QWAVE|RasAuto|RasMan|RemoteAccess|RemoteRegistry|RmSvc|RpcEptMapper|RpcLocator|RpcSs|SamSs|SCardSvr|ScDeviceEnum|Schedule|SCPolicySvc|seclogon|SecurityHealthService|SEMgrSvc|SENS|Sense|SensorDataService|SensorService|SensrSvc|SessionEnv|SharedAccess|ShellHWDetection|shpamsvc|smphost|SNMPTRAP|Spooler|sppsvc|SSDPSRV|ssh-agent|SstpSvc|StateRepository|stisvc|StorSvc|svsvc|swprv|SysMain|SystemEventsBroker|TabletInputService|tapisrv|TermService|Themes|TieringEngineService|TimeBrokerSvc|TokenBroker|TrkWks|TrustedInstaller|tzautoupdate|UevAgentService|UmRdpService|UnistoreSvc.*|upnphost|UserDataSvc.*|UserManager|UsoSvc|VaultSvc|vds|vmicguestinterface|vmicheartbeat|vmickvpexchange|vmicrdv|vmicshutdown|vmictimesync|vmicvmsession|vmicvss|VSS|W32Time|WaaSMedicSvc|WalletService|WarpJITSvc|WbioSrvc|Wcmsvc|WdiServiceHost|WdiSystemHost|WdNisSvc|Wecsvc|WEPHOSTSVC|wercplsupport|WerSvc|WiaRpc|WinDefend|WinHttpAutoProxySvc|Winmgmt|WinRM|wisvc|wlidsvc|wmiApSrv|WMPNetworkSvc|WPDBusEnum|WpnService|WpnUserService.*|WSearch|wuauserv|aspnet_state|AarSvc.*|AssignedAccessManagerSvc|BaiduNetdiskUtility|BDESVC|wbengine|PeerDistSvc|CaptureService.*|CredentialEnrollmentManagerUserSvc.*|DsSvc|DevQueryBroker|DsmSvc|DeviceAssociationBrokerSvc.*|DevicePickerUserSvc.*|DevicesFlowUserSvc.*|diagsvc|DialogBlockingService|Everything|EapHost|Fax|fhsvc|FlexNet Licensing Service|BcastDVRUserService.*|GameInputSvc|GameViewerService|GoogleChromeElevationService|gupdate|gupdatem|GoogleUpdaterInternalService.*|GoogleUpdaterService.*|HrASDaemon|HipsDaemon|HRWSCCtrl|vmcompute|vmms|IpxlatCfgSvc|vlmcsd|LxssManager|McpManagementService|MessagingService.*|MDCoreSvc|MicrosoftEdgeElevationService|edgeupdate|edgeupdatem|ClickToRunSvc|uhssvc|SmsRouter|cloudidsvc|MsKeyboardFilter|MyLDShell|NPSMSvc.*|NcdAutoSetup|P9RdrService.*|PNRPAutoReg|PNRPsvc|p2psvc|p2pimsvc|PenService.*|SNMPTrap|TapiSrv|TextInputManagementService|ToDesk_Service|UdkUserSvc.*|VGAuthService|VM3DService|vmvss|VMTools|WlanSvc|WFDSConMgrSvc|WSLService|WwanSvc|webthreatdefsvc|webthreatdefusersvc.*|WebClient|WinFsp\.Launcher|FrameServerMonitor|wcncsvc|StiSvc|MixedRealityOpenXRSvc|SDRSVC|spectrum|perceptionsimulation|WManSvc|workfolderssvc|XboxGipSvc|XblGameSave|XboxNetApiSvc|XblAuthManager|Zabbix.*|windows_exporter|HgClientService|hns|CloudBackupRestoreSvc.*|cbdhsvc.*|OneSyncSvc.*|wscsvc|WpcMonSvc|dcsvc|TroubleshootingSvc|autotimesvc|DusmSvc|DisplayEnhancementService|DispBrokerDesktopSvc|wlpasvc|InventorySvc|SharedRealitySvc|VacSvc|nvagent|NaturalAuthentication|BluetoothUserService.*|LxpSvc|CDPUserSvc.*|WslInstaller|RetailDemo|diagnosticshub.*|CDPSvc|ADPSvc|BalloonService|FileSyncHelper|hpatchmon|LocalKdc|OneDrive.*|PrintScanBrokerService|QEMU.*|refsdedupsvc|spice-agent|VirtioFsSvc|WSAIFabricSvc|whesvc|ApxSvc|ZTHELPER|PrintDeviceConfigurationService|McmSvc|BingoCloudDeployAgent|cfn-hup|Ec2Config|RSoPProv|sacsvr|SgrmBroker|TitanAgent|UALSVC|IntelAudioService|cplspcon|cphs|igfxCUIService.*|RtkAudioUniversalService|VSInstallerElevationService|spacedeskService|Browser|EHttpSrv|EraAgentSvc|MSSQL\$MICROSOFT.*|MozillaMaintenance|WIDWriter|efwd|ekrn|ekrnEpfw|CPrepSrv|ClusSvc|FcSrv|ManageEngine OS Deployer PXE Server|ManageEngine UEMS - Notification Server|SmbWitness|TargetMgr|uems_service|AzureAttestService|DFSR|Dfs|MSSQLSERVER|SQLBrowser|SQLSERVERAGENT|SQLTELEMETRY|SQLWriter|qxb_monitor_win|ManageEngineAnalyticsPlusServer|Tomcat8|servicedesk|DcpSvc|UI0Detect|tiledatamodelsvc|wudfsvc|Intel\(R\) PROSet Monitoring Service|Wing FTP Server|AppHostSvc|MPCore|Managed Planet Barcode Core|Managed Planet Discovery Core|Managed Planet Rapid Deployment|Managed Planet Software Manager|Managed Planet Task Listener|SNMP|WAS|c2wts|dwmrcs|nxlog|w3logsvc|EsetBridgeWatchdog|MySQL57|OScP2PWS|OWSHelper|OWSSoftCenter|OcularSoftCenterServer|W3SVC|rpcapd|ASFProxyService|Agent_Portal|CBA8|CBA8Alert|CoreSyncService|IISADMIN|IPMI_Redirection|Intel PDS|Intel Scheduler|LANDESK\(R\) SAM Data Service|LANDesk Inventory Server|LANDesk\(r\) Usage Service|LDCommandSvc|LDGSB|MDMManagementService|WMSVC|ose64|PSEXESVC|ISSUSER|Intel Local Scheduler Service|LANDesk Targeted Multicast|LANDesk\(R\) PXE MTFTP Service|LANDesk\(R\) PXE Service|LDXDD|MDT_Monitor|Softmon|WDSServer|TSBrowserSvr|wpscloudsvr|SunloginService|IpOverUsbSvc|IAStorDataMgrSvc|IEEtwCollectorService|MMCSS|THREADORDER|WSService|WcsPlugInService|hkmsvc|napagent|ADAudit Plus|ADManager Plus|AeLookupSvc)$'
+'@
+    return $template.Replace('__TEXTFILE_DIR__', $TextfileDir)
 }
 
 function Write-DefaultConfig {
