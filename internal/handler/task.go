@@ -65,6 +65,87 @@ func actorIsPrivileged(u *auth.User) bool {
 	return u == nil || u.IsAdmin || u.IsSuperAdmin() || u.HasRole(auth.RoleAdmin)
 }
 
+// taskListFilter 构造任务列表的筛选条件（租户 + kind/component_id/status/q/created_by），
+// 列表与「按筛选条件全选」共用，保证两者命中的任务集合一致。
+// 表别名固定为 t；返回的占位符从 $1 起连续编号。
+func taskListFilter(r *http.Request, actor *auth.User) ([]string, []any) {
+	tCond, tArgs := reqScope(r).Where("t", 1)
+	where := []string{tCond}
+	args := append([]any{}, tArgs...)
+	add := func(expr string, v any) {
+		args = append(args, v)
+		where = append(where, fmt.Sprintf(expr, len(args)))
+	}
+	q := r.URL.Query()
+	if kind := q.Get("kind"); kind != "" {
+		add("COALESCE(t.kind,'upgrade')=$%d", kind)
+	}
+	if cidStr := q.Get("component_id"); cidStr != "" {
+		if cid, err := strconv.ParseInt(cidStr, 10, 64); err == nil {
+			add("t.component_id=$%d", cid)
+		}
+	}
+	if status := q.Get("status"); status != "" {
+		add("t.status=$%d", status)
+	}
+	if !actorIsPrivileged(actor) {
+		where = append(where, "COALESCE(t.kind,'upgrade') <> 'command'")
+	}
+	if kw := strings.TrimSpace(q.Get("q")); kw != "" {
+		add("t.name ILIKE $%d", "%"+kw+"%")
+	}
+	if creator := strings.TrimSpace(q.Get("created_by")); creator != "" {
+		add("COALESCE(t.created_by,'')=$%d", creator)
+	}
+	return where, args
+}
+
+// TaskDeletableIDs 返回当前筛选条件下可删除任务的 ID（草稿/终态），供「按筛选条件全选」。
+//
+// 与列表使用同一筛选；「仅本人」策略下非管理员只返回自己创建的任务。
+// 最多返回 task.MaxBatchDelete 个，truncated=true 表示还有更多。
+// 这里只是候选集合，真正删除时 BatchDelete 仍会逐个复核权限、状态与未完成指令。
+func TaskDeletableIDs(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, _ := auth.FromContext(r.Context())
+		where, args := taskListFilter(r, actor)
+		where = append(where, "t.status IN ('draft','success','failed','canceled','rolled_back')")
+		if !actorIsPrivileged(actor) && actor != nil &&
+			s.Task.AccessMode(r.Context(), actor.Username) == "on" {
+			args = append(args, actor.Username)
+			where = append(where, fmt.Sprintf("(COALESCE(t.created_by,'')='' OR t.created_by=$%d)", len(args)))
+		}
+		// 多取一条用于判断是否被截断。
+		args = append(args, task.MaxBatchDelete+1)
+		rows, err := s.DB.QueryContext(r.Context(),
+			`SELECT t.id FROM upgrade_tasks t WHERE `+strings.Join(where, " AND ")+
+				` ORDER BY t.created_at DESC, t.id DESC LIMIT $`+strconv.Itoa(len(args)), args...)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		defer rows.Close()
+		ids := make([]int64, 0, 64)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		truncated := len(ids) > task.MaxBatchDelete
+		if truncated {
+			ids = ids[:task.MaxBatchDelete]
+		}
+		httpx.OK(w, map[string]any{"ids": ids, "truncated": truncated, "limit": task.MaxBatchDelete})
+	}
+}
+
 // TaskList 任务列表。
 //
 // 可选查询参数：kind（upgrade/command）、component_id（只看引用该组件的任务）、
@@ -81,33 +162,7 @@ func TaskList(s *svc.ServiceContext) http.HandlerFunc {
 				mates = m
 			}
 		}
-		tCond, tArgs := reqScope(r).Where("t", 1)
-		where := []string{tCond}
-		args := append([]any{}, tArgs...)
-		add := func(expr string, v any) {
-			args = append(args, v)
-			where = append(where, fmt.Sprintf(expr, len(args)))
-		}
-		if kind := r.URL.Query().Get("kind"); kind != "" {
-			add("COALESCE(t.kind,'upgrade')=$%d", kind)
-		}
-		if cidStr := r.URL.Query().Get("component_id"); cidStr != "" {
-			if cid, err := strconv.ParseInt(cidStr, 10, 64); err == nil {
-				add("t.component_id=$%d", cid)
-			}
-		}
-		if status := r.URL.Query().Get("status"); status != "" {
-			add("t.status=$%d", status)
-		}
-		if !actorIsPrivileged(actor) {
-			where = append(where, "COALESCE(t.kind,'upgrade') <> 'command'")
-		}
-		if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
-			add("t.name ILIKE $%d", "%"+q+"%")
-		}
-		if creator := strings.TrimSpace(r.URL.Query().Get("created_by")); creator != "" {
-			add("COALESCE(t.created_by,'')=$%d", creator)
-		}
+		where, args := taskListFilter(r, actor)
 
 		// 服务端分页：默认 50，最大 200；页码越界夹紧到最后一页。
 		page := atoiDefault(r.URL.Query().Get("page"), 1)

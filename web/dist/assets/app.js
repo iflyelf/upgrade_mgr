@@ -5908,30 +5908,75 @@
       }, ['下一页'])
     ]) : null;
 
-    // 批量删除：只允许勾选可删除（终态/草稿）且有操作权限的任务；逐个调用单删接口，
-    // 复用服务端既有的权限与 owner 校验。
+    // 批量删除：只允许勾选可删除（终态/草稿）且有操作权限的任务；
+    // 服务端 /api/tasks/batch-delete 会再次逐个复核权限、状态与未完成指令。
+    //
+    // 两种选择模式：
+    //   - 本页勾选：sel 记录当前页勾选的任务；
+    //   - 按筛选条件全选：allSel.ids 为服务端按当前筛选返回的全部可删除任务（最多 5000），
+    //     筛选条件变化后自动失效，避免误删不在当前结果里的任务。
     var sel = state.taskSelected || (state.taskSelected = {});
+    var filterKey = taskFilterQS().join('&');
+    if (state.taskAllSel && state.taskAllSel.key !== filterKey) state.taskAllSel = null;
+    var allSel = state.taskAllSel;
     var selectable = state.tasks.filter(function (x) {
       return x.can_view !== false && x.can_operate !== false && deletableTask(x);
     });
-    var selectedIDs = selectable.filter(function (x) { return sel[x.id]; }).map(function (x) { return x.id; });
-    var allChecked = selectable.length > 0 && selectedIDs.length === selectable.length;
+    var selectedIDs = allSel
+      ? Object.keys(allSel.ids).map(Number)
+      : selectable.filter(function (x) { return sel[x.id]; }).map(function (x) { return x.id; });
+    var allChecked = selectable.length > 0 && selectable.every(function (x) {
+      return allSel ? !!allSel.ids[x.id] : !!sel[x.id];
+    });
+    function isChecked(id) { return allSel ? !!allSel.ids[id] : !!sel[id]; }
+    function setChecked(id, on) {
+      var bag = allSel ? allSel.ids : sel;
+      if (on) bag[id] = true; else delete bag[id];
+    }
+    function selectAllByFilter() {
+      var qs = taskFilterQS();
+      api('/api/tasks/deletable-ids' + (qs.length ? '?' + qs.join('&') : ''))
+        .then(function (d) {
+          d = d || {};
+          var ids = {};
+          (d.ids || []).forEach(function (id) { ids[id] = true; });
+          state.taskAllSel = { key: filterKey, ids: ids, truncated: !!d.truncated, limit: d.limit || 5000 };
+          state.taskSelected = {};
+          render();
+        })
+        .catch(function (e) { alert('获取可删除任务失败: ' + e.message); });
+    }
+    function clearSelection() {
+      state.taskAllSel = null;
+      state.taskSelected = {};
+      render();
+    }
     function batchDelete() {
       if (!selectedIDs.length) return;
-      if (!confirm('确定删除选中的 ' + selectedIDs.length + ' 个任务吗？\n任务批次、逐机状态和指令日志会一并删除，且无法恢复。')) return;
-      // 一次请求完成批量删除，服务端逐个校验并返回成功列表与失败原因。
+      var scopeText = allSel ? '当前筛选结果中的 ' : '选中的 ';
+      if (!confirm('确定删除' + scopeText + selectedIDs.length + ' 个任务吗？\n任务批次、逐机状态和指令日志会一并删除，且无法恢复。')) return;
+      var truncated = allSel && allSel.truncated;
+      // 一次请求完成批量删除，服务端按集合校验并返回成功列表与失败原因。
       api('/api/tasks/batch-delete', { method: 'POST', body: JSON.stringify({ ids: selectedIDs }) })
         .then(function (res) {
           res = res || {};
           (res.deleted || []).forEach(function (id) {
-            delete sel[id];
             if (state.taskDetailId === id) closeTaskDetail(true);
           });
           var failed = (res.failed || []).map(function (f) { return '#' + f.id + '：' + f.error; });
-          if (failed.length) alert('部分任务删除失败：\n' + failed.join('\n'));
+          var msg = '已删除 ' + (res.deleted || []).length + ' 个任务。';
+          if (failed.length) {
+            // 失败列表可能很长，只展示前 20 条。
+            msg += '\n' + failed.length + ' 个删除失败：\n' + failed.slice(0, 20).join('\n') +
+              (failed.length > 20 ? '\n…' : '');
+          }
+          if (truncated) msg += '\n筛选结果超过单次上限，可再次点「按筛选条件全选」继续删除。';
+          if (failed.length || truncated || allSel) alert(msg);
         })
         .catch(function (e) { alert('批量删除失败: ' + e.message); })
         .then(function () {
+          state.taskAllSel = null;
+          state.taskSelected = {};
           state.taskPage = 1;
           loadTasks();
         });
@@ -5943,17 +5988,27 @@
           disabled: selectable.length ? null : '',
           'aria-label': '全选本页可删除任务',
           onchange: function (e) {
-            selectable.forEach(function (x) { if (e.target.checked) sel[x.id] = true; else delete sel[x.id]; });
+            selectable.forEach(function (x) { setChecked(x.id, e.target.checked); });
             render();
           }
         }, []),
-        ' 全选本页可删除任务'
+        ' 全选本页'
       ]),
+      h('button', {
+        class: 'btn ghost small', type: 'button', onclick: selectAllByFilter,
+        title: '选中当前筛选条件下全部可删除任务（不限当前页，单次最多 5000 个）'
+      }, ['按筛选条件全选']),
+      selectedIDs.length || allSel
+        ? h('button', { class: 'btn ghost small', type: 'button', onclick: clearSelection }, ['取消选择'])
+        : null,
       h('button', {
         class: 'btn danger small', disabled: selectedIDs.length ? null : '',
         onclick: batchDelete
       }, ['批量删除' + (selectedIDs.length ? '（' + selectedIDs.length + '）' : '')]),
-      h('span', { class: 'muted' }, ['仅草稿、成功、失败、已取消、已回滚的任务可删除。'])
+      allSel
+        ? h('span', { class: 'muted' }, ['已按筛选条件选中 ' + selectedIDs.length + ' 个可删除任务' +
+            (allSel.truncated ? '（超过上限，仅选中最新的 ' + allSel.limit + ' 个）' : '') + '。'])
+        : h('span', { class: 'muted' }, ['仅草稿、成功、失败、已取消、已回滚的任务可删除。'])
     ]) : null;
 
     var list = h('div', { class: 'card' }, [
@@ -5992,10 +6047,10 @@
           var canSelect = canView && x.can_operate !== false && deletableTask(x);
           var checkEl = canSelect
             ? h('input', {
-                type: 'checkbox', class: 'task-check', checked: !!sel[x.id],
+                type: 'checkbox', class: 'task-check', checked: isChecked(x.id),
                 'aria-label': '选择任务 #' + x.id,
                 onchange: function (e) {
-                  if (e.target.checked) sel[x.id] = true; else delete sel[x.id];
+                  setChecked(x.id, e.target.checked);
                   render();
                 }
               }, [])
@@ -6259,13 +6314,18 @@
         render();
       });
   }
-  function tasksURL() {
+  // taskFilterQS 任务列表筛选参数；列表与「按筛选条件全选」共用，保证命中集合一致。
+  function taskFilterQS() {
     var qs = [];
     if (state.taskFilterComp) qs.push('component_id=' + encodeURIComponent(state.taskFilterComp));
     if (state.taskFilterKind) qs.push('kind=' + encodeURIComponent(state.taskFilterKind));
     if (state.taskFilterStatus) qs.push('status=' + encodeURIComponent(state.taskFilterStatus));
     if (state.taskFilterCreator) qs.push('created_by=' + encodeURIComponent(state.taskFilterCreator));
     if (state.taskQ) qs.push('q=' + encodeURIComponent(state.taskQ));
+    return qs;
+  }
+  function tasksURL() {
+    var qs = taskFilterQS();
     qs.push('page=' + (state.taskPage || 1));
     qs.push('size=' + (state.taskSize || 50));
     return '/api/tasks' + '?' + qs.join('&');
