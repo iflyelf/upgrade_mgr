@@ -117,12 +117,28 @@ func (s *Service) BatchDelete(ctx context.Context, sc scope.Scope, ids []int64) 
 // 逐个不满足条件的任务写入 failures，不会导致整批失败。
 func (s *Service) deleteChunk(ctx context.Context, sc scope.Scope, ids []int64,
 	checkOwner func(string) error, failures map[int64]string) ([]int64, error) {
-	tCond, tArgs := sc.Where("", 2)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	deleted, err := s.deleteChunkTx(ctx, tx, sc, ids, checkOwner, failures)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return deleted, nil
+}
+
+// deleteChunkTx 在调用方事务内执行一批删除（不提交）。
+//
+// 异步删除作业用它把「删除本批」与「记录作业进度」放进同一事务，
+// 服务重启后从已提交的进度继续，不会重复处理或漏处理。
+func (s *Service) deleteChunkTx(ctx context.Context, tx *sql.Tx, sc scope.Scope, ids []int64,
+	checkOwner func(string) error, failures map[int64]string) ([]int64, error) {
+	tCond, tArgs := sc.Where("", 2)
 
 	// 1. 无锁预查：跨租户任务查不到，等同“不存在”，不会锁住他人数据。
 	type taskInfo struct {
@@ -172,7 +188,7 @@ func (s *Service) deleteChunk(ctx context.Context, sc scope.Scope, ids []int64,
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, tx.Commit()
+		return nil, nil
 	}
 	arr := pq.Array(candidates)
 
@@ -256,7 +272,7 @@ func (s *Service) deleteChunk(ctx context.Context, sc scope.Scope, ids []int64,
 		}
 	}
 	if len(final) == 0 {
-		return nil, tx.Commit()
+		return nil, nil
 	}
 
 	// 4. 一条 DELETE 删除整批，子表经外键 ON DELETE CASCADE 清理。
@@ -280,9 +296,6 @@ func (s *Service) deleteChunk(ctx context.Context, sc scope.Scope, ids []int64,
 		return nil, err
 	}
 	rows.Close()
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
 	return deleted, nil
 }
 

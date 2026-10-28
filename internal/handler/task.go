@@ -624,6 +624,66 @@ func TaskBatchDelete(s *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
+// TaskDeleteJobCreate 创建异步批量删除作业：POST /api/tasks/delete-jobs {"ids":[...]}。
+//
+// 立即返回作业；删除在服务端后台按批执行，页面刷新/切换页签不会中断。
+// 每批提交后逐任务写审计（见 svc.StartDeleteJobs）。
+func TaskDeleteJobCreate(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		job, err := s.Task.CreateDeleteJob(r.Context(), reqScope(r), clientIP(s, r), req.IDs)
+		if err != nil {
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		httpx.OK(w, job)
+	}
+}
+
+// TaskDeleteJobGet 查询作业进度：GET /api/tasks/delete-jobs/{id}。
+func TaskDeleteJobGet(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		job, err := s.Task.GetDeleteJob(r.Context(), reqScope(r), id)
+		if err != nil {
+			httpx.FailErr(w, http.StatusNotFound, err)
+			return
+		}
+		httpx.OK(w, job)
+	}
+}
+
+// TaskDeleteJobActive 当前用户未结束的作业（没有时 data 为 null），页面刷新后恢复进度。
+func TaskDeleteJobActive(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		job, err := s.Task.ActiveDeleteJob(r.Context(), reqScope(r))
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		httpx.OK(w, job)
+	}
+}
+
+// TaskDeleteJobCancel 请求停止作业：POST /api/tasks/delete-jobs/{id}/cancel。
+func TaskDeleteJobCancel(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		job, err := s.Task.CancelDeleteJob(r.Context(), reqScope(r), id)
+		if err != nil {
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		httpx.OK(w, job)
+	}
+}
+
 func TaskPromote(s *svc.ServiceContext) http.HandlerFunc {
 	return taskAction(s, audit.ActionTaskPromote, func(id int64, r *http.Request) error { return s.Task.Promote(r.Context(), reqScope(r), id) })
 }
