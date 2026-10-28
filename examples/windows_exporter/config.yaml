@@ -11,7 +11,7 @@
 # 采集器可按需精简；textfile 目录用于接收业务自定义指标（.prom 文件）。
 # service 采集器的 exclude 正则用于屏蔽系统/无关服务，避免指标基数过大。
 collectors:
-  enabled: cpu,logical_disk,physical_disk,memory,os,hardware_info,net,service
+  enabled: cpu,logical_disk,physical_disk,memory,os,hardware_info,net,service,textfile
 
 collector:
   textfile:

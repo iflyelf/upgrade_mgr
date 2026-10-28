@@ -187,7 +187,8 @@ print_env() {
 }
 
 # 平台地址：Agent 执行脚本时注入 UPGRADE_AGENT_SERVER_URL；手工执行可自行 export。
-PLATFORM_URL="${UPGRADE_AGENT_SERVER_URL:-}"
+# UPGRADE_MGR_SERVER 由服务端下发任务时注入（主机实际可达的平台地址），兼容未注入前者的老 Agent。
+PLATFORM_URL="${UPGRADE_AGENT_SERVER_URL:-${UPGRADE_MGR_SERVER:-}}"
 PLATFORM_URL="${PLATFORM_URL%/}"
 # 平台「外部文件」白名单中的名称（与 internal/pkg/extbin 默认条目一致）。
 PLATFORM_ASSET=""
