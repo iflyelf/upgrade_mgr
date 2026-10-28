@@ -1364,6 +1364,8 @@
     var hostSel = isAdmin() ? batchSelection({
       stateKey: 'hostSelected', items: state.hosts, noun: '主机', unit: '台',
       url: '/api/hosts/batch-delete',
+      // 支持「按筛选条件全选」，删除走服务端后台作业（刷新页面不中断）。
+      async: HOST_DELETE_JOB,
       confirmText: '删除后将级联删除这些主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n存在未完成任务或指令的主机会被跳过。',
       label: function (x) { return x.ip; },
       onDone: function (wholePage) {
@@ -1437,7 +1439,8 @@
       isAdmin() ? hostForm() : null,
       h('div', { class: 'card' }, [
         toolbar,
-        hostSel && state.hosts.length ? hostSel.bar : null,
+        hostSel && (state.hosts.length || hostSel.progress) ? hostSel.bar : null,
+        hostSel ? hostSel.progress : null,
         (function () {
           var hostTable = h('table', {}, [h('thead', {}, [head]), h('tbody', {}, rows)]);
           var hostWrap = h('div', { class: 'table-wrap' }, [hostTable]);
@@ -4609,15 +4612,59 @@
     var sel = state[opts.stateKey] || (state[opts.stateKey] = {});
     var busyKey = opts.stateKey + 'Busy';
     var busy = !!state[busyKey];
-    var ids = opts.items.filter(function (x) { return sel[x.id]; }).map(function (x) { return x.id; });
-    var allChecked = opts.items.length > 0 && ids.length === opts.items.length;
-    function toggle(id, on) {
-      if (on) sel[id] = true; else delete sel[id];
+    // opts.async：支持「按筛选条件全选」并改用服务端异步作业删除（主机）。
+    // 筛选条件变化后全选自动失效，避免误删不在当前结果里的数据。
+    var as = opts.async || null;
+    var allKey = opts.stateKey + 'All';
+    var filterKey = as ? as.filterQS().join('&') : '';
+    if (as && state[allKey] && state[allKey].key !== filterKey) state[allKey] = null;
+    var allSel = as ? state[allKey] : null;
+    var job = as ? state[as.jobKey] : null;
+    var jobRunning = batchJobActive(job);
+    if (jobRunning) busy = true;
+    var ids = allSel
+      ? Object.keys(allSel.ids).map(Number)
+      : opts.items.filter(function (x) { return sel[x.id]; }).map(function (x) { return x.id; });
+    function isChecked(id) { return allSel ? !!allSel.ids[id] : !!sel[id]; }
+    function setChecked(id, on) {
+      var bag = allSel ? allSel.ids : sel;
+      if (on) bag[id] = true; else delete bag[id];
+    }
+    var allChecked = opts.items.length > 0 && opts.items.every(function (x) { return isChecked(x.id); });
+    function clearSelection() {
+      state[opts.stateKey] = {};
+      if (as) state[allKey] = null;
       render();
+    }
+    function selectAllByFilter() {
+      var qs = as.filterQS();
+      api(as.idsURL + (qs.length ? '?' + qs.join('&') : ''))
+        .then(function (d) {
+          d = d || {};
+          var bag = {};
+          (d.ids || []).forEach(function (id) { bag[id] = true; });
+          state[allKey] = { key: filterKey, ids: bag, truncated: !!d.truncated, limit: d.limit || 5000 };
+          state[opts.stateKey] = {};
+          render();
+        })
+        .catch(function (e) { alert('获取可删除' + opts.noun + '失败: ' + e.message); });
     }
     function run() {
       if (!ids.length || busy) return;
-      if (!confirm('确定删除选中的 ' + ids.length + ' ' + opts.unit + opts.noun + '吗？\n' + opts.confirmText)) return;
+      var scopeText = allSel ? '当前筛选结果中的 ' : '选中的 ';
+      if (!confirm('确定删除' + scopeText + ids.length + ' ' + opts.unit + opts.noun + '吗？\n' + opts.confirmText)) return;
+      if (as) {
+        // 服务端后台按批删除：刷新页面/切换页签不会中断，回到本页继续显示进度。
+        state[as.jobKey + 'Trunc'] = !!(allSel && allSel.truncated);
+        api(as.jobsURL, { method: 'POST', body: JSON.stringify({ ids: ids }) })
+          .then(function (j) {
+            state[opts.stateKey] = {};
+            state[allKey] = null;
+            watchBatchJob(as, j);
+          })
+          .catch(function (e) { alert('创建删除作业失败: ' + e.message); });
+        return;
+      }
       state[busyKey] = true;
       render();
       var deletedCount = 0;
@@ -4647,16 +4694,45 @@
           opts.onDone(deletedCount > 0 && deletedCount === opts.items.length);
         });
     }
+    var progress = jobRunning ? (function () {
+      var pct = job.total ? Math.round(job.processed * 100 / job.total) : 0;
+      return h('div', { class: 'field', role: 'status', 'aria-live': 'polite' }, [
+        h('div', { class: 'toolbar' }, [
+          h('span', {}, [(job.cancel_requested ? '正在停止（等待当前批完成）' : '后台删除中') +
+            '（作业 #' + job.id + '）：' + job.processed + ' / ' + job.total +
+            '（' + pct + '%），已删除 ' + job.deleted + '，失败 ' + (job.failed_count || 0)]),
+          h('button', {
+            class: 'btn ghost small', type: 'button', disabled: job.cancel_requested ? '' : null,
+            onclick: function () { cancelBatchJob(as, job.id); }
+          }, ['停止'])
+        ]),
+        hint('删除在服务端后台执行，刷新页面或切换页签不会中断，回到本页会继续显示进度。'),
+        h('div', {
+          class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
+          'aria-valuenow': String(pct), 'aria-label': '批量删除进度'
+        }, [h('div', { style: 'width:' + pct + '%' }, [])])
+      ]);
+    })() : null;
+    var tip;
+    if (allSel) {
+      tip = '已按筛选条件选中 ' + ids.length + ' ' + opts.unit + '可删除' + opts.noun +
+        (allSel.truncated ? '（超过上限，仅选中前 ' + allSel.limit + ' ' + opts.unit + '）' : '') + '。';
+    } else if (ids.length) {
+      tip = '已选中 ' + ids.length + ' ' + opts.unit + opts.noun + '（仅限本页）。';
+    } else {
+      tip = '勾选一个或多个' + opts.noun + '后可批量删除' + (as ? '，或点「按筛选条件全选」。' : '。');
+    }
     return {
       // 行首勾选框；「全选本页」放在工具栏，与任务页一致。
       cell: function (x) {
         return h('input', {
-          type: 'checkbox', class: 'task-check', checked: !!sel[x.id],
+          type: 'checkbox', class: 'task-check', checked: isChecked(x.id),
           disabled: busy ? '' : null,
           'aria-label': '选择' + opts.noun + ' ' + opts.label(x),
-          onchange: function (e) { toggle(x.id, e.target.checked); }
+          onchange: function (e) { setChecked(x.id, e.target.checked); render(); }
         }, []);
       },
+      progress: progress,
       bar: h('div', { class: 'toolbar' }, [
         h('label', { class: 'check' }, [
           h('input', {
@@ -4664,30 +4740,94 @@
             disabled: opts.items.length && !busy ? null : '',
             'aria-label': '全选本页' + opts.noun,
             onchange: function (e) {
-              opts.items.forEach(function (x) {
-                if (e.target.checked) sel[x.id] = true; else delete sel[x.id];
-              });
+              opts.items.forEach(function (x) { setChecked(x.id, e.target.checked); });
               render();
             }
           }, []),
           ' 全选本页'
         ]),
-        ids.length && !busy
-          ? h('button', {
-              class: 'btn ghost small', type: 'button',
-              onclick: function () { state[opts.stateKey] = {}; render(); }
-            }, ['取消选择'])
+        as ? h('button', {
+          class: 'btn ghost small', type: 'button', onclick: selectAllByFilter,
+          disabled: busy ? '' : null,
+          title: '选中当前筛选条件下全部可删除' + opts.noun + '（不限当前页，单次最多 5000 ' + opts.unit + '）'
+        }, ['按筛选条件全选']) : null,
+        (ids.length || allSel) && !busy
+          ? h('button', { class: 'btn ghost small', type: 'button', onclick: clearSelection }, ['取消选择'])
           : null,
         h('button', {
           class: 'btn danger small', type: 'button',
           disabled: ids.length && !busy ? null : '', onclick: run
         }, [busy ? '删除中…' : ('批量删除' + (ids.length ? '（' + ids.length + '）' : ''))]),
-        h('span', { class: 'muted' }, [ids.length
-          ? '已选中 ' + ids.length + ' ' + opts.unit + opts.noun + '（仅限本页）。'
-          : '勾选一个或多个' + opts.noun + '后可批量删除。'])
+        h('span', { class: 'muted' }, [tip])
       ])
     };
   }
+
+  // 通用异步删除作业（主机）：轮询进度，结束后汇总提示并刷新列表。
+  // as: { jobKey, jobsURL, idsURL, view, noun, unit, filterQS(), reload(quiet) }
+  var batchJobTimers = {};
+  function batchJobActive(j) { return !!(j && (j.status === 'pending' || j.status === 'running')); }
+  function watchBatchJob(as, job) {
+    if (batchJobTimers[as.jobKey]) { clearTimeout(batchJobTimers[as.jobKey]); delete batchJobTimers[as.jobKey]; }
+    state[as.jobKey] = job || null;
+    if (state.view === as.view) render();
+    if (!job) return;
+    if (!batchJobActive(job)) { finishBatchJob(as, job); return; }
+    batchJobTimers[as.jobKey] = setTimeout(function () {
+      delete batchJobTimers[as.jobKey];
+      api(as.jobsURL + '/' + job.id)
+        .then(function (j) {
+          var before = state[as.jobKey] ? state[as.jobKey].deleted : 0;
+          // 有新删除时静默刷新列表，避免已删除的数据继续显示。
+          if (j && j.deleted !== before && state.view === as.view && batchJobActive(j)) as.reload(true);
+          watchBatchJob(as, j);
+        })
+        // 网络抖动：保留当前进度，稍后重试。
+        .catch(function () { watchBatchJob(as, state[as.jobKey]); });
+    }, 1500);
+  }
+  function finishBatchJob(as, job) {
+    state[as.jobKey] = null;
+    var msg = '删除作业 #' + job.id + (job.status === 'canceled' ? ' 已停止。' : ' 已完成。') +
+      '\n已删除 ' + job.deleted + ' ' + as.unit + as.noun + '。';
+    if (job.status === 'canceled' && job.processed < job.total) {
+      msg += '\n剩余 ' + (job.total - job.processed) + ' ' + as.unit + '未处理。';
+    }
+    var failed = (job.failed || []).map(function (f) { return (f.ip || '#' + f.id) + '：' + f.error; });
+    if (job.failed_count) {
+      msg += '\n' + job.failed_count + ' ' + as.unit + '删除失败' + (failed.length ? '：\n' + failed.slice(0, 20).join('\n') : '') +
+        (job.failed_count > Math.min(failed.length, 20) ? '\n…' : '');
+    }
+    if (state[as.jobKey + 'Trunc'] && job.status !== 'canceled') {
+      msg += '\n筛选结果超过单次上限，可再次点「按筛选条件全选」继续删除。';
+    }
+    state[as.jobKey + 'Trunc'] = false;
+    alert(msg);
+    if (state.view === as.view) as.reload(false);
+  }
+  function cancelBatchJob(as, id) {
+    api(as.jobsURL + '/' + id + '/cancel', { method: 'POST' })
+      .then(function (j) { watchBatchJob(as, j); })
+      .catch(function (e) { alert('停止失败: ' + e.message); });
+  }
+  // resumeBatchJob 进入页面时查询本人未结束的作业（页面刷新后恢复进度）。
+  function resumeBatchJob(as) {
+    if (batchJobTimers[as.jobKey] || batchJobActive(state[as.jobKey])) return;
+    api(as.jobsURL + '/active')
+      .then(function (j) { if (j && j.id) watchBatchJob(as, j); })
+      .catch(function () {});
+  }
+  var HOST_DELETE_JOB = {
+    jobKey: 'hostDeleteJob', jobsURL: '/api/host-delete-jobs', idsURL: '/api/hosts/deletable-ids',
+    view: 'hosts', noun: '主机', unit: '台',
+    // 与 loadHosts 的筛选参数一致，保证「按筛选条件全选」命中的就是列表结果。
+    filterQS: function () { return state.q ? ['q=' + encodeURIComponent(state.q)] : []; },
+    reload: function (quiet) {
+      if (quiet) { loadHosts(null, true); return; }
+      state.hostPage = 1;
+      loadHosts();
+    }
+  };
 
   function simpleTable(cols, rows, cells, opts) {
     if (!Array.isArray(rows)) rows = [];
@@ -5081,8 +5221,23 @@
         (q ? '（全部 ' + state.components.length + '）' : '')])
     ]);
 
+    // 批量删除：管理员可单选/多选本页组件。批量删除不连带删除引用任务，
+    // 被任务引用的组件会列为失败，需用行内「删除」确认连带删除。
+    var compSel = isAdmin() ? batchSelection({
+      stateKey: 'compSelected', items: compItems, noun: '组件', unit: '个',
+      url: '/api/components/batch-delete',
+      confirmText: '组件的制品文件会一并删除，无法恢复。\n仍被任务引用的组件会被跳过（需单独删除并确认连带删除任务）。',
+      label: function (x) { return x.name; },
+      onDone: function () {
+        state.tasksSig = '';
+        loadComponents();
+      }
+    }) : null;
+    var compCols = ['ID', '名称', '显示名称', '模式', '安装路径', '服务', '操作'];
+    if (compSel) compCols.unshift('选择');
+
     var table = simpleTable(
-      ['ID', '名称', '显示名称', '模式', '安装路径', '服务', '操作'],
+      compCols,
       compItems,
       function (x) {
         var actions = isAdmin() ? h('div', { class: 'row-actions' }, [
@@ -5152,7 +5307,9 @@
             }
           }, ['删除'])
         ]) : '-';
-        return [x.id, x.name, x.display_name || '-', x.deploy_mode, x.install_path || '-', x.service_name || '-', actions];
+        var cells = [x.id, x.name, x.display_name || '-', x.deploy_mode, x.install_path || '-', x.service_name || '-', actions];
+        if (compSel) cells.unshift(compSel.cell(x));
+        return cells;
       },
       { key: 'components', sortable: true }
     );
@@ -5175,7 +5332,8 @@
       }, ['下一页'])
     ]) : null;
 
-    return h('div', {}, [form, h('div', { class: 'card' }, [toolbar, table, compPager, empty])]);
+    return h('div', {}, [form, h('div', { class: 'card' }, [toolbar,
+      compSel && compItems.length ? compSel.bar : null, table, compPager, empty])]);
   }
 
   var ARTIFACT_ARCHES = [
@@ -6395,7 +6553,11 @@
   var autoTimer = null;
   var autoBusy = false;
   function loadHosts(page, quiet) {
-    if (!quiet) state.view = 'hosts';
+    if (!quiet) {
+      state.view = 'hosts';
+      // 页面刷新或从其他页签切回时，恢复显示后台主机删除作业的进度（仅管理员可删除）。
+      if (isAdmin()) resumeBatchJob(HOST_DELETE_JOB);
+    }
     // 版本分布变化较慢：手动刷新/进入页面时立即拉取；自动刷新时默认 30 秒，
     // 有 Agent 正在自升级时缩短到 10 秒，便于及时看到剩余旧版本数量。
     var statsEvery = state.agentUpdateActive ? 10000 : 30000;

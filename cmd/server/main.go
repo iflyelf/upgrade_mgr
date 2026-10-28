@@ -57,6 +57,8 @@ func main() {
 	sc.StartExtbinProbe(ctx, handler.NewExtbinProvider(sc), 0)
 	// 外部文件（含内置 node-exporter-install.sh 等）后台预下载，主机 ?local=1 直接命中缓存。
 	handler.StartExternalBinaryPrewarm(ctx, sc)
+	// 主机批量删除作业：后台按批执行，页面刷新/切换页签不中断。
+	handler.StartHostDeleteJobs(ctx, sc)
 	// 其他副本在页面保存的制品上传配置：当前实例由保存请求立即热更新，
 	// 其他副本通过 5 秒轮询同步，无需重启。
 	sc.StartArtifactSettingsWatcher(ctx, 5*time.Second)
@@ -197,6 +199,11 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
 	mux.HandleFunc("POST /api/hosts/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostBatchDelete(sc))))
+	mux.HandleFunc("GET /api/hosts/deletable-ids", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeletableIDs(sc))))
+	mux.HandleFunc("POST /api/host-delete-jobs", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeleteJobCreate(sc))))
+	mux.HandleFunc("GET /api/host-delete-jobs/active", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeleteJobActive(sc))))
+	mux.HandleFunc("GET /api/host-delete-jobs/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeleteJobGet(sc))))
+	mux.HandleFunc("POST /api/host-delete-jobs/{id}/cancel", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeleteJobCancel(sc))))
 	mux.HandleFunc("POST /api/hosts/{id}/tunnel-test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostTunnelTest(sc))))
 	// Agent 自升级：管理员触发 + 查看最近状态；自动升级由 agent.auto_update 设置控制。
 	mux.HandleFunc("POST /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdate(sc))))
@@ -249,6 +256,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/components", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ComponentCreate(sc))))
 	mux.HandleFunc("PUT /api/components/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ComponentUpdate(sc))))
 	mux.HandleFunc("DELETE /api/components/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ComponentDelete(sc))))
+	mux.HandleFunc("POST /api/components/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.ComponentBatchDelete(sc))))
 	mux.HandleFunc("GET /api/components/{id}/references", middleware.RequireAuth(auth, handler.ComponentReferences(sc)))
 
 	// 制品管理
