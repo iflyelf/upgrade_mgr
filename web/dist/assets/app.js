@@ -215,6 +215,8 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
       p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
+  // TASK_DELETE_CHUNK 前端批量删除每次请求的任务数（与服务端单事务批大小一致）。
+  var TASK_DELETE_CHUNK = 500;
   function deletableTask(x) {
     return ['draft', 'success', 'failed', 'canceled', 'rolled_back'].indexOf(x.status) >= 0;
   }
@@ -5956,31 +5958,73 @@
       var scopeText = allSel ? '当前筛选结果中的 ' : '选中的 ';
       if (!confirm('确定删除' + scopeText + selectedIDs.length + ' 个任务吗？\n任务批次、逐机状态和指令日志会一并删除，且无法恢复。')) return;
       var truncated = allSel && allSel.truncated;
-      // 一次请求完成批量删除，服务端按集合校验并返回成功列表与失败原因。
-      api('/api/tasks/batch-delete', { method: 'POST', body: JSON.stringify({ ids: selectedIDs }) })
-        .then(function (res) {
-          res = res || {};
-          (res.deleted || []).forEach(function (id) {
-            if (state.taskDetailId === id) closeTaskDetail(true);
+      var ids = selectedIDs.slice();
+      // 每 500 个一批调用，批间更新进度；进度放在 state 里，自动刷新重绘时不会丢失。
+      // 「停止」只在当前批完成后生效，已提交的批次不会回滚。
+      var prog = state.taskDeleteProg = {
+        total: ids.length, done: 0, deleted: 0, failed: [], running: true, stop: false
+      };
+      render();
+      function next(start) {
+        if (prog.stop || start >= ids.length) return Promise.resolve();
+        var chunk = ids.slice(start, start + TASK_DELETE_CHUNK);
+        return api('/api/tasks/batch-delete', { method: 'POST', body: JSON.stringify({ ids: chunk }) })
+          .then(function (res) {
+            res = res || {};
+            (res.deleted || []).forEach(function (id) {
+              if (state.taskDetailId === id) closeTaskDetail(true);
+            });
+            prog.deleted += (res.deleted || []).length;
+            (res.failed || []).forEach(function (f) { prog.failed.push('#' + f.id + '：' + f.error); });
+          }, function (e) {
+            // 整批请求失败（网络/会话过期等）：本批全部计入失败，继续下一批。
+            chunk.forEach(function (id) { prog.failed.push('#' + id + '：' + e.message); });
+          })
+          .then(function () {
+            prog.done += chunk.length;
+            render();
+            return next(start + chunk.length);
           });
-          var failed = (res.failed || []).map(function (f) { return '#' + f.id + '：' + f.error; });
-          var msg = '已删除 ' + (res.deleted || []).length + ' 个任务。';
-          if (failed.length) {
-            // 失败列表可能很长，只展示前 20 条。
-            msg += '\n' + failed.length + ' 个删除失败：\n' + failed.slice(0, 20).join('\n') +
-              (failed.length > 20 ? '\n…' : '');
-          }
-          if (truncated) msg += '\n筛选结果超过单次上限，可再次点「按筛选条件全选」继续删除。';
-          if (failed.length || truncated || allSel) alert(msg);
-        })
-        .catch(function (e) { alert('批量删除失败: ' + e.message); })
-        .then(function () {
-          state.taskAllSel = null;
-          state.taskSelected = {};
-          state.taskPage = 1;
-          loadTasks();
-        });
+      }
+      next(0).then(function () {
+        prog.running = false;
+        var msg = '已删除 ' + prog.deleted + ' 个任务。';
+        if (prog.stop && prog.done < prog.total) {
+          msg += '\n已手动停止，剩余 ' + (prog.total - prog.done) + ' 个未处理。';
+        }
+        if (prog.failed.length) {
+          // 失败列表可能很长，只展示前 20 条。
+          msg += '\n' + prog.failed.length + ' 个删除失败：\n' + prog.failed.slice(0, 20).join('\n') +
+            (prog.failed.length > 20 ? '\n…' : '');
+        }
+        if (truncated && !prog.stop) msg += '\n筛选结果超过单次上限，可再次点「按筛选条件全选」继续删除。';
+        alert(msg);
+        state.taskDeleteProg = null;
+        state.taskAllSel = null;
+        state.taskSelected = {};
+        state.taskPage = 1;
+        loadTasks();
+      });
     }
+    var prog = state.taskDeleteProg;
+    var deleting = !!(prog && prog.running);
+    var progBar = deleting ? (function () {
+      var pct = prog.total ? Math.round(prog.done * 100 / prog.total) : 0;
+      return h('div', { class: 'field', role: 'status', 'aria-live': 'polite' }, [
+        h('div', { class: 'toolbar' }, [
+          h('span', {}, [(prog.stop ? '正在停止（等待当前批完成）' : '正在删除') + '：' + prog.done + ' / ' + prog.total +
+            '（' + pct + '%），已删除 ' + prog.deleted + '，失败 ' + prog.failed.length]),
+          h('button', {
+            class: 'btn ghost small', type: 'button', disabled: prog.stop ? '' : null,
+            onclick: function () { prog.stop = true; render(); }
+          }, ['停止'])
+        ]),
+        h('div', {
+          class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
+          'aria-valuenow': String(pct), 'aria-label': '批量删除进度'
+        }, [h('div', { style: 'width:' + pct + '%' }, [])])
+      ]);
+    })() : null;
     var batchBar = isAdmin() || selectable.length ? h('div', { class: 'toolbar' }, [
       h('label', { class: 'check' }, [
         h('input', {
@@ -5996,15 +6040,16 @@
       ]),
       h('button', {
         class: 'btn ghost small', type: 'button', onclick: selectAllByFilter,
+        disabled: deleting ? '' : null,
         title: '选中当前筛选条件下全部可删除任务（不限当前页，单次最多 5000 个）'
       }, ['按筛选条件全选']),
-      selectedIDs.length || allSel
+      (selectedIDs.length || allSel) && !deleting
         ? h('button', { class: 'btn ghost small', type: 'button', onclick: clearSelection }, ['取消选择'])
         : null,
       h('button', {
-        class: 'btn danger small', disabled: selectedIDs.length ? null : '',
+        class: 'btn danger small', disabled: selectedIDs.length && !deleting ? null : '',
         onclick: batchDelete
-      }, ['批量删除' + (selectedIDs.length ? '（' + selectedIDs.length + '）' : '')]),
+      }, [deleting ? '删除中…' : ('批量删除' + (selectedIDs.length ? '（' + selectedIDs.length + '）' : ''))]),
       allSel
         ? h('span', { class: 'muted' }, ['已按筛选条件选中 ' + selectedIDs.length + ' 个可删除任务' +
             (allSel.truncated ? '（超过上限，仅选中最新的 ' + allSel.limit + ' 个）' : '') + '。'])
@@ -6013,6 +6058,7 @@
 
     var list = h('div', { class: 'card' }, [
       batchBar,
+      progBar,
       h('div', { class: 'toolbar' }, [
         h('span', { class: 'muted' }, [
           (state.taskFilterComp || state.taskFilterKind || state.taskFilterStatus || state.taskFilterCreator || state.taskQ)
