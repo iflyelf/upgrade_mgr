@@ -29,6 +29,8 @@ type externalBinaryItem struct {
 	Script bool `json:"script"`
 	// PlatformURL 是 Agent/脚本可直接访问的平台地址。
 	PlatformURL string `json:"platform_url"`
+	// Builtin 为 true 表示内置条目（始终存在，不能删除，可改写地址）。
+	Builtin bool `json:"builtin"`
 	// Cached 表示控制台已有可用缓存。
 	Cached     bool       `json:"cached"`
 	CachedSize int64      `json:"cached_size"`
@@ -225,6 +227,11 @@ func SaveExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			if name == "" {
 				continue
 			}
+			// 内置条目运行期始终合并提供，删除不会生效；直接拒绝，避免用户误以为已删掉。
+			if extbin.IsBuiltin(name) {
+				httpx.Fail(w, http.StatusBadRequest, "内置条目 "+name+" 不能删除（可修改地址或上传离线文件）")
+				return
+			}
 			// 删除按名称忽略大小写匹配，避免大小写不同导致删不掉。
 			for k := range raw {
 				if strings.EqualFold(k, name) {
@@ -254,6 +261,9 @@ func SaveExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// 与内置默认完全相同的条目不落库：由运行期合并提供，内置地址更新后自动跟随。
+		// 先剔除再做域名校验：未改动的内置条目不应因管理员收紧 hosts 而阻塞保存。
+		raw = extbin.StripBuiltinDefaults(raw)
 		hosts := normalizeHostList(req.Hosts)
 		cidrs := normalizeHostList(req.AllowCIDRs)
 		rule := extbin.AllowRule{AllowPrivate: req.AllowPrivate, AllowCIDRs: cidrs}
@@ -632,6 +642,7 @@ func buildExternalBinaryItem(baseDir string, e extbin.Entry) externalBinaryItem 
 		URL:         e.URL,
 		Script:      e.Script,
 		PlatformURL: "/api/external/binary/" + e.Name,
+		Builtin:     extbin.IsBuiltin(e.Name),
 	}
 	info, err := os.Stat(externalBinaryCachePath(baseDir, e))
 	if err == nil && !info.IsDir() {

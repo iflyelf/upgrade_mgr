@@ -38,8 +38,8 @@ func DefaultBinaries() map[string]string {
 		"windows-exporter-arm64-legacy": "https://github.com/iflyelf/windows_exporter/releases/download/latest/windows_exporter-arm64-legacy.exe",
 		"windows-exporter-install.ps1":  "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/windows_exporter/install.ps1",
 		// Linux 主机无法访问 GitHub 时，由控制台代缓存 node_exporter（ELF 静态二进制）。
-		"node-exporter-install.sh":      "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh",
-		"node-exporter-linux-amd64":     "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64",
+		"node-exporter-install.sh":  "script:https://raw.githubusercontent.com/iflyelf/upgrade_mgr/main/examples/node_exporter/install.sh",
+		"node-exporter-linux-amd64": "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-amd64",
 		"node-exporter-linux-arm64": "https://github.com/iflyelf/node_exporter/releases/download/latest/node_exporter-linux-arm64",
 		// 旧内核专用（kernel 2.6.32-3.10）：Go 1.23+ 在旧内核上会报 "procresize: invalid arg"。
 		// Go 1.17 是最后支持 kernel 2.6.32 的版本，使用单独的 legacy 工作流构建。
@@ -54,12 +54,61 @@ func IsExecutable(head []byte) bool {
 	return bytes.HasPrefix(head, []byte("MZ")) || bytes.HasPrefix(head, []byte("\x7fELF"))
 }
 
-// Effective 返回实际生效的白名单：配置非空用配置，否则用内置默认。
+// Effective 返回实际生效的白名单：内置默认 + 配置（同名以配置为准）。
+//
+// 内置条目始终存在：早期保存过白名单的部署不会因为后来新增的内置条目
+// （如 node-exporter-install.sh）缺失而 404。管理员仍可在配置里改写内置条目的地址。
 func Effective(configured map[string]string) map[string]string {
-	if len(configured) > 0 {
-		return configured
+	out := make(map[string]string, len(configured)+10)
+	for k, v := range configured {
+		out[k] = v
 	}
-	return DefaultBinaries()
+	for name, v := range DefaultBinaries() {
+		if !hasNameFold(out, name) {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// IsBuiltin 判断名称是否为内置条目（大小写不敏感）。
+func IsBuiltin(name string) bool {
+	_, ok := builtinValue(name)
+	return ok
+}
+
+// builtinValue 返回内置条目的默认值。
+func builtinValue(name string) (string, bool) {
+	for k, v := range DefaultBinaries() {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// StripBuiltinDefaults 去掉与内置默认值完全相同的条目，只保留自定义与改写过的内置条目。
+//
+// 保存时调用：内置条目由运行期合并提供，不写进配置，
+// 以后内置地址更新时已部署环境会自动跟随，而不是停在保存时的旧值。
+func StripBuiltinDefaults(raw map[string]string) map[string]string {
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if def, ok := builtinValue(k); ok && strings.TrimSpace(v) == def {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func hasNameFold(m map[string]string, name string) bool {
+	for k := range m {
+		if strings.EqualFold(k, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultHosts 默认允许的上游域名。

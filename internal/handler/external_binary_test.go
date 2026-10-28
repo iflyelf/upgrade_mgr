@@ -121,11 +121,18 @@ func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 		t.Fatalf("legacy 地址不符: %s", got["windows-exporter-amd64-legacy"])
 	}
 
-	// 配置了就用配置（完全覆盖，不与默认合并）
+	// 配置与内置合并：自定义条目追加，内置条目始终存在（早期保存过白名单的部署不会缺新内置条目）。
 	cfg.Server.ExternalBinaries = map[string]string{"only": "https://github.com/x"}
 	got = effectiveExternalBinaries(cfg)
-	if len(got) != 1 || got["only"] == "" {
-		t.Fatalf("应使用配置项: %v", got)
+	if len(got) != 11 || got["only"] == "" || got["node-exporter-install.sh"] == "" {
+		t.Fatalf("应为内置 + 自定义: %v", got)
+	}
+
+	// 同名配置改写内置地址（名称大小写不敏感，不会出现两条）。
+	cfg.Server.ExternalBinaries = map[string]string{"Node-Exporter-Install.sh": "script:https://github.com/mirror/install.sh"}
+	got = effectiveExternalBinaries(cfg)
+	if len(got) != 10 || got["Node-Exporter-Install.sh"] != "script:https://github.com/mirror/install.sh" {
+		t.Fatalf("配置应改写内置地址: %v", got)
 	}
 }
 
