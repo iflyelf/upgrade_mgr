@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
@@ -157,5 +158,99 @@ func ArtifactListPaged(s *svc.ServiceContext) http.HandlerFunc {
 		httpx.OK(w, map[string]any{
 			"list": list, "total": total, "page": page, "size": size, "pages": pages,
 		})
+	}
+}
+
+// maxArtifactBatchDelete 单次批量删除的制品数上限（与分页最大条数一致）。
+const maxArtifactBatchDelete = 200
+
+// artifactDeleteStatus 把删除错误映射为 HTTP 状态与面向用户的消息。
+func artifactDeleteStatus(err error) (int, string, bool) {
+	switch {
+	case errors.Is(err, artifact.ErrArtifactInUse):
+		return http.StatusConflict, err.Error(), false
+	case err.Error() == "制品不存在":
+		return http.StatusNotFound, "制品不存在或无权访问", false
+	case strings.Contains(err.Error(), "等待其他实例上传/删除同一组件制品超时"):
+		return http.StatusConflict, "该组件正在上传或删除制品，请稍后重试", false
+	}
+	return http.StatusInternalServerError, "删除失败（服务端错误）", true
+}
+
+// artifactAuditName 审计里记录的制品名称：组件 ID / 版本 / 架构 / 文件名。
+func artifactAuditName(a *artifact.Artifact) string {
+	if a == nil {
+		return ""
+	}
+	return fmt.Sprintf("component=%d %s/%s %s", a.ComponentID, a.Version, a.Arch, a.Filename)
+}
+
+// ArtifactDelete 删除单个制品：DELETE /api/artifacts/{id}（管理员，租户隔离）。
+func ArtifactDelete(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil || id <= 0 {
+			httpx.Fail(w, http.StatusBadRequest, "制品 ID 无效")
+			return
+		}
+		a, err := s.Artifact.Delete(r.Context(), reqScope(r), id)
+		auditOp(s, r, audit.ActionArtifactDelete, "artifact", strconv.FormatInt(id, 10), artifactAuditName(a), err)
+		if err != nil {
+			status, msg, internal := artifactDeleteStatus(err)
+			if internal {
+				httpx.FailErr(w, status, err)
+			} else {
+				httpx.Fail(w, status, msg)
+			}
+			return
+		}
+		httpx.OK(w, map[string]any{"id": id})
+	}
+}
+
+// ArtifactBatchDelete 批量删除制品：POST /api/artifacts/batch-delete {"ids":[1,2,3]}。
+//
+// 逐个复用单个删除的校验（租户隔离、组件锁、使用中拒绝），每个单独写审计；
+// 某个失败不影响其他制品，返回成功列表与逐个失败原因。
+func ArtifactBatchDelete(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		ids := uniquePositiveIDs(req.IDs)
+		if len(ids) == 0 {
+			httpx.Fail(w, http.StatusBadRequest, "请选择要删除的制品")
+			return
+		}
+		if len(ids) > maxArtifactBatchDelete {
+			httpx.Fail(w, http.StatusBadRequest, fmt.Sprintf("单次最多删除 %d 个制品", maxArtifactBatchDelete))
+			return
+		}
+		type failure struct {
+			ID    int64  `json:"id"`
+			Error string `json:"error"`
+		}
+		deleted := make([]int64, 0, len(ids))
+		failed := []failure{}
+		sc := reqScope(r)
+		for _, id := range ids {
+			if r.Context().Err() != nil {
+				failed = append(failed, failure{ID: id, Error: "请求已取消"})
+				continue
+			}
+			a, err := s.Artifact.Delete(r.Context(), sc, id)
+			auditOp(s, r, audit.ActionArtifactDelete, "artifact", strconv.FormatInt(id, 10), artifactAuditName(a), err)
+			if err != nil {
+				_, msg, _ := artifactDeleteStatus(err)
+				failed = append(failed, failure{ID: id, Error: msg})
+				continue
+			}
+			deleted = append(deleted, id)
+		}
+		httpx.OK(w, map[string]any{"deleted": deleted, "failed": failed})
 	}
 }
