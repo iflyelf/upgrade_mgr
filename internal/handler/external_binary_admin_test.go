@@ -45,7 +45,8 @@ func TestListExternalBinariesIncludesCacheState(t *testing.T) {
 	os.MkdirAll(cache, 0755)
 	os.WriteFile(filepath.Join(cache, "custom-tool.exe"), []byte("MZxx"), 0644)
 
-	req := httptest.NewRequest("GET", "/api/external/binaries", nil)
+	// 列表同时包含内置条目，这里按名称过滤只看自定义条目。
+	req := httptest.NewRequest("GET", "/api/external/binaries?q=custom-tool", nil)
 	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
 	rec := httptest.NewRecorder()
 	ListExternalBinaries(sc)(rec, req)
@@ -305,19 +306,27 @@ func TestListExternalBinariesPagination(t *testing.T) {
 		return out.Data
 	}
 
-	// 第 1 页 size=2：total=5, pages=3
+	// 自定义 5 条 + 内置条目（始终合并）。
+	total := 5 + len(extbin.DefaultBinaries())
+	pages := (total + 1) / 2
 	page1 := call("page=1&size=2")
-	if page1.Total != 5 || page1.Pages != 3 || len(page1.Items) != 2 {
+	if page1.Total != total || page1.Pages != pages || len(page1.Items) != 2 {
 		t.Fatalf("分页错误: total=%d pages=%d items=%d", page1.Total, page1.Pages, len(page1.Items))
 	}
-	// 名称排序：alpha/beta
+	// 名称排序：alpha/beta 排在内置的 node-/windows- 之前
 	if page1.Items[0].Name != "alpha" || page1.Items[1].Name != "beta" {
 		t.Fatalf("排序不符: %+v", page1.Items)
 	}
+	if page1.Items[0].Builtin {
+		t.Fatal("自定义条目不应标记为内置")
+	}
 	// 越界页夹紧到最后一页
 	last := call("page=99&size=2")
-	if last.Page != 3 || len(last.Items) != 1 {
+	if last.Page != pages || len(last.Items) != total-(pages-1)*2 {
 		t.Fatalf("越界页应夹紧: page=%d items=%d", last.Page, len(last.Items))
+	}
+	if !last.Items[len(last.Items)-1].Builtin {
+		t.Fatalf("内置条目应标记 builtin: %+v", last.Items)
 	}
 	// 搜索：匹配 gamma
 	searched := call("q=gam")
@@ -326,7 +335,7 @@ func TestListExternalBinariesPagination(t *testing.T) {
 	}
 	// 不传分页参数 → 返回全部（兼容旧行为）
 	all := call("")
-	if len(all.Items) != 5 || all.Page != 0 {
+	if len(all.Items) != total || all.Page != 0 {
 		t.Fatalf("未分页应返回全部: items=%d page=%d", len(all.Items), all.Page)
 	}
 }

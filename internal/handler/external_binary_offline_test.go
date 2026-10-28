@@ -84,8 +84,8 @@ func TestExternalBinaryOfflineUpload(t *testing.T) {
 		t.Fatalf("下载内容不符: %q", rec.Body.String())
 	}
 
-	// 列表标记 local
-	req = httptest.NewRequest("GET", "/api/external/binaries", nil)
+	// 列表标记 local（列表同时包含内置条目，按名称过滤）
+	req = httptest.NewRequest("GET", "/api/external/binaries?q=offline-tool", nil)
 	rec = httptest.NewRecorder()
 	ListExternalBinaries(sc)(rec, req)
 	if rec.Code != http.StatusOK {
@@ -114,7 +114,7 @@ func TestExternalBinaryOfflineUpload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("删除失败 %d: %s", rec.Code, rec.Body.String())
 	}
-	req = httptest.NewRequest("GET", "/api/external/binaries", nil)
+	req = httptest.NewRequest("GET", "/api/external/binaries?q=offline-tool", nil)
 	rec = httptest.NewRecorder()
 	ListExternalBinaries(sc)(rec, req)
 	_ = json.Unmarshal(rec.Body.Bytes(), &list)

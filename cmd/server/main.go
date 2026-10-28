@@ -55,6 +55,8 @@ func main() {
 	sc.StartMaintenance(ctx)
 	// 外部文件可用性探测（Prometheus 指标），便于观察公网/内网镜像稳定性。
 	sc.StartExtbinProbe(ctx, handler.NewExtbinProvider(sc), 0)
+	// 外部文件（含内置 node-exporter-install.sh 等）后台预下载，主机 ?local=1 直接命中缓存。
+	handler.StartExternalBinaryPrewarm(ctx, sc)
 	// 其他副本在页面保存的制品上传配置：当前实例由保存请求立即热更新，
 	// 其他副本通过 5 秒轮询同步，无需重启。
 	sc.StartArtifactSettingsWatcher(ctx, 5*time.Second)

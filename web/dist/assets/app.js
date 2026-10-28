@@ -2143,8 +2143,9 @@
         state.extbin = d;
         // 服务端分页：草稿只含当前页条目；其余页面不参与保存。
         state.extbinDraft = (d.items || []).map(function (x) {
-          return { name: x.name, url: x.url, script: !!x.script, saved: true,
-            cached: x.cached, cached_size: x.cached_size, platform_url: x.platform_url };
+          return { name: x.name, url: x.url, script: !!x.script, saved: true, builtin: !!x.builtin,
+            cached: x.cached, cached_size: x.cached_size, platform_url: x.platform_url,
+            local: !!x.local, local_size: x.local_size };
         });
         state.extbinDeleted = [];
         state.extbinBusy = false;
@@ -2183,7 +2184,7 @@
     var draft = state.extbinDraft;
     if (!draft) {
       draft = (d && d.items ? d.items : []).map(function (x) {
-        return { name: x.name, url: x.url, script: !!x.script,
+        return { name: x.name, url: x.url, script: !!x.script, saved: true, builtin: !!x.builtin,
           cached: x.cached, cached_size: x.cached_size, platform_url: x.platform_url,
           local: !!x.local, local_size: x.local_size };
       });
@@ -2250,8 +2251,11 @@
     var rows = draft.map(function (row, idx) {
       var nameId = 'extbin-name-' + idx;
       var urlId = 'extbin-url-' + idx;
+      // 内置条目名称固定（脚本与组件示例按名称引用），只允许改写地址。
       var nameEl = h('input', {
         id: nameId, value: row.name || '', placeholder: '如 custom-tool',
+        readonly: row.builtin ? '' : null,
+        title: row.builtin ? '内置条目：名称固定，可修改地址或上传离线文件' : null,
         oninput: function () { row.name = nameEl.value; }
       }, []);
       var urlEl = h('input', {
@@ -2374,7 +2378,7 @@
               }).catch(function (e) { alert('清除失败: ' + e.message); });
             }
           }, ['清除离线文件']) : null,
-          h('button', {
+          row.builtin ? h('span', { class: 'tag' }, ['内置']) : h('button', {
             class: 'btn danger small', onclick: function () {
               var nm = (row.name || '').trim();
               if (nm && row.saved) {
@@ -2444,8 +2448,9 @@
           '用于老系统（Windows Server 2008 R2 + PowerShell 2.0 不支持 TLS 1.2）' +
           '或无外网出口的场景。白名单保存后立即生效，无需重启。'),
         d && d.source === 'default'
-          ? hint('当前使用内置默认白名单（windows_exporter amd64/arm64 + install.ps1）；保存后以本页配置为准。')
+          ? hint('当前使用内置默认白名单（windows_exporter / node_exporter 及安装脚本）。')
           : null,
+        hint('标记「内置」的条目始终可用，不能删除；可修改地址或上传离线文件。控制台启动后会在后台自动预下载内置条目的缓存，平台能出网时无需手动「刷新缓存」。'),
         d && d.dir ? hint('缓存目录：' + d.dir + '/.external-cache') : null,
         state.extbinErr ? h('div', { class: 'err field', role: 'alert' }, [state.extbinErr]) : null
       ]),

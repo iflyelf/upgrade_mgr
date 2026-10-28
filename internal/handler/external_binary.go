@@ -39,15 +39,15 @@ func defaultExternalBinaries() map[string]string {
 	return extbin.DefaultBinaries()
 }
 
-// effectiveExternalBinaries 返回当前生效的白名单。
+// effectiveExternalBinaries 返回当前生效的白名单：内置默认 + 配置（同名以配置为准）。
 //
-// 优先使用配置（配置文件或设置页）；为空时用内置默认值，
-// 保证升级后原有 Windows 接入不因缺少配置而中断。
+// 内置条目始终可用：早期保存过白名单的部署，不会因为后来新增的内置条目
+// （如 node-exporter-install.sh）不在已保存配置里而返回 404。
 func effectiveExternalBinaries(cfg *config.Config) map[string]string {
-	if cfg != nil && len(cfg.Server.ExternalBinaries) > 0 {
-		return cfg.Server.ExternalBinaries
+	if cfg == nil {
+		return defaultExternalBinaries()
 	}
-	return defaultExternalBinaries()
+	return extbin.Effective(cfg.Server.ExternalBinaries)
 }
 
 // effectiveExternalHosts 返回允许的上游域名。
@@ -196,7 +196,9 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 			strings.EqualFold(r.Header.Get("X-External-Local-Only"), "1")
 		cached := local || freshFile(target, ttl)
 		if localOnly {
-			if !local && !fileExists(target) {
+			// 没有离线文件和缓存时，内置安装脚本用随服务端发布的版本兜底，
+			// 平台不能出网也不需要管理员手工上传。
+			if !local && !fileExists(target) && !seedEmbeddedScript(target, *asset) {
 				metrics.ExternalBinaryRequests.WithLabelValues(name, "local_miss").Inc()
 				http.Error(w, "offline file not uploaded", http.StatusNotFound)
 				return
@@ -213,12 +215,17 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 				effectiveExternalHosts(cfg), externalAllowRule(cfg),
 				effectiveExternalProxy(cfg), effectiveExternalProxyHosts(cfg), ttl); fetchErr != nil {
 				log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
-				metrics.ExternalBinaryRequests.WithLabelValues(name, "error").Inc()
-				httpx.Fail(w, http.StatusBadGateway,
-					"控制台下载外部文件失败（请确认控制台能访问该地址）: "+fetchErr.Error())
-				return
+				// 上游不可达：已有（过期）缓存或内置脚本都比直接失败好。
+				if !fileExists(target) && !seedEmbeddedScript(target, *asset) {
+					metrics.ExternalBinaryRequests.WithLabelValues(name, "error").Inc()
+					httpx.Fail(w, http.StatusBadGateway,
+						"控制台下载外部文件失败（请确认控制台能访问该地址）: "+fetchErr.Error())
+					return
+				}
+				metrics.ExternalBinaryRequests.WithLabelValues(name, "stale").Inc()
+			} else {
+				metrics.ExternalBinaryRequests.WithLabelValues(name, "fresh").Inc()
 			}
-			metrics.ExternalBinaryRequests.WithLabelValues(name, "fresh").Inc()
 		} else {
 			metrics.ExternalBinaryRequests.WithLabelValues(name, "cache_hit").Inc()
 		}
