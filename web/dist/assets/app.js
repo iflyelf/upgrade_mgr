@@ -215,8 +215,6 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
       p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
-  // TASK_DELETE_CHUNK 前端批量删除每次请求的任务数（与服务端单事务批大小一致）。
-  var TASK_DELETE_CHUNK = 500;
   function deletableTask(x) {
     return ['draft', 'success', 'failed', 'canceled', 'rolled_back'].indexOf(x.status) >= 0;
   }
@@ -5957,68 +5955,32 @@
       if (!selectedIDs.length) return;
       var scopeText = allSel ? '当前筛选结果中的 ' : '选中的 ';
       if (!confirm('确定删除' + scopeText + selectedIDs.length + ' 个任务吗？\n任务批次、逐机状态和指令日志会一并删除，且无法恢复。')) return;
-      var truncated = allSel && allSel.truncated;
-      var ids = selectedIDs.slice();
-      // 每 500 个一批调用，批间更新进度；进度放在 state 里，自动刷新重绘时不会丢失。
-      // 「停止」只在当前批完成后生效，已提交的批次不会回滚。
-      var prog = state.taskDeleteProg = {
-        total: ids.length, done: 0, deleted: 0, failed: [], running: true, stop: false
-      };
-      render();
-      function next(start) {
-        if (prog.stop || start >= ids.length) return Promise.resolve();
-        var chunk = ids.slice(start, start + TASK_DELETE_CHUNK);
-        return api('/api/tasks/batch-delete', { method: 'POST', body: JSON.stringify({ ids: chunk }) })
-          .then(function (res) {
-            res = res || {};
-            (res.deleted || []).forEach(function (id) {
-              if (state.taskDetailId === id) closeTaskDetail(true);
-            });
-            prog.deleted += (res.deleted || []).length;
-            (res.failed || []).forEach(function (f) { prog.failed.push('#' + f.id + '：' + f.error); });
-          }, function (e) {
-            // 整批请求失败（网络/会话过期等）：本批全部计入失败，继续下一批。
-            chunk.forEach(function (id) { prog.failed.push('#' + id + '：' + e.message); });
-          })
-          .then(function () {
-            prog.done += chunk.length;
-            render();
-            return next(start + chunk.length);
-          });
-      }
-      next(0).then(function () {
-        prog.running = false;
-        var msg = '已删除 ' + prog.deleted + ' 个任务。';
-        if (prog.stop && prog.done < prog.total) {
-          msg += '\n已手动停止，剩余 ' + (prog.total - prog.done) + ' 个未处理。';
-        }
-        if (prog.failed.length) {
-          // 失败列表可能很长，只展示前 20 条。
-          msg += '\n' + prog.failed.length + ' 个删除失败：\n' + prog.failed.slice(0, 20).join('\n') +
-            (prog.failed.length > 20 ? '\n…' : '');
-        }
-        if (truncated && !prog.stop) msg += '\n筛选结果超过单次上限，可再次点「按筛选条件全选」继续删除。';
-        alert(msg);
-        state.taskDeleteProg = null;
-        state.taskAllSel = null;
-        state.taskSelected = {};
-        state.taskPage = 1;
-        loadTasks();
-      });
+      // 创建服务端异步作业后立即返回；删除在后台按批执行，页面刷新/切换页签不会中断。
+      // 进度通过轮询作业获取，刷新页面后由 resumeDeleteJob 自动恢复。
+      state.taskDeleteTruncated = !!(allSel && allSel.truncated);
+      api('/api/tasks/delete-jobs', { method: 'POST', body: JSON.stringify({ ids: selectedIDs.slice() }) })
+        .then(function (job) {
+          state.taskAllSel = null;
+          state.taskSelected = {};
+          watchDeleteJob(job);
+        })
+        .catch(function (e) { alert('创建删除作业失败: ' + e.message); });
     }
-    var prog = state.taskDeleteProg;
-    var deleting = !!(prog && prog.running);
+    var job = state.taskDeleteJob;
+    var deleting = !!(job && (job.status === 'pending' || job.status === 'running'));
     var progBar = deleting ? (function () {
-      var pct = prog.total ? Math.round(prog.done * 100 / prog.total) : 0;
+      var pct = job.total ? Math.round(job.processed * 100 / job.total) : 0;
       return h('div', { class: 'field', role: 'status', 'aria-live': 'polite' }, [
         h('div', { class: 'toolbar' }, [
-          h('span', {}, [(prog.stop ? '正在停止（等待当前批完成）' : '正在删除') + '：' + prog.done + ' / ' + prog.total +
-            '（' + pct + '%），已删除 ' + prog.deleted + '，失败 ' + prog.failed.length]),
+          h('span', {}, [(job.cancel_requested ? '正在停止（等待当前批完成）' : '后台删除中') +
+            '（作业 #' + job.id + '）：' + job.processed + ' / ' + job.total +
+            '（' + pct + '%），已删除 ' + job.deleted + '，失败 ' + (job.failed_count || 0)]),
           h('button', {
-            class: 'btn ghost small', type: 'button', disabled: prog.stop ? '' : null,
-            onclick: function () { prog.stop = true; render(); }
+            class: 'btn ghost small', type: 'button', disabled: job.cancel_requested ? '' : null,
+            onclick: function () { cancelDeleteJob(job.id); }
           }, ['停止'])
         ]),
+        hint('删除在服务端后台执行，刷新页面或切换页签不会中断，回到任务页会继续显示进度。'),
         h('div', {
           class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
           'aria-valuenow': String(pct), 'aria-label': '批量删除进度'
@@ -6360,6 +6322,62 @@
         render();
       });
   }
+  // 异步批量删除作业：轮询服务端进度，作业结束后汇总提示并刷新列表。
+  var deleteJobTimer = null;
+  function stopDeleteJobPoll() {
+    if (deleteJobTimer) { clearTimeout(deleteJobTimer); deleteJobTimer = null; }
+  }
+  function deleteJobActive(j) { return !!(j && (j.status === 'pending' || j.status === 'running')); }
+  function watchDeleteJob(job) {
+    stopDeleteJobPoll();
+    state.taskDeleteJob = job || null;
+    if (state.view === 'tasks') render();
+    if (!job) return;
+    if (!deleteJobActive(job)) { finishDeleteJob(job); return; }
+    deleteJobTimer = setTimeout(function () {
+      api('/api/tasks/delete-jobs/' + job.id)
+        .then(function (j) {
+          var before = state.taskDeleteJob ? state.taskDeleteJob.deleted : 0;
+          // 有新删除时同步刷新列表，避免已删除的任务继续显示。
+          if (j && j.deleted !== before && state.view === 'tasks' && deleteJobActive(j)) loadTasks(true);
+          watchDeleteJob(j);
+        })
+        // 网络抖动：保留当前进度，稍后重试。
+        .catch(function () { watchDeleteJob(state.taskDeleteJob); });
+    }, 1500);
+  }
+  function finishDeleteJob(job) {
+    stopDeleteJobPoll();
+    state.taskDeleteJob = null;
+    var msg = '删除作业 #' + job.id + (job.status === 'canceled' ? ' 已停止。' : ' 已完成。') +
+      '\n已删除 ' + job.deleted + ' 个任务。';
+    if (job.status === 'canceled' && job.processed < job.total) {
+      msg += '\n剩余 ' + (job.total - job.processed) + ' 个未处理。';
+    }
+    var failed = (job.failed || []).map(function (f) { return '#' + f.id + '：' + f.error; });
+    if (job.failed_count) {
+      msg += '\n' + job.failed_count + ' 个删除失败' + (failed.length ? '：\n' + failed.slice(0, 20).join('\n') : '') +
+        (job.failed_count > Math.min(failed.length, 20) ? '\n…' : '');
+    }
+    if (state.taskDeleteTruncated && job.status !== 'canceled') {
+      msg += '\n筛选结果超过单次上限，可再次点「按筛选条件全选」继续删除。';
+    }
+    state.taskDeleteTruncated = false;
+    alert(msg);
+    if (state.view === 'tasks') { state.taskPage = 1; loadTasks(); }
+  }
+  function cancelDeleteJob(id) {
+    api('/api/tasks/delete-jobs/' + id + '/cancel', { method: 'POST' })
+      .then(function (j) { watchDeleteJob(j); })
+      .catch(function (e) { alert('停止失败: ' + e.message); });
+  }
+  // resumeDeleteJob 进入任务页时查询是否有未结束的作业（页面刷新后恢复进度）。
+  function resumeDeleteJob() {
+    if (deleteJobTimer || deleteJobActive(state.taskDeleteJob)) return;
+    api('/api/tasks/delete-jobs/active')
+      .then(function (j) { if (j && j.id) watchDeleteJob(j); })
+      .catch(function () {});
+  }
   // taskFilterQS 任务列表筛选参数；列表与「按筛选条件全选」共用，保证命中集合一致。
   function taskFilterQS() {
     var qs = [];
@@ -6377,7 +6395,11 @@
     return '/api/tasks' + '?' + qs.join('&');
   }
   function loadTasks(quiet) {
-    if (!quiet) state.view = 'tasks';
+    if (!quiet) {
+      state.view = 'tasks';
+      // 页面刷新或从其他页签切回时，恢复显示后台删除作业的进度。
+      resumeDeleteJob();
+    }
     var seq = ++tasksReqSeq;
     var tasksReq = api(tasksURL());
     // 自动刷新只需要任务状态；组件/制品变化很少，沿用已有数据，

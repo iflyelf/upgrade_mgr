@@ -50,6 +50,7 @@ func main() {
 	defer cancel()
 	sc.StartConsulSync(ctx)
 	sc.StartOrchestrator(ctx)
+	sc.StartDeleteJobs(ctx)
 	sc.StartMetrics(ctx)
 	sc.StartMaintenance(ctx)
 	// 外部文件可用性探测（Prometheus 指标），便于观察公网/内网镜像稳定性。
@@ -259,6 +260,10 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/tasks", middleware.RequireAuth(auth, handler.TaskList(sc)))
 	mux.HandleFunc("GET /api/tasks/creators", middleware.RequireAuth(auth, handler.TaskCreators(sc)))
 	mux.HandleFunc("GET /api/tasks/deletable-ids", middleware.RequireAuth(auth, handler.TaskDeletableIDs(sc)))
+	mux.HandleFunc("POST /api/tasks/delete-jobs", middleware.RequireAuth(auth, handler.TaskDeleteJobCreate(sc)))
+	mux.HandleFunc("GET /api/tasks/delete-jobs/active", middleware.RequireAuth(auth, handler.TaskDeleteJobActive(sc)))
+	mux.HandleFunc("GET /api/tasks/delete-jobs/{id}", middleware.RequireAuth(auth, handler.TaskDeleteJobGet(sc)))
+	mux.HandleFunc("POST /api/tasks/delete-jobs/{id}/cancel", middleware.RequireAuth(auth, handler.TaskDeleteJobCancel(sc)))
 	mux.HandleFunc("GET /api/tasks/{id}", middleware.RequireAuth(auth, handler.TaskDetail(sc)))
 	mux.HandleFunc("POST /api/tasks/preview", middleware.RequireAuth(auth, handler.TaskPreview(sc)))
 	mux.HandleFunc("POST /api/tasks", middleware.RequireAuth(auth, handler.TaskCreate(sc)))

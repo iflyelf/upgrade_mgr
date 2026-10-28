@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -363,6 +364,44 @@ func (s *ServiceContext) ReloadConsul() {
 func (s *ServiceContext) StartOrchestrator(ctx context.Context) {
 	go task.NewOrchestrator(s.Task).Run(ctx)
 	log.Println("✅ 灰度编排器已启动（PostgreSQL advisory lock，单机/多副本通用）")
+}
+
+// StartDeleteJobs 启动任务批量删除作业的后台执行循环。
+//
+// 每批提交后逐任务写审计（与同步删除一致），并清空 HTTP 缓存，
+// 让任务列表在作业执行期间也能看到最新结果。
+func (s *ServiceContext) StartDeleteJobs(ctx context.Context) {
+	s.Task.SetDeleteJobHook(func(hctx context.Context, jobID int64, actor *auth.User, ip string,
+		deleted []int64, failed []task.BatchDeleteFailure) {
+		if s.Audit != nil {
+			base := audit.Event{
+				Action: audit.ActionTaskDelete, ResourceType: "task", IP: ip,
+				Details: map[string]any{"delete_job_id": jobID},
+			}
+			if actor != nil {
+				base.UserID, base.Username, base.TenantID = actor.ID, actor.Username, actor.TenantID
+			}
+			for _, id := range deleted {
+				ev := base
+				ev.ResourceID, ev.Success = strconv.FormatInt(id, 10), true
+				s.Audit.Log(hctx, ev)
+			}
+			for _, f := range failed {
+				ev := base
+				ev.ResourceID, ev.Message = strconv.FormatInt(f.ID, 10), f.Error
+				s.Audit.Log(hctx, ev)
+			}
+		}
+		if len(deleted) > 0 {
+			if c := s.GetCache(); c != nil {
+				cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				c.DelPrefix(cctx, "http")
+				cancel()
+			}
+		}
+	})
+	go s.Task.RunDeleteJobs(ctx)
+	log.Println("✅ 任务批量删除作业已启动（后台按批执行，多副本 SKIP LOCKED 认领）")
 }
 
 // StartMetrics 启动指标采集循环。

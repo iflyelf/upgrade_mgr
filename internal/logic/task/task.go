@@ -119,6 +119,8 @@ type Service struct {
 	shareAllowed func(ctx context.Context, actor, creator string) (bool, error)
 	// teamMate 判断两个用户是否同属至少一个团队（详情/日志可见性）。
 	teamMate func(ctx context.Context, a, b string) (bool, error)
+	// deleteJobHook 异步删除作业每批提交后回调（审计、缓存失效）。
+	deleteJobHook DeleteJobHook
 }
 
 // SetAuthorizer 注入组件级权限校验（由服务端启动时设置）。

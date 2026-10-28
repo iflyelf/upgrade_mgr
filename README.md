@@ -380,7 +380,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 > **本方式的下载、目录布局与 systemd 单元没有变化**；已有部署升级只需替换二进制并
 > `systemctl restart upgrade-mgr`。下面补充了新增能力的**可选配置**（不配置即使用默认值）。
-> 首次启动会自动应用迁移 020–033（组织/多租户/审计/自动化令牌/node_exporter 外部文件），旧库无需手工执行 SQL。
+> 首次启动会自动应用迁移 020–034（组织/多租户/审计/自动化令牌/node_exporter 外部文件/任务批量删除作业），旧库无需手工执行 SQL。
 
 ```bash
 # 1. 下载控制台二进制到 /tmp 并解压
@@ -526,7 +526,7 @@ agent:
 #   service_token: "<FlyIAM 管理员 API 令牌或 SERVICE_TOKEN>"
 EOF
 
-> **迁移与多租户**：首次启动自动应用 001–033。组织/团队/角色/审计新增
+> **迁移与多租户**：首次启动自动应用 001–034。组织/团队/角色/审计新增
 > `tenant_id`，历史数据默认为租户 `1`，单租户部署无需额外操作。
 >
 > **FlyIAM 组织树同步前置条件**：FlyIAM 需包含
