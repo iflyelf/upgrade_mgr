@@ -582,3 +582,28 @@ button, .tab, .nav-link, .nav-menu-item, .theme-btn, .user-chip {
   pre.code { padding-right: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .copy-btn { position: static; display: block; margin: 0 0 6px auto; }
 }
+
+/* ============================================================
+   溢出兜底（多分辨率巡检后补充）
+   ============================================================ */
+/* 筛选下拉的宽度由最长 option 决定，长组件名会把平板布局撑宽：任何宽度下都限制在容器内。 */
+select { max-width: 100%; }
+.toolbar > label { max-width: 100%; min-width: 0; }
+.toolbar > label > select { min-width: 0; max-width: min(320px, 100%); text-overflow: ellipsis; }
+/* 弹窗标题区：按钮组可换行，标题不再把按钮挤出弹窗 */
+.modal-head .row-actions { flex-wrap: wrap; min-width: 0; }
+.modal { max-width: min(1200px, 100%); box-sizing: border-box; }
+
+@media (max-width: 640px) {
+  /* 卡片布局下取消表格内 nowrap：长 JSON、IPv6、路径、主机名可换行，不撑宽卡片 */
+  .table-wrap table.mobile-cards td .muted,
+  .table-wrap table.mobile-cards td .tag,
+  .table-wrap table.mobile-cards td > div,
+  .table-wrap table.mobile-cards td .check,
+  .table-wrap table.mobile-cards td .log-details summary {
+    white-space: normal; overflow-wrap: anywhere; min-width: 0; max-width: 100%;
+  }
+  .table-wrap table.mobile-cards td .row-actions { flex-wrap: wrap; white-space: normal; }
+  .table-wrap table.mobile-cards td .user-cell { min-width: 0; }
+  .table-wrap table.mobile-cards td .tag.clip { max-width: 100%; }
+}
