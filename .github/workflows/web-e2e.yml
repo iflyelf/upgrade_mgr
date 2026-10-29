@@ -115,6 +115,8 @@ jobs:
         working-directory: web/e2e
         env:
           BASE_URL: http://127.0.0.1:18090
+          # 主机批量删除用例需直接写库造数（主机只能由 Agent 注册或同步产生）。
+          E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/upgrade_mgr?sslmode=disable
         run: npx playwright test
 
       - name: 失败时输出服务端日志
