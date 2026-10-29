@@ -4817,11 +4817,16 @@
       .then(function (j) { if (j && j.id) watchBatchJob(as, j); })
       .catch(function () {});
   }
+  // hostFilterQS 主机列表的筛选参数（不含分页）。
+  // 列表加载与「按筛选条件全选」共用：以后新增状态/分组等筛选只改这里，两者不会不一致。
+  function hostFilterQS() {
+    return state.q ? ['q=' + encodeURIComponent(state.q)] : [];
+  }
   var HOST_DELETE_JOB = {
     jobKey: 'hostDeleteJob', jobsURL: '/api/host-delete-jobs', idsURL: '/api/hosts/deletable-ids',
     view: 'hosts', noun: '主机', unit: '台',
-    // 与 loadHosts 的筛选参数一致，保证「按筛选条件全选」命中的就是列表结果。
-    filterQS: function () { return state.q ? ['q=' + encodeURIComponent(state.q)] : []; },
+    // 与 loadHosts 共用 hostFilterQS，保证「按筛选条件全选」命中的就是列表结果。
+    filterQS: function () { return hostFilterQS(); },
     reload: function (quiet) {
       if (quiet) { loadHosts(null, true); return; }
       state.hostPage = 1;
@@ -6577,8 +6582,8 @@
     }
     if (!quiet) state.hostsLoading = true;
     var seq = ++hostsReqSeq;
-    return api('/api/hosts?q=' + encodeURIComponent(state.q) +
-        '&page=' + state.hostPage + '&size=' + state.hostSize)
+    return api('/api/hosts?' + hostFilterQS()
+        .concat(['page=' + state.hostPage, 'size=' + state.hostSize]).join('&'))
       .then(function (d) {
         // 快速翻页/搜索时只接受最后一次请求，避免慢响应覆盖新结果。
         if (seq !== hostsReqSeq) return;
