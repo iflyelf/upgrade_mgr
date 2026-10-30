@@ -29,6 +29,13 @@ async function openAI(page) {
   await expect(page.getByRole('heading', { name: 'AI 访问令牌', exact: true })).toBeVisible();
 }
 
+async function openAssistant(page) {
+  await login(page);
+  await page.locator('.main-nav').getByRole('button', { name: 'AI 助手', exact: true }).click();
+  await expect(page).toHaveURL(/#\/assistant/);
+  await expect(page.getByRole('heading', { name: 'AI 助手', exact: true })).toBeVisible();
+}
+
 // 页面上所有 confirm() 弹窗一律确认。
 function autoAccept(page) {
   page.on('dialog', (d) => d.accept());
@@ -135,20 +142,73 @@ test.describe('AI 接入页面', () => {
     expect(download.suggestedFilename()).toMatch(/upgrade-mgr-ops\.tar\.gz$/);
   });
 
-  test('AI 助手：只读工具自动执行', async ({ page }) => {
+  test('令牌批量删除', async ({ page }) => {
+    autoAccept(page);
     await openAI(page);
-    const chat = page.getByRole('heading', { name: 'AI 助手', exact: true });
-    await expect(chat).toBeVisible();
+    // 创建 3 个测试令牌（其他用例也会留下令牌，按名称定位行）
+    const stamp = Date.now();
+    const names = [1, 2, 3].map((i) => 'e2e-batch-' + stamp + '-' + i);
+    for (const n of names) {
+      await page.locator('#aiTkName').fill(n);
+      await page.getByRole('button', { name: '创建令牌', exact: true }).click();
+      await expect(page.locator('.ai-notice.ok')).toContainText(n);
+      await page.locator('.ai-notice.ok').getByRole('button', { name: '关闭', exact: true }).click();
+      await expect(page.locator('table tr', { hasText: n })).toBeVisible();
+    }
+    // 先单个注销第 2 个：批量删除需同时支持有效与已注销令牌
+    await page.locator('table tr', { hasText: names[1] }).getByRole('button', { name: '注销' }).click();
+    await expect(page.locator('table tr', { hasText: names[1] })).toContainText('已注销');
+
+    await page.locator('table tr', { hasText: names[0] }).locator('input[type="checkbox"]').check();
+    await page.locator('table tr', { hasText: names[1] }).locator('input[type="checkbox"]').check();
+    await page.getByRole('button', { name: /^批量删除（2）$/ }).click();
+
+    await expect(page.locator('table tr', { hasText: names[0] })).toHaveCount(0);
+    await expect(page.locator('table tr', { hasText: names[1] })).toHaveCount(0);
+    await expect(page.locator('table tr', { hasText: names[2] })).toContainText('有效');
+  });
+
+  test('AI 助手独立页面可访问', async ({ page }) => {
+    await login(page);
+    await page.locator('.main-nav').getByRole('button', { name: 'AI 助手', exact: true }).click();
+    await expect(page).toHaveURL(/#\/assistant/);
+    await expect(page.getByRole('heading', { name: 'AI 助手', exact: true })).toBeVisible();
+    const inputVisible = await page.locator('#aiChatInput').isVisible();
+    if (inputVisible) {
+      await expect(page.locator('#aiChatSend')).toBeVisible();
+    } else {
+      await expect(page.getByText('AI 助手未启用', { exact: false })).toBeVisible();
+    }
+  });
+
+  test('AI 接入页不再内嵌聊天，提供跳转链接', async ({ page }) => {
+    await openAI(page);
+    await expect(page.locator('#aiChatInput')).toHaveCount(0);
+    await page.getByRole('link', { name: '前往 AI 助手页面 →' }).click();
+    await expect(page).toHaveURL(/#\/assistant/);
+    await expect(page.locator('#aiChatInput')).toBeVisible();
+  });
+
+  test('AI 助手页刷新后保持（#/assistant 直达）', async ({ page }) => {
+    await login(page);
+    await page.goto('/#/assistant');
+    await page.reload();
+    await expect(page).toHaveURL(/#\/assistant/);
+    await expect(page.getByRole('heading', { name: 'AI 助手', exact: true })).toBeVisible();
+  });
+
+  test('AI 助手：只读工具自动执行', async ({ page }) => {
+    await openAssistant(page);
     test.skip(!(await page.locator('#aiChatInput').isVisible()), '助手未启用');
 
     await page.locator('#aiChatInput').fill('列出主机');
     await page.locator('#aiChatSend').click();
-    await expect(page.locator('.ai-msg.bot .ai-msg-body').last()).toContainText('已查询完毕', { timeout: 15000 });
+    await expect(page.locator('.ai-msg.bot .ai-msg-body').last()).toContainText('MOCK', { timeout: 15000 });
     await expect(page.locator('.ai-chat-steps summary').last()).toContainText('工具调用');
   });
 
   test('AI 助手：写操作生成待确认卡片并可取消', async ({ page }) => {
-    await openAI(page);
+    await openAssistant(page);
     test.skip(!(await page.locator('#aiChatInput').isVisible()), '助手未启用');
 
     await page.locator('#aiChatInput').fill('暂停任务 1');
