@@ -110,19 +110,23 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 	db, sc := setupHostDB(t)
 	tag := fmt.Sprintf("hflt-%d", time.Now().UnixNano())
 
-	// online：有 Agent 且心跳新鲜；idle：无 Agent（按 offline 统计）；busy：有运行中任务。
+	// online：有 Agent 且心跳新鲜；idle：无 Agent（显示「未知」）；
+	// stale：库里仍是 online 但心跳超时（显示「离线」）；busy：有运行中任务。
 	online, _ := insertTestHost(t, db, 1)
 	idle, _ := insertTestHost(t, db, 1)
+	stale, _ := insertTestHost(t, db, 1)
 	busy := insertBusyHost(t, db, tag)
 	other, _ := insertTestHost(t, db, 1) // 不匹配关键字，任何用例都不应出现
 	seed := []struct {
 		id                         int64
 		app, osFamily, acct, state string
 		agent                      bool
+		seenAgo                    string // last_seen 距今时长；空表示无 Agent（NULL）
 	}{
-		{online, "APP-A", "centos", "acc1", "online", true},
-		{idle, "APP-B", "ubuntu", "acc2", "unknown", false},
-		{busy, "APP-A", "ubuntu", "acc1", "online", true},
+		{online, "APP-A", "centos", "acc1", "online", true, "0 seconds"},
+		{idle, "APP-B", "ubuntu", "acc2", "unknown", false, ""},
+		{stale, "APP-B", "centos", "acc2", "online", true, "1 hour"},
+		{busy, "APP-A", "ubuntu", "acc1", "online", true, "0 seconds"},
 	}
 	for _, h := range seed {
 		agentID := ""
@@ -130,8 +134,9 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 			agentID = fmt.Sprintf("%s-agent-%d", tag, h.id)
 		}
 		if _, err := db.Exec(`UPDATE hosts SET hostname=$2, app_code=$3, os_family=$4, account=$5,
-			agent_status=$6, agent_id=$7::varchar, last_seen=CASE WHEN $7::varchar='' THEN NULL ELSE NOW() END WHERE id=$1`,
-			h.id, tag, h.app, h.osFamily, h.acct, h.state, agentID); err != nil {
+			agent_status=$6, agent_id=$7::varchar,
+			last_seen=CASE WHEN $8::text='' THEN NULL ELSE NOW() - $8::text::interval END WHERE id=$1`,
+			h.id, tag, h.app, h.osFamily, h.acct, h.state, agentID, h.seenAgo); err != nil {
 			t.Fatalf("初始化主机 %d 失败: %v", h.id, err)
 		}
 	}
@@ -141,12 +146,13 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 		value string
 		want  []int64 // 列表应命中的主机（含 busy）
 	}{
-		{"q", tag, []int64{online, idle, busy}},
+		{"q", tag, []int64{online, idle, stale, busy}},
 		{"app_code", "APP-A", []int64{online, busy}},
 		{"os_family", "ubuntu", []int64{idle, busy}},
-		{"account", "acc2", []int64{idle}},
+		{"account", "acc2", []int64{idle, stale}},
 		{"agent_status", "online", []int64{online, busy}},
-		{"agent_status", "offline", []int64{idle}},
+		{"agent_status", "offline", []int64{stale}},
+		{"agent_status", "unknown", []int64{idle}},
 	}
 
 	// 覆盖检查：hostListFilter 支持的每个参数都至少有一个用例。
@@ -195,6 +201,10 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 			for _, h := range list.Data.List {
 				if h.ID == other {
 					t.Fatalf("不匹配关键字的主机 %d 出现在列表中", other)
+				}
+				// 按状态筛选时，列表显示的状态必须就是筛选值（筛选与显示同一规则）。
+				if c.param == "agent_status" && h.AgentStatus != c.value {
+					t.Fatalf("主机 %d 显示状态 %q，与筛选值 %q 不一致", h.ID, h.AgentStatus, c.value)
 				}
 				listIDs = append(listIDs, h.ID)
 			}

@@ -71,7 +71,8 @@
     orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
     orgSelTeam: null, orgTeamMembers: null, orgTeamPerms: null, orgNewField: null,
     flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
-    hostFacets: null,
+    hostFacets: null, hostListFacets: null,
+    hostFilter: { app_code: '', os_family: '', account: '', agent_status: '' },
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1,
     orgUserQ: '', orgUserForm: null, orgRoleForm: null, orgGroupForm: null,
@@ -1204,6 +1205,10 @@
     var n = function (k, d) { var v = parseInt(p[k], 10); return isNaN(v) ? d : v; };
     if (r.view === 'hosts') {
       state.q = p.q || '';
+      state.hostFilter = {
+        app_code: p.app_code || '', os_family: p.os_family || '',
+        account: p.account || '', agent_status: p.agent_status || ''
+      };
       state.hostPage = n('page', 1);
     } else if (r.view === 'components') {
       state.compQ = p.q || '';
@@ -1235,7 +1240,10 @@
     var qs = [];
     var add = function (k, v) { if (v !== '' && v != null) qs.push(k + '=' + encodeURIComponent(v)); };
     if (state.view === 'hosts') {
-      add('q', state.q); add('page', state.hostPage > 1 ? state.hostPage : '');
+      var hf = state.hostFilter || {};
+      add('q', state.q); add('app_code', hf.app_code); add('os_family', hf.os_family);
+      add('account', hf.account); add('agent_status', hf.agent_status);
+      add('page', state.hostPage > 1 ? state.hostPage : '');
     } else if (state.view === 'components') {
       add('q', state.compQ); add('page', state.compPage > 1 ? state.compPage : '');
     } else if (state.view === 'artifacts') {
@@ -1340,10 +1348,51 @@
       state.hostPage = 1;
       loadHosts();
     };
+    // 下拉筛选：选项来自 /api/hosts/facets?fields=...（租户内去重值），只加载一次。
+    if (state.hostListFacets === null) {
+      state.hostListFacets = { values: {} };
+      api('/api/hosts/facets?fields=app_code,os_family,account')
+        .then(function (d) { state.hostListFacets = d || { values: {} }; render(); })
+        .catch(function () {});
+    }
+    var hf = state.hostFilter || (state.hostFilter = {});
+    var facetVals = (state.hostListFacets && state.hostListFacets.values) || {};
+    function filterSelect(key, label, options) {
+      var cur = hf[key] || '';
+      // 当前值不在候选里（如从 URL 带入）时也保留，避免下拉显示与实际筛选不一致。
+      if (cur && !options.some(function (o) { return o[0] === cur; })) options = options.concat([[cur, cur]]);
+      var el = h('select', {
+        'aria-label': '按 ' + label + ' 筛选',
+        onchange: function () {
+          hf[key] = el.value;
+          state.hostPage = 1;
+          loadHosts();
+        }
+      }, [h('option', { value: '' }, [label + '：全部'])].concat(options.map(function (o) {
+        return h('option', { value: o[0] }, [o[1]]);
+      })));
+      el.value = cur;
+      return h('label', { class: 'muted' }, [el]);
+    }
+    function facetOptions(key) {
+      return (facetVals[key] || []).map(function (v) { return [v, v]; });
+    }
+    var statusOptions = ['online', 'offline', 'upgrading', 'restarting', 'crash_loop', 'unknown']
+      .map(function (s) { return [s, agentStatusText(s)]; });
+    var clearAll = function () {
+      state.q = '';
+      state.hostFilter = { app_code: '', os_family: '', account: '', agent_status: '' };
+      state.hostPage = 1;
+      loadHosts();
+    };
     var toolbar = h('div', { class: 'toolbar' }, [
-      (qEl = h('input', { value: state.q, placeholder: 'IP/出口 IP/隧道地址/主机名/业务组' }, [])),
+      (qEl = h('input', { value: state.q, placeholder: 'IP/出口 IP/隧道地址/主机名/业务组', 'aria-label': '搜索主机' }, [])),
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
-      state.q ? h('button', { class: 'btn ghost', onclick: function () { state.q = ''; state.hostPage = 1; loadHosts(); } }, ['清除']) : null,
+      filterSelect('agent_status', 'Agent 状态', statusOptions),
+      filterSelect('app_code', 'app_code', facetOptions('app_code')),
+      filterSelect('os_family', 'OS', facetOptions('os_family')),
+      filterSelect('account', '账号', facetOptions('account')),
+      hostFilterActive() ? h('button', { class: 'btn ghost', onclick: clearAll }, ['清除筛选']) : null,
       // 同步会写入/清理全局主机清单，后端要求 superadmin；其他角色不展示入口。
       isSuperAdmin() ? h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']) : null,
       // consul_mgr 同步仅 superadmin 可见：后端为 RequireSuperAdmin，其他角色点了必然 403。
@@ -1424,7 +1473,7 @@
     });
     var empty = !state.hostsLoading && !state.hostErr && state.hosts.length === 0
       ? h('div', { class: 'muted empty' }, [
-        state.q ? '没有匹配的主机。' : (isAdmin()
+        hostFilterActive() ? '没有匹配的主机。' : (isAdmin()
           ? '还没有主机。在上方「接入主机（安装 Agent）」生成命令，到目标机器上执行即可。'
           : '还没有主机。请联系管理员接入主机。')
       ])
@@ -4820,8 +4869,17 @@
   // hostFilterQS 主机列表的筛选参数（不含分页）。
   // 列表加载与「按筛选条件全选」共用：以后新增状态/分组等筛选只改这里，两者不会不一致。
   function hostFilterQS() {
-    return state.q ? ['q=' + encodeURIComponent(state.q)] : [];
+    var f = state.hostFilter || {};
+    var qs = [];
+    if (state.q) qs.push('q=' + encodeURIComponent(state.q));
+    if (f.app_code) qs.push('app_code=' + encodeURIComponent(f.app_code));
+    if (f.os_family) qs.push('os_family=' + encodeURIComponent(f.os_family));
+    if (f.account) qs.push('account=' + encodeURIComponent(f.account));
+    if (f.agent_status) qs.push('agent_status=' + encodeURIComponent(f.agent_status));
+    return qs;
   }
+  // hostFilterActive 是否设置了任何主机筛选条件（关键字或下拉）。
+  function hostFilterActive() { return hostFilterQS().length > 0; }
   var HOST_DELETE_JOB = {
     jobKey: 'hostDeleteJob', jobsURL: '/api/host-delete-jobs', idsURL: '/api/hosts/deletable-ids',
     view: 'hosts', noun: '主机', unit: '台',
@@ -6558,8 +6616,10 @@
   var autoTimer = null;
   var autoBusy = false;
   function loadHosts(page, quiet) {
+    // 主机页每次进入时重新加载：数据更新频繁，列表不能太旧。
     if (!quiet) {
       state.view = 'hosts';
+      state.hostListFacets = null; // 重新加载下拉筛选的选项（刚插入的主机值可能不在缓存里）。
       // 页面刷新或从其他页签切回时，恢复显示后台主机删除作业的进度（仅管理员可删除）。
       if (isAdmin()) resumeBatchJob(HOST_DELETE_JOB);
     }

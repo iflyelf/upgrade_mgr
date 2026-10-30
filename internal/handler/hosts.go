@@ -112,17 +112,14 @@ func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int)
 	add("h.os_family = ", q.Get("os_family"))
 	add("h.account = ", q.Get("account"))
 
-	// agent_status 过滤：支持按计算出的有效状态过滤。
-	// 如果过滤值是 offline，需要用 CASE 表达式判断心跳超时。
-	if statusFilter := q.Get("agent_status"); statusFilter != "" {
-		if statusFilter == "offline" {
-			where = append(where,
-				"(h.agent_status='offline' OR h.agent_id='' OR h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+offlineInterval+")")
-		} else {
-			where = append(where, "h.agent_status=$"+strconv.Itoa(i))
-			args = append(args, statusFilter)
-			i++
-		}
+	// agent_status 按「页面显示的有效状态」过滤，与 ListHosts 的计算规则一致：
+	// 有 Agent 且心跳超时 → offline；否则取库里的状态，空值视为 unknown。
+	// 未接入 Agent 的主机（如 Consul 同步）显示「未知」，因此按 unknown 筛选命中，而不是 offline。
+	if statusFilter := strings.TrimSpace(q.Get("agent_status")); statusFilter != "" {
+		where = append(where, "(CASE WHEN COALESCE(h.agent_id,'')<>'' AND (h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+
+			offlineInterval+") THEN 'offline' ELSE COALESCE(NULLIF(h.agent_status,''),'unknown') END)=$"+strconv.Itoa(i))
+		args = append(args, statusFilter)
+		i++
 	}
 	return " WHERE " + strings.Join(where, " AND "), args, i
 }
@@ -200,10 +197,14 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			}
 			// 计算有效状态：如果 last_seen 超时或为空（且有 agent_id），覆盖为 offline。
 			// 没有 agent_id 的主机（来自 Consul 同步）保持 unknown。
+			// 规则与 hostListFilter 的 agent_status 筛选一致，空状态视为 unknown。
 			if h.AgentID != "" {
 				if !lastSeen.Valid || time.Since(lastSeen.Time) > d {
 					h.AgentStatus = "offline"
 				}
+			}
+			if h.AgentStatus == "" {
+				h.AgentStatus = "unknown"
 			}
 			if checkOK.Valid {
 				v := checkOK.Bool
