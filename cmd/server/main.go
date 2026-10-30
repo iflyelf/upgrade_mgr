@@ -215,7 +215,8 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("DELETE /api/settings/{key}", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ResetSetting(sc))))
 
 	// AI / MCP
-	mux.HandleFunc("POST /mcp", handler.MCPServer(sc))
+	// 不限方法：GET/DELETE 由处理器返回 405（2026-07-28 规范），避免落到 SPA 兜底返回 404。
+	mux.HandleFunc("/mcp", handler.MCPServer(sc))
 	mux.HandleFunc("GET /api/ai/integration", middleware.RequireAuth(auth, handler.AIIntegration(sc)))
 	mux.HandleFunc("POST /api/ai/tokens", middleware.RequireAuth(auth, handler.CreateAIToken(sc)))
 	mux.HandleFunc("GET /api/ai/tokens", middleware.RequireAuth(auth, handler.ListAITokens(sc)))
