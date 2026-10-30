@@ -184,6 +184,13 @@ test.describe('AI 接入页面', () => {
   test('AI 接入页不再内嵌聊天，提供跳转链接', async ({ page }) => {
     await openAI(page);
     await expect(page.locator('#aiChatInput')).toHaveCount(0);
+    // 链接只在助手启用时渲染；未启用时（如 CI 未配置 LLM）显示提示。
+    const integration = await page.evaluate(async () => (await (await fetch('/api/ai/integration')).json()).data);
+    if (!integration.assistant_enabled) {
+      await expect(page.getByText('AI 助手未启用', { exact: false })).toBeVisible();
+      await expect(page.getByRole('link', { name: '前往 AI 助手页面 →' })).toHaveCount(0);
+      return;
+    }
     await page.getByRole('link', { name: '前往 AI 助手页面 →' }).click();
     await expect(page).toHaveURL(/#\/assistant/);
     await expect(page.locator('#aiChatInput')).toBeVisible();
