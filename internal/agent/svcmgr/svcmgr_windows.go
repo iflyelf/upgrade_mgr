@@ -4,6 +4,7 @@ package svcmgr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -168,4 +169,29 @@ func windowsServiceQuery(name string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(res.Stdout), nil
+}
+
+// Removed 判断服务是否已删除：不存在，或已标记删除（DELETE_PENDING）。
+//
+// sc delete 时若仍有句柄打开，服务只会被标记删除，OpenService 依旧成功，
+// Exists 返回 true；此时 Start 会报 ERROR_SERVICE_MARKED_FOR_DELETE。
+// 用 ChangeServiceConfig（全部 SERVICE_NO_CHANGE，不修改任何配置）探测该状态。
+// 其他错误（如权限不足）不视为已删除，避免误跳过启服。
+func (m *windowsMgr) Removed(name string) bool {
+	if !validName(name) {
+		return false
+	}
+	mg, err := mgr.Connect()
+	if err != nil {
+		return false
+	}
+	defer mg.Disconnect()
+	s, err := mg.OpenService(name)
+	if err != nil {
+		return errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST)
+	}
+	defer s.Close()
+	err = windows.ChangeServiceConfig(s.Handle, windows.SERVICE_NO_CHANGE, windows.SERVICE_NO_CHANGE,
+		windows.SERVICE_NO_CHANGE, nil, nil, nil, nil, nil, nil, nil)
+	return errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE)
 }

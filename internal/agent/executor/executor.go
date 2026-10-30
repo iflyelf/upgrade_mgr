@@ -149,10 +149,11 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 	svcExists := func() bool {
 		return comp.ServiceName != "" && svcMgr.Exists(comp.ServiceName)
 	}
+	svcExistedBefore := svcExists() // 记录脚本执行前服务是否存在（区分「被卸载删除」与「本就不存在」）
 
 	// 4. 停服（如果有服务名且服务已存在）
 	if comp.ServiceName != "" {
-		if !svcExists() {
+		if !svcExistedBefore {
 			logf(protocol.StageStopping, "服务 %s 尚未安装，跳过停服（首次安装）", comp.ServiceName)
 		} else {
 			logf(protocol.StageStopping, "停止服务 %s", comp.ServiceName)
@@ -238,8 +239,21 @@ func Execute(ctx context.Context, cmd protocol.Command, svcMgr svcmgr.Manager, a
 
 	// 6. 启服：exec 安装脚本可能刚注册了服务，此处重新探测。
 	// 仍不存在时推迟到 post_install 之后再尝试（服务可能由 post_install 注册）。
+	//
+	// 卸载动作（exec_args 首个动作为 uninstall/remove/purge）一律不启服：
+	// 卸载示例填写 service_name 只用于对齐与停服，脚本删除服务后再启服必然失败
+	// （Windows「已标记删除」、systemd 缓存未刷新等边缘情况尤甚）。
 	pendingStart := false
-	if comp.ServiceName != "" {
+	if comp.ServiceName != "" && protocol.IsUninstallAction(comp.ExecArgs) {
+		switch {
+		case serviceGone(svcMgr, comp.ServiceName) && svcExistedBefore:
+			logf(protocol.StageStarting, "服务 %s 已被卸载脚本删除，跳过启动", comp.ServiceName)
+		case !svcExistedBefore:
+			logf(protocol.StageStarting, "服务 %s 卸载前就不存在（可能已卸载过），跳过启动", comp.ServiceName)
+		default:
+			logf(protocol.StageStarting, "警告：卸载后服务 %s 仍存在，跳过启动（请检查卸载脚本输出）", comp.ServiceName)
+		}
+	} else if comp.ServiceName != "" {
 		if svcExists() {
 			if err := startService(); err != nil {
 				return res, err
@@ -604,4 +618,21 @@ func artifactIDFromPath(p string) string {
 		}
 	}
 	return ""
+}
+
+// serviceGone 判断服务是否已删除或标记删除（Windows DELETE_PENDING）。
+// 对于不支持「标记删除」检测的管理器，等价于 !Exists()。
+func serviceGone(mgr svcmgr.Manager, name string) bool {
+	if !mgr.Exists(name) {
+		return true
+	}
+	// Windows：服务可能处于「已标记删除」；systemd：unit 文件已删但缓存未刷新。
+	// 由管理器的 Removed 探测；未实现的管理器以 Exists 为准。
+	type removalChecker interface {
+		Removed(name string) bool
+	}
+	if rc, ok := mgr.(removalChecker); ok {
+		return rc.Removed(name)
+	}
+	return false
 }

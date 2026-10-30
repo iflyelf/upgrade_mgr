@@ -114,6 +114,14 @@ func (m *systemdMgr) Exists(name string) bool {
 	return false
 }
 
+// Removed unit 文件已从所有目录删除即视为已卸载。
+//
+// 卸载脚本删除 unit 后若 daemon-reload 失败，systemd 缓存仍报 LoadState=loaded，
+// Exists 会返回 true；这里以磁盘上的 unit 文件为准，避免卸载后误判服务仍存在。
+func (m *systemdMgr) Removed(name string) bool {
+	return validName(name) && !systemdUnitFileExists(name) && !sysvScriptExists(name)
+}
+
 func (m *systemdMgr) Stop(name string) error {
 	return runCmd("systemctl", "stop", name)
 }

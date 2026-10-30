@@ -80,6 +80,8 @@ type AgentSigning struct {
 	// LegacyCommandField 为 true 表示该 Agent 的 CommandPayload.Command 是值类型，
 	// 验签重序列化时会补出空的 `"command":{"script":""}`，服务端需按旧字节签名。
 	LegacyCommandField bool
+	// UninstallDetect 为 true 表示 Agent 能识别卸载动作并跳过启服（uninstall_detect 能力）。
+	UninstallDetect bool
 }
 
 // AgentSigningInfo 查询 Agent 的签名能力，决定 legacy signature 使用 ID 还是 SignedPath。
@@ -101,6 +103,7 @@ func (g *Gateway) AgentSigningInfo(ctx context.Context, agentID string) (AgentSi
 	hasRunCommand := protocol.HasCapability(capabilities, protocol.AgentCapabilityRunCommand)
 	hasOptionalCommand := protocol.HasCapability(capabilities, protocol.AgentCapabilityOptionalCommand)
 	info.LegacyCommandField = hasRunCommand && !hasOptionalCommand
+	info.UninstallDetect = protocol.HasCapability(capabilities, protocol.AgentCapabilityUninstallDetect)
 	// 兜底：Agent 刚自升级到 512d1f9、心跳尚未上报 capabilities 时，按版本号识别。
 	if !info.LegacyCommandField && !hasOptionalCommand && strings.Contains(buildVersion, "g512d1f9") {
 		info.LegacyCommandField = true
@@ -165,6 +168,14 @@ func (g *Gateway) Dequeue(ctx context.Context, agentID string) (*protocol.Comman
 	// 这里把「空命令」归一化为 nil，恢复与旧 Agent 一致的字节。
 	if pl.Command != nil && isEmptyCommandSpec(*pl.Command) {
 		pl.Command = nil
+	}
+
+	// 旧 Agent 不认识卸载动作：卸载脚本删除服务后仍会按 service_name 启服，
+	// Windows「已标记删除」等情况下任务会失败。下发前剥离 service_name，
+	// 行为等同旧版卸载示例（留空），卸载脚本自行停服删服。
+	if !signing.UninstallDetect && pl.Component.ServiceName != "" &&
+		protocol.IsUninstallAction(pl.Component.ExecArgs) {
+		pl.Component.ServiceName = ""
 	}
 
 	cmd := &protocol.Command{

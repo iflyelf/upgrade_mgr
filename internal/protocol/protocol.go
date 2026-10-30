@@ -66,11 +66,15 @@ const (
 	// 旧 Agent 不认识该字段，验签重序列化时丢弃它 → 「签名不匹配」。
 	// 服务端据此能力区分：上报 run_command 但没上报本能力的老 Agent 需要按旧序列化签名。
 	AgentCapabilityOptionalCommand = "optional_command"
+	// AgentCapabilityUninstallDetect 执行器能识别卸载操作（exec_args 首个非 flag 参数为 uninstall/remove），
+	// 脚本执行后服务已删除时跳过启服，避免卸载示例填 service_name 导致启服失败。
+	// 旧 Agent 不支持此能力时，服务端自动从卸载指令中剥离 service_name。
+	AgentCapabilityUninstallDetect = "uninstall_detect"
 )
 
 // SupportedCapabilities 返回当前 Agent 支持的能力列表（按稳定顺序）。
 func SupportedCapabilities() []string {
-	return []string{AgentCapabilityRunCommand, AgentCapabilityOptionalCommand}
+	return []string{AgentCapabilityRunCommand, AgentCapabilityOptionalCommand, AgentCapabilityUninstallDetect}
 }
 
 // NormalizeCapabilities 过滤未知能力、去重并按稳定顺序返回。
@@ -82,6 +86,8 @@ func NormalizeCapabilities(caps []string) []string {
 			set[AgentCapabilityRunCommand] = true
 		case AgentCapabilityOptionalCommand:
 			set[AgentCapabilityOptionalCommand] = true
+		case AgentCapabilityUninstallDetect:
+			set[AgentCapabilityUninstallDetect] = true
 		}
 	}
 	out := make([]string, 0, len(set))
@@ -91,6 +97,21 @@ func NormalizeCapabilities(caps []string) []string {
 		}
 	}
 	return out
+}
+
+// IsUninstallAction 判断 exec_args 是否表示卸载：首个非 flag 参数为 uninstall/remove/purge。
+//
+// Agent 据此在卸载后跳过启服；服务端据此给不支持 uninstall_detect 的旧 Agent
+// 剥离 service_name，两侧必须使用同一判断。
+func IsUninstallAction(args []string) bool {
+	for _, arg := range args {
+		a := strings.ToLower(strings.TrimSpace(arg))
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a == "uninstall" || a == "remove" || a == "purge"
+	}
+	return false
 }
 
 // HasCapability 判断逗号分隔的能力字符串是否包含指定能力。
