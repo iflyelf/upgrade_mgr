@@ -941,13 +941,13 @@
     {
       key: 'node_exporter_exec_uninstall',
       label: '只执行命令（exec + script_url：卸载 node_exporter）',
-      desc: 'exec_args 为 uninstall -y（-y 跳过交互确认，exec 模式没有 stdin）。Agent 下载 install.sh 后执行卸载，停止并删除服务、二进制与数据。卸载后目标机上已无该服务，因此 service_name 留空（避免 Agent 在卸载后尝试启服并报错），也不填 health_cmd / version_cmd——若保留会在卸载完成后做健康检查并必然失败。与安装/更新组件通过 binary_name / install_path 关联同一组件。',
+      desc: 'exec_args 为 uninstall -y（-y 跳过交互确认）。脚本停止并删除服务、清理安装目录。service_name 填 node_exporter 与安装/更新对齐，Agent（uninstall_detect 能力）识别卸载动作后跳过启服，避免 Windows DELETE_PENDING 或 systemd 缓存未刷新导致的启服失败。旧 Agent 会被服务端自动剥离 service_name。不填 health_cmd / version_cmd 避免卸载后健康检查失败。',
       comp: {
         name: 'node_exporter_uninstall', display_name: 'Node Exporter（只执行命令-卸载）',
         deploy_mode: 'exec',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
-        service_name: '', service_mgr: 'auto', enabled: true,
+        service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
         script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['uninstall', '-y'],
         exec_timeout: '30m'
@@ -1001,12 +1001,12 @@
     {
       key: 'node_exporter_script_uninstall',
       label: 'node_exporter_script_uninstall（脚本卸载，非交互）',
-      desc: '与"脚本安装"示例同源，script_url 相同，exec_args 为 uninstall -y（-y 跳过交互确认）。脚本模式没有交互终端，必须带 -y，否则会一直等不到确认而取消。卸载后服务已不存在，因此 service_name 留空（避免 Agent 在卸载后尝试启服并报错），也不填 health_cmd / version_cmd（避免健康检查失败）。与安装/更新组件通过 binary_name / install_path 关联同一组件。',
+      desc: '与"脚本安装"示例同源，script_url 相同，exec_args 为 uninstall -y（-y 跳过交互确认）。脚本模式没有交互终端，必须带 -y，否则会一直等不到确认而取消。service_name 填 node_exporter 与安装/更新对齐，Agent（uninstall_detect 能力）识别卸载动作后跳过启服，避免 Windows DELETE_PENDING 或 systemd 缓存未刷新导致的启服失败。旧 Agent 会被服务端自动剥离 service_name。不填 health_cmd / version_cmd 避免卸载后健康检查失败。',
       comp: {
         name: 'node_exporter_script_uninstall', display_name: 'Node Exporter（脚本卸载）', deploy_mode: 'script',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter',
-        service_name: '', service_mgr: 'auto', enabled: true,
+        service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
         script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['uninstall', '-y'],
         exec_timeout: '10m'
@@ -1047,12 +1047,12 @@
     {
       key: 'windows_exporter_script_uninstall',
       label: 'windows_exporter_script_uninstall（Win 脚本卸载，非交互）',
-      desc: 'exec_args 为 uninstall -Yes（-Yes 跳过交互确认，非交互场景必需）。脚本停止并删除 Windows 服务 windows_exporter、防火墙规则与安装目录。卸载后服务已不存在，因此 service_name 留空（避免 Agent 在卸载后尝试启服并报错），也不填 health_cmd / version_cmd（避免健康检查失败）。与安装/更新组件通过 binary_name / install_path 关联同一组件。',
+      desc: 'exec_args 为 uninstall -Yes（-Yes 跳过交互确认，非交互场景必需）。脚本停止并删除 Windows 服务 windows_exporter、防火墙规则与安装目录。service_name 填 windows_exporter 与安装/更新对齐，Agent（uninstall_detect 能力）识别卸载动作后跳过启服，避免 sc delete 延迟导致 ERROR_SERVICE_MARKED_FOR_DELETE。旧 Agent 会被服务端自动剥离 service_name。不填 health_cmd / version_cmd 避免卸载后健康检查失败。',
       comp: {
         name: 'windows_exporter_script_uninstall', display_name: 'Windows Exporter（Win 脚本卸载）', deploy_mode: 'script',
         binary_name: 'windows_exporter',
         install_path: 'C:\\Program Files\\windows_exporter',
-        service_name: '', service_mgr: 'auto', enabled: true,
+        service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
         script_url: WINDOWS_INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['uninstall', '-Yes'],
         exec_timeout: '15m'
