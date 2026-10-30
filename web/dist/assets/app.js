@@ -907,13 +907,13 @@
     {
       key: 'node_exporter_exec',
       label: '只执行命令（exec + script_url：安装 node_exporter）',
-      desc: '部署模式 exec，但不填制品、只填 script_url：Agent 先下载 install.sh，再把 exec_args（这里是 install）作为脚本参数执行。相比早期在 exec_args 里塞整段 shell，配置只需一个 URL + 一个动作。脚本会自行下载二进制并注册服务；平台不备份、不替换二进制，服务启停与回滚由脚本负责（本示例不填服务名，避免平台重复启停）。需要升级请用“更新”示例，卸载请用“卸载”示例。',
+      desc: '部署模式 exec，但不填制品、只填 script_url：Agent 先下载 install.sh，再把 exec_args（这里是 install）作为脚本参数执行。相比早期在 exec_args 里塞整段 shell，配置只需一个 URL + 一个动作。脚本会自行下载二进制并注册服务；平台不备份、不替换二进制，服务启停与回滚由脚本负责。service_name 填 node_exporter 便于回滚时尝试启动旧版本服务。需要升级请用"更新"示例，卸载请用"卸载"示例。',
       comp: {
         name: 'node_exporter_cmd', display_name: 'Node Exporter（只执行命令-安装）',
         deploy_mode: 'exec',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
-        service_name: '', service_mgr: 'auto', enabled: true,
+        service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
         script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['install'],
         exec_timeout: '30m',
@@ -924,13 +924,13 @@
     {
       key: 'node_exporter_exec_update',
       label: '只执行命令（exec + script_url：更新 node_exporter）',
-      desc: '与“安装”示例同源，script_url 相同，只把 exec_args 改成 update：Agent 下载 install.sh 后执行 update，脚本先备份旧二进制到 node_exporter.bak，重启服务后若启动失败会自动回滚。适合已安装过 node_exporter、只想升级版本的机器。组件名独立（node_exporter_update），避免与安装组件互相覆盖。',
+      desc: '与"安装"示例同源，script_url 相同，只把 exec_args 改成 update：Agent 下载 install.sh 后执行 update，脚本先备份旧二进制到 node_exporter.bak，重启服务后若启动失败会自动回滚。service_name 填 node_exporter 与安装示例对齐，便于回滚时尝试启动旧版本服务。组件名独立（node_exporter_update），避免与安装组件互相覆盖。',
       comp: {
         name: 'node_exporter_update', display_name: 'Node Exporter（只执行命令-更新）',
         deploy_mode: 'exec',
         binary_name: 'node_exporter',
         install_path: '/opt/monitor/exporter/node_exporter',
-        service_name: '', service_mgr: 'auto', enabled: true,
+        service_name: 'node_exporter', service_mgr: 'auto', enabled: true,
         script_url: INSTALL_SCRIPT_PLATFORM_URL,
         exec_args: ['update'],
         exec_timeout: '30m',
@@ -941,7 +941,7 @@
     {
       key: 'node_exporter_exec_uninstall',
       label: '只执行命令（exec + script_url：卸载 node_exporter）',
-      desc: 'exec_args 为 uninstall -y（-y 跳过交互确认，exec 模式没有 stdin）。Agent 下载 install.sh 后执行卸载，停止并删除服务、二进制与数据。卸载后目标机上已无该服务，因此本示例不填 health_cmd / version_cmd——若保留会在卸载完成后做健康检查并必然失败。',
+      desc: 'exec_args 为 uninstall -y（-y 跳过交互确认，exec 模式没有 stdin）。Agent 下载 install.sh 后执行卸载，停止并删除服务、二进制与数据。卸载后目标机上已无该服务，因此 service_name 留空（避免 Agent 在卸载后尝试启服并报错），也不填 health_cmd / version_cmd——若保留会在卸载完成后做健康检查并必然失败。与安装/更新组件通过 binary_name / install_path 关联同一组件。',
       comp: {
         name: 'node_exporter_uninstall', display_name: 'Node Exporter（只执行命令-卸载）',
         deploy_mode: 'exec',
@@ -1001,7 +1001,7 @@
     {
       key: 'node_exporter_script_uninstall',
       label: 'node_exporter_script_uninstall（脚本卸载，非交互）',
-      desc: '与“脚本安装”示例同源，script_url 相同，exec_args 为 uninstall -y（-y 跳过交互确认）。脚本模式没有交互终端，必须带 -y，否则会一直等不到确认而取消。卸载后服务已不存在，因此本示例不填服务名、health_cmd、version_cmd，避免平台在卸载后尝试启服并做健康检查导致任务必然失败。',
+      desc: '与"脚本安装"示例同源，script_url 相同，exec_args 为 uninstall -y（-y 跳过交互确认）。脚本模式没有交互终端，必须带 -y，否则会一直等不到确认而取消。卸载后服务已不存在，因此 service_name 留空（避免 Agent 在卸载后尝试启服并报错），也不填 health_cmd / version_cmd（避免健康检查失败）。与安装/更新组件通过 binary_name / install_path 关联同一组件。',
       comp: {
         name: 'node_exporter_script_uninstall', display_name: 'Node Exporter（脚本卸载）', deploy_mode: 'script',
         binary_name: 'node_exporter',
@@ -1047,7 +1047,7 @@
     {
       key: 'windows_exporter_script_uninstall',
       label: 'windows_exporter_script_uninstall（Win 脚本卸载，非交互）',
-      desc: 'exec_args 为 uninstall -Yes（-Yes 跳过交互确认，非交互场景必需）。脚本停止并删除 Windows 服务 windows_exporter、防火墙规则与安装目录。卸载后服务已不存在，因此本示例不填 health_cmd / version_cmd，也不填服务名，避免平台在卸载后尝试启服并做健康检查导致任务必然失败。',
+      desc: 'exec_args 为 uninstall -Yes（-Yes 跳过交互确认，非交互场景必需）。脚本停止并删除 Windows 服务 windows_exporter、防火墙规则与安装目录。卸载后服务已不存在，因此 service_name 留空（避免 Agent 在卸载后尝试启服并报错），也不填 health_cmd / version_cmd（避免健康检查失败）。与安装/更新组件通过 binary_name / install_path 关联同一组件。',
       comp: {
         name: 'windows_exporter_script_uninstall', display_name: 'Windows Exporter（Win 脚本卸载）', deploy_mode: 'script',
         binary_name: 'windows_exporter',
