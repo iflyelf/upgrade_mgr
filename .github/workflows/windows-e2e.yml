@@ -68,6 +68,20 @@ jobs:
         # 输出、退出码、stdin、中文脚本 BOM 预处理、cmd 退出码透传。
         run: go test -count=1 "-modfile=build/agent-windows.mod" ./cmd/agent ./internal/agent/...
 
+      - name: 卸载跳过启服（真实 SCM，禁止 SKIP）
+        # 这三个用例需要管理员权限注册临时服务；windows-latest 默认管理员。
+        # 一旦因权限等原因被跳过，就等于没测，这里显式判失败。
+        shell: powershell
+        run: |
+          $out = go test -count=1 -v "-modfile=build/agent-windows.mod" ./internal/agent/svcmgr ./internal/agent/executor -run 'TestWindowsMgrRemoved|TestWindowsUninstallSkipsStartWhenMarkedForDelete' 2>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          if ($out -match '--- SKIP') { Write-Host '[FAIL] 卸载相关 Windows 用例被跳过'; exit 1 }
+          foreach ($t in 'TestWindowsMgrRemovedMarkedForDelete','TestWindowsMgrRemovedNameChecks','TestWindowsUninstallSkipsStartWhenMarkedForDelete') {
+            if (-not ($out -match "--- PASS: $t ")) { Write-Host "[FAIL] 未看到 $t PASS"; exit 1 }
+          }
+
       - name: PowerShell 7 兼容性（pwsh）
         run: go test -count=1 -v "-modfile=build/agent-windows.mod" ./internal/agent/executor -run TestWindowsPowerShell7E2E
 
