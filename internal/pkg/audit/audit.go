@@ -159,6 +159,7 @@ const (
 	// AI / MCP
 	ActionAITokenCreate  = "ai_token.create"
 	ActionAITokenRevoke  = "ai_token.revoke"
+	ActionAITokenDelete  = "ai_token.delete"
 	ActionAIMCPCall      = "ai.mcp_call"
 	ActionAIChat         = "ai.chat"
 	ActionAIAction       = "ai.action_execute"

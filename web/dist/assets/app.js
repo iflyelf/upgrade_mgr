@@ -326,6 +326,7 @@
         navLink('artifacts', '制品'),
         navLink('tasks', '任务'),
         navLink('ai', 'AI 接入'),
+        navLink('assistant', 'AI 助手'),
         orgActive || isAdmin() || isSuperAdmin() ? navDropdown('人员组织', orgTabs.map(function (t) {
           return {
             label: t[1], active: orgActive && state.orgTab === t[0],
@@ -419,6 +420,7 @@
     // 全局配置页仅 superadmin 可见。
     if (isSuperAdmin()) items.push(['extbin', '外部文件'], ['settings', '设置']);
     items.push(['ai', 'AI 接入']);
+    items.push(['assistant', 'AI 助手']);
     return h('div', { class: 'tabs mobile-tabs', role: 'tablist' }, items.map(function (it) {
       return h('div', {
         class: 'tab' + (state.view === it[0] ? ' active' : ''),
@@ -1177,6 +1179,7 @@
     else if (v === 'org') loadOrg();
     else if (v === 'audit') loadAudit();
     else if (v === 'ai') loadAI();
+    else if (v === 'assistant') loadAI();
     else if (v === 'password') render();
     else loadHosts();
   }
@@ -1187,7 +1190,7 @@
   // 只持久化列表页的关键状态，弹窗/编辑中的表单不写入 URL。
   var KNOWN_VIEWS = {
     hosts: 1, components: 1, artifacts: 1, tasks: 1, org: 1,
-    extbin: 1, audit: 1, settings: 1, password: 1, ai: 1
+    extbin: 1, audit: 1, settings: 1, password: 1, ai: 1, assistant: 1
   };
 
   function parseHash() {
@@ -4605,9 +4608,10 @@
     'Agent 版本分布': 'Agent version distribution', '编辑主机': 'Edit host',
     '任务名': 'Task name', '任务类型': 'Task type', 'IP 段': 'IP range',
     'AI 接入': 'AI Integration', '访问令牌': 'Access Tokens', '创建令牌': 'Create Token',
+    'AI 助手': 'AI Assistant',
     '生成接入命令': 'Generate Integration Command', '复制令牌': 'Copy Token',
     '注销': 'Revoke', '确认执行': 'Execute', '取消': 'Cancel', '发送': 'Send',
-    '清空对话': 'Clear Chat', 'AI 助手': 'AI Assistant',
+    '清空对话': 'Clear Chat',
     '目标版本': 'Target version', '命令脚本': 'Command script', '解释器': 'Interpreter',
     '脚本参数': 'Script arguments', '标准输入 (stdin)': 'Stdin', '超时': 'Timeout',
     '灰度策略': 'Rollout strategy', '每批台数 / 百分比': 'Batch size / percent',
@@ -6752,7 +6756,92 @@
       aiSnippetGenCard(d),
       state.aiSnippets ? aiSnippetsCard() : null,
       aiSkillsCard(d),
-      aiChatCard(d)
+      h('div', { class: 'card' }, [
+        h('h3', {}, ['AI 助手']),
+        d.assistant_enabled
+          ? h('div', {}, [hint('AI 助手已启用，'), h('a', { href: '#/assistant', onclick: function (e) { e.preventDefault(); switchView('assistant'); } }, ['前往 AI 助手页面 →'])])
+          : hint('AI 助手未启用。superadmin 可在「设置 → AI 助手」开启并配置 LLM。')
+      ])
+    ]);
+  }
+
+  // ========== AI 助手独立页面 ==========
+  function aiAssistantView() {
+    var d = state.ai;
+    if (!d) return h('div', { class: 'card' }, [h('h2', {}, ['AI 助手']), hint('加载中…')]);
+    if (state.aiErr) {
+      return h('div', { class: 'card' }, [
+        h('h2', {}, ['AI 助手']),
+        h('div', { class: 'err', role: 'alert' }, ['加载失败: ' + state.aiErr]),
+        h('button', { class: 'btn ghost', onclick: function () { loadAI(); } }, ['重试'])
+      ]);
+    }
+    if (!d.assistant_enabled) {
+      return h('div', { class: 'card' }, [
+        h('h2', {}, ['AI 助手']),
+        hint('内置 AI 助手未启用或未配置 LLM。superadmin 可在「设置 → AI 助手」开启 ai.assistant_enabled，并填写 ai.llm_base_url（OpenAI 兼容）与 ai.llm_model。'),
+        isSuperAdmin() ? h('div', { class: 'toolbar' }, [
+          h('button', { class: 'btn ghost small', onclick: function () { switchView('settings'); } }, ['前往设置'])
+        ]) : null
+      ]);
+    }
+    var history = state.aiChatHistory || (state.aiChatHistory = []);
+    var pending = state.aiChatPending || (state.aiChatPending = []);
+    var log = h('div', { class: 'ai-chat-log', id: 'aiChatLog', 'aria-live': 'polite', style: 'max-height: 600px' },
+      history.length ? history.map(function (m) {
+        var steps = (m.steps || []).length ? h('details', { class: 'ai-chat-steps' }, [
+          h('summary', {}, ['工具调用 ' + m.steps.length + ' 次']),
+          h('ul', {}, m.steps.map(function (s) {
+            return h('li', {}, [h('code', {}, [s.tool]), ' ',
+              s.error ? h('span', { class: 'err' }, ['失败：' + s.error])
+                : (s.pending ? '已生成待确认操作' : h('span', { class: 'muted' }, [s.result || '完成']))]);
+          }))
+        ]) : null;
+        return h('div', { class: 'ai-msg ' + (m.role === 'user' ? 'user' : 'bot') }, [
+          h('div', { class: 'ai-msg-role' }, [m.role === 'user' ? '我' : 'AI 助手']),
+          h('div', { class: 'ai-msg-body' }, [m.content || (m.steps && m.steps.length ? '（无文字回复）' : '')]),
+          m.limit ? hint('已达到单轮最多工具调用步数，可继续追问。') : null,
+          steps
+        ]);
+      }) : [h('div', { class: 'muted empty' }, ['示例：「列出离线的主机」「node_exporter 最近的升级任务失败原因是什么」「为 10.1.255.24-26 预览一次金丝雀升级」'])]);
+    if (state.aiChatBusy) log.appendChild(h('div', { class: 'ai-msg bot' }, [h('div', { class: 'ai-msg-body muted' }, ['思考中…'])]));
+
+    var pendingBox = pending.length ? h('div', {}, [
+      h('div', { class: 'ai-step-title' }, ['待确认操作（' + pending.length + '）'])
+    ].concat(pending.map(function (a) {
+        return h('div', { class: 'ai-notice warn' }, [
+          h('div', { class: 'ai-notice-title' }, [a.title || a.tool]),
+          h('pre', { class: 'code' }, [JSON.stringify(a.args || {}, null, 2)]),
+          a.expires_at ? hint('有效期至 ' + fmtTime(a.expires_at) + '，过期需重新生成。') : null,
+          h('div', { class: 'toolbar' }, [
+            h('button', { class: 'btn small', onclick: function () { executeAIAction(a); } }, ['确认执行']),
+            h('button', { class: 'btn ghost small', onclick: function () { cancelAIAction(a); } }, ['取消'])
+          ])
+        ]);
+      })
+    )) : null;
+
+    var input = h('textarea', { id: 'aiChatInput', rows: '4', placeholder: '输入问题，Ctrl+Enter 发送', value: state.aiChatDraft || '',
+      oninput: function () { state.aiChatDraft = input.value; },
+      onkeydown: function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendAIChat(); } } }, []);
+    return h('div', {}, [
+      h('div', { class: 'card' }, [
+        h('h2', {}, ['AI 助手']),
+        hint('只读工具自动执行；写操作不会直接执行，而是生成待确认卡片，由你确认后以你的身份执行。' +
+          (d.assistant_allow_write ? '' : '当前未允许助手生成写操作（ai.assistant_allow_write）。') +
+          '⚠️ 对话内容与查询到的数据会发送到配置的 LLM 服务。'),
+        log,
+        pendingBox,
+        state.aiChatErr ? h('div', { class: 'err field', role: 'alert' }, [state.aiChatErr]) : null,
+        field('消息', input),
+        h('div', { class: 'toolbar' }, [
+          h('button', { class: 'btn', id: 'aiChatSend', disabled: state.aiChatBusy ? 'disabled' : null, onclick: sendAIChat },
+            [state.aiChatBusy ? '发送中…' : '发送']),
+          h('button', { class: 'btn ghost', disabled: state.aiChatBusy ? 'disabled' : null, onclick: function () {
+            state.aiChatHistory = []; state.aiChatPending = []; state.aiChatErr = ''; render();
+          } }, ['清空对话'])
+        ])
+      ])
     ]);
   }
 
@@ -6809,9 +6898,21 @@
     ]) : hint('当前账号角色不足：创建 AI 令牌至少需要 ' + d.token_min_role + ' 角色（ai.token_min_role）。');
 
     var tks = state.aiTokens || [];
+    var tokenSel = batchSelection({
+      stateKey: 'aiTokenSel',
+      items: tks,
+      noun: '令牌',
+      unit: '个',
+      url: '/api/ai/tokens/batch-delete',
+      confirmText: '删除后无法恢复。已注销的令牌可直接删除；有效令牌删除等同于立即注销。',
+      label: function (x) { return x.name; },
+      onDone: function () { loadAITokens(); }
+    });
     var statusText = { active: '有效', expired: '已过期', revoked: '已注销' };
-    var table = tks.length ? simpleTable(['名称', '用户', '前缀', '写权限', '到期', '最后使用', '状态', '操作'], tks, function (tk) {
-      return [
+    var cols = ['名称', '用户', '前缀', '写权限', '到期', '最后使用', '状态', '操作'];
+    if (tokenSel) cols.unshift('选择');
+    var table = tks.length ? simpleTable(cols, tks, function (tk) {
+      var cells = [
         tk.name,
         tk.username,
         h('code', {}, [tk.token_prefix + '…']),
@@ -6823,6 +6924,8 @@
           ? h('button', { class: 'btn danger small', onclick: function () { revokeAIToken(tk); } }, ['注销'])
           : '-'
       ];
+      if (tokenSel) cells.unshift(tokenSel.cell(tk));
+      return cells;
     }, { key: 'ai-tokens' }) : h('div', { class: 'muted empty' }, ['暂无令牌']);
 
     var mineEl = h('input', { type: 'checkbox', checked: !!state.aiTokenMine,
@@ -6838,6 +6941,7 @@
         h('button', { class: 'btn ghost small', onclick: function () { loadAITokens(); } }, ['刷新'])
       ]),
       state.aiTokenErr ? h('div', { class: 'err field', role: 'alert' }, [state.aiTokenErr]) : null,
+      tokenSel ? tokenSel.bar : null,
       table
     ]);
   }
@@ -6973,75 +7077,6 @@
     ]);
   }
 
-  function aiChatCard(d) {
-    if (!d.assistant_enabled) {
-      return h('div', { class: 'card' }, [
-        h('h3', {}, ['AI 助手']),
-        hint('内置 AI 助手未启用或未配置 LLM。superadmin 可在「设置 → AI 助手」开启 ai.assistant_enabled，并填写 ai.llm_base_url（OpenAI 兼容）与 ai.llm_model。'),
-        isSuperAdmin() ? h('div', { class: 'toolbar' }, [
-          h('button', { class: 'btn ghost small', onclick: function () { switchView('settings'); } }, ['前往设置'])
-        ]) : null
-      ]);
-    }
-    var history = state.aiChatHistory || (state.aiChatHistory = []);
-    var pending = state.aiChatPending || (state.aiChatPending = []);
-    var log = h('div', { class: 'ai-chat-log', id: 'aiChatLog', 'aria-live': 'polite' },
-      history.length ? history.map(function (m) {
-        var steps = (m.steps || []).length ? h('details', { class: 'ai-chat-steps' }, [
-          h('summary', {}, ['工具调用 ' + m.steps.length + ' 次']),
-          h('ul', {}, m.steps.map(function (s) {
-            return h('li', {}, [h('code', {}, [s.tool]), ' ',
-              s.error ? h('span', { class: 'err' }, ['失败：' + s.error])
-                : (s.pending ? '已生成待确认操作' : h('span', { class: 'muted' }, [s.result || '完成']))]);
-          }))
-        ]) : null;
-        return h('div', { class: 'ai-msg ' + (m.role === 'user' ? 'user' : 'bot') }, [
-          h('div', { class: 'ai-msg-role' }, [m.role === 'user' ? '我' : 'AI 助手']),
-          h('div', { class: 'ai-msg-body' }, [m.content || (m.steps && m.steps.length ? '（无文字回复）' : '')]),
-          m.limit ? hint('已达到单轮最多工具调用步数，可继续追问。') : null,
-          steps
-        ]);
-      }) : [h('div', { class: 'muted empty' }, ['示例：「列出离线的主机」「node_exporter 最近的升级任务失败原因是什么」「为 10.1.255.24-26 预览一次金丝雀升级」'])]);
-    if (state.aiChatBusy) log.appendChild(h('div', { class: 'ai-msg bot' }, [h('div', { class: 'ai-msg-body muted' }, ['思考中…'])]));
-
-    var pendingBox = pending.length ? h('div', {}, [
-      h('div', { class: 'ai-step-title' }, ['待确认操作（' + pending.length + '）'])
-    ].concat(pending.map(function (a) {
-        return h('div', { class: 'ai-notice warn' }, [
-          h('div', { class: 'ai-notice-title' }, [a.title || a.tool]),
-          h('pre', { class: 'code' }, [JSON.stringify(a.args || {}, null, 2)]),
-          a.expires_at ? hint('有效期至 ' + fmtTime(a.expires_at) + '，过期需重新生成。') : null,
-          h('div', { class: 'toolbar' }, [
-            h('button', { class: 'btn small', onclick: function () { executeAIAction(a); } }, ['确认执行']),
-            h('button', { class: 'btn ghost small', onclick: function () { cancelAIAction(a); } }, ['取消'])
-          ])
-        ]);
-      })
-    )) : null;
-
-    var input = h('textarea', { id: 'aiChatInput', rows: '3', placeholder: '输入问题，Ctrl+Enter 发送', value: state.aiChatDraft || '',
-      oninput: function () { state.aiChatDraft = input.value; },
-      onkeydown: function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendAIChat(); } } }, []);
-    return h('div', { class: 'card' }, [
-      h('h3', {}, ['AI 助手']),
-      hint('只读工具自动执行；写操作不会直接执行，而是生成待确认卡片，由你确认后以你的身份执行。' +
-        (d.assistant_allow_write ? '' : '当前未允许助手生成写操作（ai.assistant_allow_write）。') +
-        '⚠️ 对话内容与查询到的数据会发送到配置的 LLM 服务。'),
-      log,
-      pendingBox,
-      state.aiChatErr ? h('div', { class: 'err field', role: 'alert' }, [state.aiChatErr]) : null,
-      field('消息', input),
-      h('div', { class: 'toolbar' }, [
-        h('button', { class: 'btn', id: 'aiChatSend', disabled: state.aiChatBusy ? 'disabled' : null, onclick: sendAIChat },
-          [state.aiChatBusy ? '发送中…' : '发送']),
-        h('button', { class: 'btn ghost', disabled: state.aiChatBusy ? 'disabled' : null, onclick: function () {
-          state.aiChatHistory = []; state.aiChatPending = []; state.aiChatErr = ''; render();
-        } }, ['清空对话'])
-      ])
-    ]);
-  }
-
-  // ========== 主渲染 ==========
   function render() {
     app.innerHTML = '';
     if (!state.user) { app.appendChild(loginView()); return; }
@@ -7072,6 +7107,7 @@
       case 'audit': body = auditView(); break;
       case 'password': body = passwordView(); break;
       case 'ai': body = aiView(); break;
+      case 'assistant': body = aiAssistantView(); break;
       default: body = hostsView();
     }
     app.appendChild(h('div', { class: 'container' }, [body]));

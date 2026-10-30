@@ -16,6 +16,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/iflyelf/upgrade_mgr/internal/mcp"
 )
 
 var (
@@ -93,7 +95,11 @@ func post(ctx context.Context, url, token string, body []byte) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+token)
+	for k, v := range routingHeaders(body) {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -112,6 +118,10 @@ func post(ctx context.Context, url, token string, body []byte) ([]byte, error) {
 	}
 
 	if resp.StatusCode != 200 {
+		// 4xx 携带 JSON-RPC 错误（如 -32020 / -32022）时原样透传，客户端据此重试或降级。
+		if isJSONRPCError(respBody) {
+			return bytes.TrimSpace(respBody), nil
+		}
 		msg := strings.TrimSpace(string(respBody))
 		if len(msg) > 200 {
 			msg = msg[:200]
@@ -120,4 +130,47 @@ func post(ctx context.Context, url, token string, body []byte) ([]byte, error) {
 	}
 
 	return respBody, nil
+}
+
+// routingHeaders 从单条消息推导现代协议（2026-07-28）要求的 HTTP 头，值与请求体保持一致。
+// 消息未在 _meta 声明版本（旧客户端）或为批量数组时不加头，沿用旧版本行为。
+func routingHeaders(body []byte) map[string]string {
+	var msg struct {
+		Method string `json:"method"`
+		Params struct {
+			Meta map[string]json.RawMessage `json:"_meta"`
+			Name string                     `json:"name"`
+			URI  string                     `json:"uri"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(body, &msg) != nil || msg.Method == "" {
+		return nil
+	}
+	var ver string
+	if raw, ok := msg.Params.Meta[mcp.MetaProtocolVersion]; ok {
+		_ = json.Unmarshal(raw, &ver)
+	}
+	if ver == "" {
+		// 旧客户端：保持原有行为，由服务端按 initialize 握手处理。
+		return nil
+	}
+	h := map[string]string{
+		mcp.HeaderProtocolVersion: ver,
+		mcp.HeaderMethod:          msg.Method,
+	}
+	switch msg.Method {
+	case "tools/call", "prompts/get":
+		h[mcp.HeaderName] = mcp.EncodeHeaderValue(msg.Params.Name)
+	case "resources/read":
+		h[mcp.HeaderName] = mcp.EncodeHeaderValue(msg.Params.URI)
+	}
+	return h
+}
+
+func isJSONRPCError(b []byte) bool {
+	var m struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Error   json.RawMessage `json:"error"`
+	}
+	return json.Unmarshal(b, &m) == nil && m.JSONRPC == "2.0" && len(m.Error) > 0
 }

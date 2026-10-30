@@ -45,10 +45,12 @@ func NewAIToolsProvider(s *svc.ServiceContext, u *auth.User, t *aitoken.Token, r
 
 // Info 实现 mcp.Provider。
 func (p *AIToolsProvider) Info(ctx context.Context) mcp.Info {
+	ttl, _ := time.ParseDuration(p.snapshot.AI.MCPListCacheTTL)
 	return mcp.Info{
 		Name:         p.snapshot.AI.MCPServerName,
 		Version:      p.svc.Version,
 		Instructions: p.snapshot.AI.MCPInstructions,
+		ListCacheTTL: ttl,
 	}
 }
 

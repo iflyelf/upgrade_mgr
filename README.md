@@ -3160,14 +3160,38 @@ upgrade_mgr 内置 **MCP (Model Context Protocol)** 服务器，为 AI 编码助
 3. 使用 OpenCode、Claude Code、Codex、Cursor 等客户端连接
 4. 客户端调用 `hosts_list`、`task_create` 等工具
 
+### 页面
+
+- **AI 接入**：服务状态、AI 访问令牌、接入命令生成、Skills 下载。
+- **AI 访问令牌批量删除**：令牌表格支持勾选 / 全选本页后批量删除（`POST /api/ai/tokens/batch-delete`，
+  请求体 `{"ids":[...]}`，单次最多 200 个，返回 `{"deleted":[...],"failed":[{"id","error"}]}`）。
+  删除为物理删除，任意状态均可删；删除有效令牌等同于立即注销。权限与单个注销一致（本人 / 租户管理员 / superadmin），
+  审计动作 `ai_token.delete`。
+- **AI 助手**：顶栏独立菜单（`#/assistant`），内置对话页；未启用时提示前往「设置 → AI 助手」配置 LLM。
+
+### MCP 协议版本
+
+支持 `2026-07-28`（最新）/ `2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05`，双代兼容：
+
+- **现代版本 2026-07-28**：无 `initialize` 握手、无会话。每个请求在 `params._meta` 携带
+  `io.modelcontextprotocol/protocolVersion`，并带 `MCP-Protocol-Version`、`Mcp-Method`
+  （`tools/call` 另需 `Mcp-Name`，非 ASCII 用 `=?base64?...?=` 编码）HTTP 头，与请求体不一致返回 `-32020`；
+  不支持的版本返回 `-32022`（`data.supported` 为支持列表）。提供 `server/discover`；`tools/list` 等列表结果
+  带 `resultType`、`cacheScope: "private"`、`ttlMs`（由 `ai.mcp_list_cache_ttl` 控制，`0` 不返回）；
+  不支持 JSON-RPC 批量；未知方法 HTTP 404。
+- **旧版本**：仍走 `initialize`，请求版本受支持时回显，否则回落为 `2025-11-25`；未带版本头视为 `2025-03-26`。
+- stdio 桥 `upgrade-mgr-mcp-bridge` 自动从消息体补齐上述 HTTP 头，服务端返回的 JSON-RPC 错误原样透传。
+
 ### 配置
 
 ```yaml
 ai:
   mcp_enabled: true
   mcp_allow_write: true
+  mcp_list_cache_ttl: 5m   # 现代协议列表结果的缓存提示时长，0 关闭
   token_prefix: upm
   token_default_ttl: 720h
 ```
 
+以上配置均可在「设置 → AI」页面修改（页面 > 环境变量 > 配置文件 > 默认值）。
 详见页面生成的接入命令或 `skills/catalog/upgrade-mgr-ops/SKILL.md`。

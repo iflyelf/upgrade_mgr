@@ -37,6 +37,7 @@ var aiMetas = map[string]aiMeta{
 	"mcp_instructions":   {Group: aiGroupMCP, Label: "MCP 服务说明（initialize 返回给 AI 客户端的使用指引）", Type: "text"},
 	"mcp_rate_limit":     {Group: aiGroupMCP, Label: "MCP 限流（每令牌每分钟请求数，0=不限）"},
 	"mcp_max_body_bytes": {Group: aiGroupMCP, Label: "MCP 单次请求体上限（字节）"},
+	"mcp_list_cache_ttl": {Group: aiGroupMCP, Label: "MCP tools/list 缓存提示时长（现代协议，如 5m）"},
 	"client_token_env": {Group: aiGroupMCP, Label: "客户端配置片段中使用的令牌环境变量名",
 		Note: "页面生成 OpenCode / Claude Code / Codex 配置与 stdio 桥命令时引用该环境变量，令牌不写入配置文件。"},
 
