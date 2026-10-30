@@ -270,18 +270,67 @@ function Wait-ServiceState([string]$Want, [int]$TimeoutSec = 30) {
 
 function Stop-ServiceIfRunning {
     $state = Get-ServiceState
-    if ($state -eq 'Missing' -or $state -eq 'Stopped') { return }
-    Write-Step "停止服务 $ServiceName（当前 $state）"
+    if ($state -ne 'Missing' -and $state -ne 'Stopped') {
+        Write-Step "停止服务 $ServiceName（当前 $state）"
+        try {
+            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+        } catch {
+            Write-Warn "Stop-Service 失败：$($_.Exception.Message)"
+        }
+        if (-not (Wait-ServiceState 'Stopped' 30)) {
+            Write-Warn '服务未在 30 秒内停止，尝试强制结束进程'
+        }
+    }
+    # 服务已停止（如 Agent 已先停服）也要清理：手工启动、上次失败遗留或计划任务拉起的
+    # windows_exporter.exe 不归服务管理，仍会锁住 exe，导致后续覆盖报「正由另一进程使用」。
+    Stop-ExporterProcesses
+}
+
+# Stop-ExporterProcesses 结束所有占用安装路径 exe 的 windows_exporter 进程（含不归服务管理的）。
+# 用 WMI 获取进程路径（PowerShell 2.0 的 Get-Process 不提供 Path）；路径不同的同名进程不动。
+function Stop-ExporterProcesses {
+    $procs = @()
     try {
-        Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+        $procs = @(Get-WmiObject Win32_Process -Filter "Name='windows_exporter.exe'" -ErrorAction Stop)
     } catch {
-        Write-Warn "Stop-Service 失败：$($_.Exception.Message)"
+        Write-Warn "查询 windows_exporter 进程失败：$($_.Exception.Message)"
+        return
     }
-    if (-not (Wait-ServiceState 'Stopped' 30)) {
-        Write-Warn '服务未在 30 秒内停止，尝试强制结束进程'
-        Get-Process -Name 'windows_exporter' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+    foreach ($p in $procs) {
+        $path = $p.ExecutablePath
+        # 取不到路径（权限/会话限制）时按同名处理，宁可多停也不要留下锁。
+        if ($path -and ($path -ne $ExePath)) { continue }
+        Write-Step "结束占用 exe 的进程 PID=$($p.ProcessId)（$($p.CommandLine)）"
+        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {
+            Write-Warn "结束进程 $($p.ProcessId) 失败：$($_.Exception.Message)"
+        }
     }
+    if ($procs.Count -gt 0) { Start-Sleep -Seconds 2 }
+}
+
+# Install-ExeFile 把 $Source 覆盖到 $ExePath；被占用时结束占用进程并重试，
+# 仍失败则把旧 exe 改名让位（Windows 允许重命名正在运行的 exe），保证新文件能落地。
+function Install-ExeFile([string]$Source) {
+    for ($i = 1; $i -le 5; $i++) {
+        try {
+            Copy-Item -Force $Source $ExePath -ErrorAction Stop
+            return
+        } catch {
+            Write-Warn "覆盖 $ExePath 失败（第 $i 次）：$($_.Exception.Message)"
+            Stop-ExporterProcesses
+            Start-Sleep -Seconds 2
+        }
+    }
+    $aside = "$ExePath.old-$([DateTime]::Now.Ticks)"
+    Write-Warn "exe 仍被占用，改名让位：$aside（进程退出后可删除；下次安装/更新会自动清理）"
+    Move-Item -Force $ExePath $aside -ErrorAction Stop
+    Copy-Item -Force $Source $ExePath -ErrorAction Stop
+}
+
+# Remove-StaleExeCopies 清理以前改名让位留下的旧 exe（仍被占用的跳过）。
+function Remove-StaleExeCopies {
+    Get-ChildItem -Path $InstallDir -Filter 'windows_exporter.exe.old-*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
 }
 
 # 平台地址：Agent 执行脚本时会注入 UPGRADE_AGENT_SERVER_URL。
@@ -749,8 +798,9 @@ function Do-Install {
     if ((Get-ServiceState) -ne 'Missing' -and (Test-Path $ExePath)) {
         Copy-Item -Force $ExePath $ExeBak
     }
-    Copy-Item -Force $tmp $ExePath
+    Install-ExeFile $tmp
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+    Remove-StaleExeCopies
 
     $configBackupInstall = "$ConfigFile.install-bak"
     if (Test-Path $ConfigFile) { Copy-Item -Force $ConfigFile $configBackupInstall }
@@ -767,7 +817,7 @@ function Do-Install {
         if (Test-Path $ExeBak) {
             Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
-            Copy-Item -Force $ExeBak $ExePath
+            Install-ExeFile $ExeBak
             Set-ServiceBinPath $script:PrevBinPath
             Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
         }
@@ -795,8 +845,9 @@ function Do-Update {
     $tmp = Join-Path $env:TEMP "windows_exporter-download-$PID.exe"
     Download-Exporter $tmp
     Stop-ServiceIfRunning
-    Copy-Item -Force $tmp $ExePath
+    Install-ExeFile $tmp
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+    Remove-StaleExeCopies
 
     Write-DefaultConfig
     Update-ServiceArgs
@@ -807,7 +858,7 @@ function Do-Update {
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
         if (Test-Path $ExeBak) {
-            Copy-Item -Force $ExeBak $ExePath
+            Install-ExeFile $ExeBak
         }
         if (Test-Path $configBackup) {
             Copy-Item -Force $configBackup $ConfigFile
