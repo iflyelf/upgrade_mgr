@@ -50,6 +50,10 @@
     hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
     agentTargetVersion: '', agentAutoUpdate: false, agentStats: null,
     agentStatsAt: 0, agentStatsSig: '', agentUpdateActive: false,
+    // AI 接入
+    ai: null, aiErr: '', aiTokens: [], aiTokensTotal: 0, aiTokenErr: '', aiTokenCreated: null, aiTokenForm: null, aiTokenMine: true,
+    aiSnippets: null, aiSnippetsBusy: false, aiSnippetsErr: '', aiSnippetClient: '', aiSnippetOS: '', aiSnippetArch: '', aiGen: null,
+    aiChatHistory: null, aiChatPending: null, aiChatDraft: '', aiChatBusy: false, aiChatErr: '',
     compQ: '', compPage: 1, compSize: 50,
     artifactQ: '', artifactFilterComp: '', artifactPage: 1, artifactSize: 50,
     artifactPages: 1, artifactTotal: 0,
@@ -321,6 +325,7 @@
         navLink('components', '组件'),
         navLink('artifacts', '制品'),
         navLink('tasks', '任务'),
+        navLink('ai', 'AI 接入'),
         orgActive || isAdmin() || isSuperAdmin() ? navDropdown('人员组织', orgTabs.map(function (t) {
           return {
             label: t[1], active: orgActive && state.orgTab === t[0],
@@ -413,6 +418,7 @@
     }
     // 全局配置页仅 superadmin 可见。
     if (isSuperAdmin()) items.push(['extbin', '外部文件'], ['settings', '设置']);
+    items.push(['ai', 'AI 接入']);
     return h('div', { class: 'tabs mobile-tabs', role: 'tablist' }, items.map(function (it) {
       return h('div', {
         class: 'tab' + (state.view === it[0] ? ' active' : ''),
@@ -1170,6 +1176,7 @@
     else if (v === 'extbin') loadExternalBinaries();
     else if (v === 'org') loadOrg();
     else if (v === 'audit') loadAudit();
+    else if (v === 'ai') loadAI();
     else if (v === 'password') render();
     else loadHosts();
   }
@@ -1180,7 +1187,7 @@
   // 只持久化列表页的关键状态，弹窗/编辑中的表单不写入 URL。
   var KNOWN_VIEWS = {
     hosts: 1, components: 1, artifacts: 1, tasks: 1, org: 1,
-    extbin: 1, audit: 1, settings: 1, password: 1
+    extbin: 1, audit: 1, settings: 1, password: 1, ai: 1
   };
 
   function parseHash() {
@@ -4412,11 +4419,24 @@
         var tags = [];
         if (s.readonly) tags.push(h('span', { class: 'tag' }, ['只读']));
         if (s.restart) tags.push(h('span', { class: 'tag status-failed' }, ['需重启']));
+        // 来源：页面保存的值优先于配置文件/环境变量，标出来避免「改了配置文件不生效」。
+        var srcText = { page: '页面设置', file_or_env: '配置文件/环境变量', 'default': '默认值' };
+        if (!s.readonly && s.source) {
+          tags.push(h('span', { class: 'tag setting-source source-' + s.source, 'data-key': s.key }, [srcText[s.source] || s.source]));
+        }
 
         var sub = [];
         if (s.note) sub.push(h('div', { class: 'muted' }, [s.note]));
+        if (!s.readonly && s.source === 'page') {
+          sub.push(h('div', { class: 'toolbar', style: 'margin-top:6px' }, [
+            h('button', {
+              type: 'button', class: 'btn ghost small setting-reset', 'data-key': s.key,
+              onclick: function () { resetSetting(s.key); }
+            }, ['恢复为配置文件值'])
+          ]));
+        }
 
-        return h('div', { class: 'field' }, [
+        return h('div', { class: 'field', 'data-setting-key': s.key }, [
           h('label', {}, [s.label + '  (' + s.key + ')'].concat(tags)),
           inp
         ].concat(sub));
@@ -4450,6 +4470,19 @@
       }
     }, ['保存设置']);
     return h('div', {}, [cacheCard()].concat(sections).concat([h('div', { class: 'card' }, [saveBtn])]));
+  }
+
+  // resetSetting 删除页面保存的值，恢复为配置文件/环境变量/默认值（立即生效）。
+  function resetSetting(key) {
+    if (!confirm('恢复 ' + key + ' 为配置文件/环境变量中的值？页面保存的值将被删除。')) return;
+    api('/api/settings/' + encodeURIComponent(key), { method: 'DELETE' })
+      .then(function (d) {
+        alert('已恢复：' + key + ' = ' + ((d && d.value) || '（空）'));
+        state.cacheStatus = null;
+        state.cacheErr = '';
+        loadSettings();
+      })
+      .catch(function (e) { alert('恢复失败: ' + e.message); });
   }
 
   // loadCacheStatus 拉取 Redis 运行状态（失败只影响卡片，不影响设置页）。
@@ -4571,6 +4604,10 @@
     '用户字段': 'User fields', '人员信息': 'People', 'FlyIAM 人员': 'FlyIAM users',
     'Agent 版本分布': 'Agent version distribution', '编辑主机': 'Edit host',
     '任务名': 'Task name', '任务类型': 'Task type', 'IP 段': 'IP range',
+    'AI 接入': 'AI Integration', '访问令牌': 'Access Tokens', '创建令牌': 'Create Token',
+    '生成接入命令': 'Generate Integration Command', '复制令牌': 'Copy Token',
+    '注销': 'Revoke', '确认执行': 'Execute', '取消': 'Cancel', '发送': 'Send',
+    '清空对话': 'Clear Chat', 'AI 助手': 'AI Assistant',
     '目标版本': 'Target version', '命令脚本': 'Command script', '解释器': 'Interpreter',
     '脚本参数': 'Script arguments', '标准输入 (stdin)': 'Stdin', '超时': 'Timeout',
     '灰度策略': 'Rollout strategy', '每批台数 / 百分比': 'Batch size / percent',
@@ -6549,6 +6586,462 @@
     ]);
   }
 
+  // ========== AI 接入视图 ==========
+  //
+  // 数据全部来自 GET /api/ai/integration（地址、服务名、令牌环境变量、有效期策略、
+  // 客户端/系统/架构候选、Skills、stdio 桥可用性），页面不写死任何配置值。
+  function loadAI() {
+    state.aiErr = '';
+    api('/api/ai/integration').then(function (d) {
+      state.ai = d || {};
+      var meta = state.ai.snippet_meta || {};
+      if (!state.aiSnippetClient && meta.clients && meta.clients.length) state.aiSnippetClient = meta.clients[0].id;
+      if (!state.aiSnippetOS && meta.oses && meta.oses.length) state.aiSnippetOS = meta.oses[0].id;
+      loadAITokens();
+    }).catch(function (e) { state.ai = {}; state.aiErr = e.message; render(); });
+  }
+
+  function loadAITokens() {
+    var qs = state.aiTokenMine ? '?mine=1' : '';
+    api('/api/ai/tokens' + qs).then(function (d) {
+      state.aiTokens = (d && d.list) || [];
+      state.aiTokensTotal = (d && d.total) || 0;
+      render();
+    }).catch(function (e) { state.aiTokenErr = e.message; render(); });
+  }
+
+  function aiTokenFormState() {
+    return state.aiTokenForm || (state.aiTokenForm = { name: '', allow_write: false, expiry: 'default', custom: '', busy: false, err: '' });
+  }
+
+  // aiTokenPayload 把表单的有效期选项转为接口参数：default 不传（服务端用 ai.token_default_ttl）。
+  function aiTokenPayload(name, allowWrite, expiry, custom) {
+    var body = { name: name, allow_write: !!allowWrite };
+    if (expiry === 'permanent') body.permanent = true;
+    else if (expiry === 'custom') body.expires_in = custom;
+    return body;
+  }
+
+  function createAIToken() {
+    var f = aiTokenFormState();
+    if (!f.name.trim()) { f.err = '请填写令牌名称'; render(); return; }
+    if (f.expiry === 'custom' && !f.custom.trim()) { f.err = '请填写自定义有效期，如 24h'; render(); return; }
+    f.busy = true; f.err = ''; render();
+    api('/api/ai/tokens', { method: 'POST', body: JSON.stringify(aiTokenPayload(f.name.trim(), f.allow_write, f.expiry, f.custom.trim())) })
+      .then(function (t) {
+        state.aiTokenCreated = t;
+        state.aiTokenForm = null;
+        loadAITokens();
+      })
+      .catch(function (e) { f.busy = false; f.err = e.message; render(); });
+  }
+
+  function revokeAIToken(tk) {
+    if (!confirm('确认注销令牌「' + tk.name + '」？使用该令牌的 AI 客户端将立即无法访问。')) return;
+    api('/api/ai/tokens/' + tk.id + '/revoke', { method: 'POST' })
+      .then(function () {
+        if (state.aiTokenCreated && state.aiTokenCreated.id === tk.id) state.aiTokenCreated = null;
+        loadAITokens();
+      })
+      .catch(function (e) { alert('注销失败: ' + e.message); });
+  }
+
+  // generateAISnippets 生成接入命令。tokenMode：created（嵌入刚创建的令牌）/ new（新建并嵌入）/ placeholder。
+  function generateAISnippets() {
+    var g = state.aiGen || (state.aiGen = {});
+    var client = state.aiSnippetClient, osName = state.aiSnippetOS, arch = state.aiSnippetArch;
+    var mode = g.tokenMode || 'placeholder';
+    state.aiSnippetsBusy = true; state.aiSnippetsErr = ''; render();
+    var tokenP;
+    if (mode === 'created' && state.aiTokenCreated) {
+      tokenP = Promise.resolve(state.aiTokenCreated.token);
+    } else if (mode === 'new') {
+      var name = (g.newName || '').trim() || (client + '-' + osName);
+      tokenP = api('/api/ai/tokens', { method: 'POST', body: JSON.stringify(aiTokenPayload(name, !!g.newWrite, 'default', '')) })
+        .then(function (t) { state.aiTokenCreated = t; g.tokenMode = 'created'; loadAITokens(); return t.token; });
+    } else {
+      tokenP = Promise.resolve('');
+    }
+    tokenP.then(function (token) {
+      return api('/api/ai/snippets', { method: 'POST', body: JSON.stringify({ client: client, os: osName, arch: arch, token: token }) });
+    }).then(function (d) {
+      state.aiSnippets = d; state.aiSnippetsBusy = false; render();
+    }).catch(function (e) {
+      state.aiSnippetsErr = e.message; state.aiSnippetsBusy = false; render();
+    });
+  }
+
+  function sendAIChat() {
+    var text = (state.aiChatDraft || '').trim();
+    if (!text || state.aiChatBusy) return;
+    var max = (state.ai && state.ai.assistant_max_input_chars) || 0;
+    if (max && text.length > max) { state.aiChatErr = '消息过长（最多 ' + max + ' 字符）'; render(); return; }
+    state.aiChatHistory = state.aiChatHistory || [];
+    state.aiChatHistory.push({ role: 'user', content: text });
+    state.aiChatDraft = '';
+    state.aiChatBusy = true; state.aiChatErr = '';
+    state.focusId = 'aiChatInput';
+    render();
+    var messages = state.aiChatHistory.filter(function (m) { return m.role === 'user' || m.role === 'assistant'; })
+      .map(function (m) { return { role: m.role, content: m.content }; });
+    api('/api/ai/chat', { method: 'POST', body: JSON.stringify({ messages: messages }) })
+      .then(function (r) {
+        state.aiChatHistory.push({ role: 'assistant', content: r.reply || '', steps: r.steps || [], limit: !!r.step_limit_hit });
+        state.aiChatPending = (state.aiChatPending || []).concat(r.pending_actions || []);
+        state.aiChatBusy = false;
+        state.focusId = 'aiChatInput';
+        render();
+        aiScrollChat();
+      })
+      .catch(function (e) { state.aiChatErr = e.message; state.aiChatBusy = false; render(); });
+  }
+
+  function aiScrollChat() {
+    var box = document.getElementById('aiChatLog');
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+
+  function aiRemovePending(id) {
+    state.aiChatPending = (state.aiChatPending || []).filter(function (a) { return a.id !== id; });
+  }
+
+  function executeAIAction(a) {
+    if (!confirm('确认执行「' + (a.title || a.tool) + '」？该操作会以你的身份作用于生产环境。')) return;
+    api('/api/ai/actions/' + a.id + '/execute', { method: 'POST' })
+      .then(function (r) {
+        aiRemovePending(a.id);
+        var out = '';
+        try { out = JSON.stringify(r.result); } catch (e) { out = String(r.result); }
+        if (out && out.length > 300) out = out.slice(0, 300) + '…';
+        state.aiChatHistory.push({ role: 'assistant', content: '✅ 已执行 ' + (a.title || a.tool) + (out && out !== 'null' ? '：' + out : '') });
+        render();
+        aiScrollChat();
+      })
+      .catch(function (e) {
+        aiRemovePending(a.id);
+        state.aiChatHistory.push({ role: 'assistant', content: '❌ 执行 ' + (a.title || a.tool) + ' 失败：' + e.message });
+        render();
+      });
+  }
+
+  function cancelAIAction(a) {
+    api('/api/ai/actions/' + a.id + '/cancel', { method: 'POST' })
+      .then(function () {
+        aiRemovePending(a.id);
+        state.aiChatHistory.push({ role: 'assistant', content: '已取消 ' + (a.title || a.tool) });
+        render();
+      })
+      .catch(function (e) { alert('取消失败: ' + e.message); });
+  }
+
+  function aiDownload(url) { window.location.href = url; }
+
+  function aiView() {
+    var d = state.ai;
+    if (!d) return h('div', { class: 'card' }, [hint('加载中…')]);
+    if (state.aiErr) {
+      return h('div', { class: 'card' }, [
+        h('h3', {}, ['AI 接入']),
+        h('div', { class: 'err', role: 'alert' }, ['加载失败: ' + state.aiErr]),
+        h('button', { class: 'btn ghost', onclick: function () { loadAI(); } }, ['重试'])
+      ]);
+    }
+    return h('div', {}, [
+      aiStatusCard(d),
+      aiTokenCard(d),
+      aiSnippetGenCard(d),
+      state.aiSnippets ? aiSnippetsCard() : null,
+      aiSkillsCard(d),
+      aiChatCard(d)
+    ]);
+  }
+
+  function aiStatusCard(d) {
+    var yes = function (v, on, off) { return h('span', { class: 'tag ' + (v ? 'status-success' : 'status-canceled') }, [v ? on : off]); };
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['AI 接入（MCP / Skills）']),
+      hint('OpenCode、Claude Code、Codex、Cursor 等 AI 编程 Agent 可通过 MCP 协议查询主机、组件、任务，并在授权后创建与推进灰度任务。' +
+        '工具以令牌所属用户身份执行，租户隔离、组件 deploy 权限、owner 策略与审计全部沿用。'),
+      h('div', { class: 'grid2' }, [
+        field('MCP 服务', yes(d.mcp_enabled, '已启用', '未启用')),
+        field('MCP 写操作（全局）', yes(d.mcp_allow_write, '允许', '禁止'),
+          d.mcp_allow_write ? '令牌勾选「允许写」后可见写工具。' : '写工具对所有令牌隐藏；superadmin 可在设置页开启 ai.mcp_allow_write。'),
+        field('高风险操作需 confirm', yes(d.mcp_require_confirm, '是', '否')),
+        field('经 AI 创建命令任务', yes(d.allow_command_tasks, '允许', '禁止'))
+      ]),
+      field('MCP 地址', h('code', { class: 'ai-code' }, [d.mcp_url || '-']),
+        '服务名 ' + (d.server_name || '-') + '；令牌环境变量 ' + (d.token_env || '-') +
+        '；协议版本 ' + ((d.protocol_versions || []).join(' / ') || '-') + '。地址取自 server.external_url。'),
+      isSuperAdmin() ? h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn ghost small', onclick: function () { switchView('settings'); } }, ['前往设置 → AI'])
+      ]) : null
+    ]);
+  }
+
+  function aiTokenCard(d) {
+    var f = aiTokenFormState();
+    var expiryOpts = [h('option', { value: 'default' }, ['默认（' + (d.token_default_ttl || '-') + '）']),
+      h('option', { value: 'custom' }, ['自定义'])];
+    if (d.token_allow_permanent && !d.token_max_ttl) expiryOpts.push(h('option', { value: 'permanent' }, ['永久']));
+    var nameEl = h('input', { id: 'aiTkName', value: f.name, placeholder: '如 opencode-我的笔记本', maxlength: '100',
+      oninput: function () { f.name = nameEl.value; },
+      onkeydown: function (e) { if (e.key === 'Enter') createAIToken(); } }, []);
+    var writeEl = h('input', { type: 'checkbox', id: 'aiTkWrite', checked: f.allow_write,
+      onchange: function () { f.allow_write = writeEl.checked; } }, []);
+    var expiryEl = h('select', { id: 'aiTkExpiry', value: f.expiry,
+      onchange: function () { f.expiry = expiryEl.value; render(); } }, expiryOpts);
+    var customEl = h('input', { id: 'aiTkCustom', value: f.custom, placeholder: '如 24h / 168h',
+      oninput: function () { f.custom = customEl.value; } }, []);
+
+    var form = d.can_create_token ? h('div', {}, [
+      h('div', { class: 'grid2' }, [
+        field('令牌名称', nameEl),
+        field('有效期', expiryEl, d.token_max_ttl ? '最长 ' + d.token_max_ttl + '。' : null)
+      ]),
+      f.expiry === 'custom' ? field('自定义有效期', customEl, 'Go 时长格式：30m、24h、720h。') : null,
+      h('label', { class: 'ai-check' }, [writeEl, ' 允许写操作（创建/启动/暂停/推进/取消/重试任务、Agent 自升级）']),
+      hint(d.mcp_allow_write ? '写工具会影响生产主机，只给需要的令牌勾选。'
+        : '当前全局未允许 MCP 写操作：即使勾选，写工具也不可见，开启 ai.mcp_allow_write 后自动生效。'),
+      f.err ? h('div', { class: 'err field', role: 'alert' }, [f.err]) : null,
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', disabled: f.busy ? 'disabled' : null, onclick: createAIToken }, [f.busy ? '创建中…' : '创建令牌'])
+      ])
+    ]) : hint('当前账号角色不足：创建 AI 令牌至少需要 ' + d.token_min_role + ' 角色（ai.token_min_role）。');
+
+    var tks = state.aiTokens || [];
+    var statusText = { active: '有效', expired: '已过期', revoked: '已注销' };
+    var table = tks.length ? simpleTable(['名称', '用户', '前缀', '写权限', '到期', '最后使用', '状态', '操作'], tks, function (tk) {
+      return [
+        tk.name,
+        tk.username,
+        h('code', {}, [tk.token_prefix + '…']),
+        tk.allow_write ? h('span', { class: 'tag status-paused' }, ['允许']) : '只读',
+        tk.expires_at ? fmtTime(tk.expires_at) : '永久',
+        tk.last_used_at ? fmtTime(tk.last_used_at) + (tk.last_used_ip ? ' · ' + tk.last_used_ip : '') : '从未',
+        h('span', { class: 'tag ' + (tk.status === 'active' ? 'status-success' : 'status-canceled') }, [statusText[tk.status] || tk.status]),
+        tk.status === 'active'
+          ? h('button', { class: 'btn danger small', onclick: function () { revokeAIToken(tk); } }, ['注销'])
+          : '-'
+      ];
+    }, { key: 'ai-tokens' }) : h('div', { class: 'muted empty' }, ['暂无令牌']);
+
+    var mineEl = h('input', { type: 'checkbox', checked: !!state.aiTokenMine,
+      onchange: function () { state.aiTokenMine = mineEl.checked; loadAITokens(); } }, []);
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['AI 访问令牌']),
+      hint('令牌只保存哈希，明文仅在创建后显示一次；令牌继承你的身份与权限，账号被禁用或删除后立即失效。'),
+      state.aiTokenCreated ? aiTokenCreatedBox() : null,
+      form,
+      h('div', { class: 'toolbar', style: 'margin-top:12px' }, [
+        h('span', { class: 'muted' }, ['共 ' + (state.aiTokensTotal || 0) + ' 个令牌']),
+        (isAdmin() || isSuperAdmin()) ? h('label', { class: 'ai-check' }, [mineEl, ' 只看我的']) : null,
+        h('button', { class: 'btn ghost small', onclick: function () { loadAITokens(); } }, ['刷新'])
+      ]),
+      state.aiTokenErr ? h('div', { class: 'err field', role: 'alert' }, [state.aiTokenErr]) : null,
+      table
+    ]);
+  }
+
+  function aiTokenCreatedBox() {
+    var t = state.aiTokenCreated;
+    var input = h('input', { readonly: 'readonly', value: t.token, id: 'aiTkPlain', class: 'ai-code',
+      onclick: function () { input.select(); } }, []);
+    var copyBtn = h('button', { class: 'btn small', type: 'button' }, ['复制令牌']);
+    copyBtn.onclick = function () { copyText(t.token, copyBtn, '复制令牌'); };
+    return h('div', { class: 'ai-notice ok', role: 'status' }, [
+      h('div', { class: 'ai-notice-title' }, ['✅ 令牌「' + t.name + '」已创建' + (t.allow_write ? '（允许写）' : '（只读）')]),
+      hint('请立即复制保存，关闭后无法再次查看明文。' + (t.expires_at ? '到期：' + fmtTime(t.expires_at) : '永久有效')),
+      input,
+      h('div', { class: 'toolbar', style: 'margin-top:8px' }, [
+        copyBtn,
+        h('button', { class: 'btn ghost small', onclick: function () {
+          var g = state.aiGen || (state.aiGen = {});
+          g.tokenMode = 'created';
+          generateAISnippets();
+        } }, ['用此令牌生成接入命令']),
+        h('button', { class: 'btn ghost small', onclick: function () { state.aiTokenCreated = null; render(); } }, ['关闭'])
+      ])
+    ]);
+  }
+
+  function aiSnippetGenCard(d) {
+    var meta = d.snippet_meta || {};
+    var clients = meta.clients || [], oses = meta.oses || [], arches = meta.arches || {};
+    var g = state.aiGen || (state.aiGen = {});
+    if (!g.tokenMode) g.tokenMode = state.aiTokenCreated ? 'created' : (d.can_create_token ? 'new' : 'placeholder');
+    if (g.tokenMode === 'created' && !state.aiTokenCreated) g.tokenMode = d.can_create_token ? 'new' : 'placeholder';
+    var archList = arches[state.aiSnippetOS] || [];
+    if (archList.indexOf(state.aiSnippetArch) < 0) state.aiSnippetArch = archList[0] || '';
+
+    var clientEl = h('select', { id: 'aiGenClient', value: state.aiSnippetClient,
+      onchange: function () { state.aiSnippetClient = clientEl.value; state.aiSnippets = null; render(); } },
+      clients.map(function (c) { return h('option', { value: c.id }, [c.label]); }));
+    var osEl = h('select', { id: 'aiGenOS', value: state.aiSnippetOS,
+      onchange: function () { state.aiSnippetOS = osEl.value; state.aiSnippets = null; render(); } },
+      oses.map(function (o) { return h('option', { value: o.id }, [o.label]); }));
+    var archEl = h('select', { id: 'aiGenArch', value: state.aiSnippetArch,
+      onchange: function () { state.aiSnippetArch = archEl.value; state.aiSnippets = null; } },
+      archList.map(function (a) { return h('option', { value: a }, [a]); }));
+
+    var modes = [];
+    if (state.aiTokenCreated) modes.push(['created', '嵌入刚创建的令牌（' + state.aiTokenCreated.name + '）']);
+    if (d.can_create_token) modes.push(['new', '新建令牌并嵌入（使用默认有效期）']);
+    modes.push(['placeholder', '不嵌入令牌（命令中使用占位符）']);
+    var modeEl = h('select', { id: 'aiGenTokenMode', value: g.tokenMode,
+      onchange: function () { g.tokenMode = modeEl.value; render(); } },
+      modes.map(function (m) { return h('option', { value: m[0] }, [m[1]]); }));
+    var newNameEl = h('input', { id: 'aiGenNewName', value: g.newName || '', placeholder: '留空自动命名为 客户端-系统',
+      oninput: function () { g.newName = newNameEl.value; } }, []);
+    var newWriteEl = h('input', { type: 'checkbox', id: 'aiGenNewWrite', checked: !!g.newWrite,
+      onchange: function () { g.newWrite = newWriteEl.checked; } }, []);
+
+    var curClient = clients.filter(function (c) { return c.id === state.aiSnippetClient; })[0];
+    var bridge = (d.bridge_availability || []).filter(function (b) {
+      return b.os === state.aiSnippetOS && b.arch === state.aiSnippetArch;
+    })[0];
+
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['生成 MCP 接入命令']),
+      hint('与「接入主机」一样：选择 AI 客户端与本机系统，生成可直接复制执行的命令，包括设置令牌环境变量、注册 MCP 服务器与安装 Skill。'),
+      h('div', { class: 'grid2' }, [
+        field('AI 客户端', clientEl, curClient && curClient.id === 'bridge'
+          ? '适用于只支持 stdio 的 MCP 客户端：下载 stdio 桥后由客户端以子进程方式启动。' : null),
+        field('本机操作系统', osEl, '指运行 AI 客户端的电脑，不是被升级的主机。')
+      ]),
+      h('div', { class: 'grid2' }, [
+        field('本机架构', archEl, '仅 stdio 桥下载区分架构；x86_64 选 amd64，Apple Silicon / aarch64 选 arm64。'),
+        field('令牌', modeEl)
+      ]),
+      g.tokenMode === 'new' ? h('div', { class: 'grid2' }, [
+        field('新令牌名称', newNameEl),
+        h('div', { class: 'field' }, [h('label', { class: 'ai-check', style: 'margin-top:28px' }, [newWriteEl, ' 允许写操作'])])
+      ]) : null,
+      curClient && curClient.id === 'bridge' && bridge && !bridge.available
+        ? h('div', { class: 'ai-notice warn' }, ['⚠️ 服务端尚未放置 ' + bridge.file + '：请把对应平台的 stdio 桥放入 Agent 二进制目录（server.agent_binary_dir），否则下载会 404。'])
+        : null,
+      state.aiSnippetsErr ? h('div', { class: 'err field', role: 'alert' }, [state.aiSnippetsErr]) : null,
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', id: 'aiGenBtn', disabled: state.aiSnippetsBusy || !clients.length ? 'disabled' : null,
+          onclick: generateAISnippets }, [state.aiSnippetsBusy ? '生成中…' : '生成接入命令'])
+      ])
+    ]);
+  }
+
+  function aiSnippetsCard() {
+    var d = state.aiSnippets;
+    var clientLabel = (d.client && d.client.label) || '';
+    var oses = ((state.ai && state.ai.snippet_meta) || {}).oses || [];
+    var osLabel = (oses.filter(function (o) { return o.id === d.os; })[0] || {}).label || d.os;
+    return h('div', { class: 'card', id: 'aiSnippets' }, [
+      h('h3', {}, ['接入命令：' + clientLabel + ' · ' + osLabel]),
+      d.token_embedded
+        ? h('div', { class: 'ai-notice warn' }, ['⚠️ 命令中已嵌入令牌明文，请勿截图或转发；令牌泄露时请在上方列表立即注销。'])
+        : hint('命令中的令牌为占位符，执行前替换为你的 AI 访问令牌。'),
+      h('ol', { class: 'ai-steps' }, (d.snippets || []).map(function (s) {
+        return h('li', {}, [
+          h('div', { class: 'ai-step-title' }, [s.title]),
+          codeBlock(s.content),
+          s.note ? hint(s.note) : null
+        ]);
+      })),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn ghost small', onclick: function () { state.aiSnippets = null; render(); } }, ['收起'])
+      ])
+    ]);
+  }
+
+  function aiSkillsCard(d) {
+    var skills = d.skills || [];
+    var dirs = d.skill_install_dirs || [];
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['Skills']),
+      hint('Skill 内容已按当前 MCP 服务名、地址与令牌环境变量渲染，解压到客户端的 skills 目录即可被 Agent 发现。' +
+        '「生成接入命令」会自动包含安装步骤。'),
+      dirs.length ? simpleTable(['客户端', '安装目录（项目内）'], dirs, function (x) {
+        return [x.client, h('code', {}, [x.dir + '/'])];
+      }) : null,
+      skills.length ? simpleTable(['名称', '说明', '文件', '下载'], skills, function (s) {
+        return [
+          h('code', {}, [s.name]),
+          s.description,
+          (s.files || []).join('、'),
+          h('button', { class: 'btn ghost small', onclick: function () {
+            aiDownload('/api/ai/skills/' + encodeURIComponent(s.name) + '/archive');
+          } }, ['下载 .tar.gz'])
+        ];
+      }) : h('div', { class: 'muted empty' }, ['没有内嵌 Skill'])
+    ]);
+  }
+
+  function aiChatCard(d) {
+    if (!d.assistant_enabled) {
+      return h('div', { class: 'card' }, [
+        h('h3', {}, ['AI 助手']),
+        hint('内置 AI 助手未启用或未配置 LLM。superadmin 可在「设置 → AI 助手」开启 ai.assistant_enabled，并填写 ai.llm_base_url（OpenAI 兼容）与 ai.llm_model。'),
+        isSuperAdmin() ? h('div', { class: 'toolbar' }, [
+          h('button', { class: 'btn ghost small', onclick: function () { switchView('settings'); } }, ['前往设置'])
+        ]) : null
+      ]);
+    }
+    var history = state.aiChatHistory || (state.aiChatHistory = []);
+    var pending = state.aiChatPending || (state.aiChatPending = []);
+    var log = h('div', { class: 'ai-chat-log', id: 'aiChatLog', 'aria-live': 'polite' },
+      history.length ? history.map(function (m) {
+        var steps = (m.steps || []).length ? h('details', { class: 'ai-chat-steps' }, [
+          h('summary', {}, ['工具调用 ' + m.steps.length + ' 次']),
+          h('ul', {}, m.steps.map(function (s) {
+            return h('li', {}, [h('code', {}, [s.tool]), ' ',
+              s.error ? h('span', { class: 'err' }, ['失败：' + s.error])
+                : (s.pending ? '已生成待确认操作' : h('span', { class: 'muted' }, [s.result || '完成']))]);
+          }))
+        ]) : null;
+        return h('div', { class: 'ai-msg ' + (m.role === 'user' ? 'user' : 'bot') }, [
+          h('div', { class: 'ai-msg-role' }, [m.role === 'user' ? '我' : 'AI 助手']),
+          h('div', { class: 'ai-msg-body' }, [m.content || (m.steps && m.steps.length ? '（无文字回复）' : '')]),
+          m.limit ? hint('已达到单轮最多工具调用步数，可继续追问。') : null,
+          steps
+        ]);
+      }) : [h('div', { class: 'muted empty' }, ['示例：「列出离线的主机」「node_exporter 最近的升级任务失败原因是什么」「为 10.1.255.24-26 预览一次金丝雀升级」'])]);
+    if (state.aiChatBusy) log.appendChild(h('div', { class: 'ai-msg bot' }, [h('div', { class: 'ai-msg-body muted' }, ['思考中…'])]));
+
+    var pendingBox = pending.length ? h('div', {}, [
+      h('div', { class: 'ai-step-title' }, ['待确认操作（' + pending.length + '）'])
+    ].concat(pending.map(function (a) {
+        return h('div', { class: 'ai-notice warn' }, [
+          h('div', { class: 'ai-notice-title' }, [a.title || a.tool]),
+          h('pre', { class: 'code' }, [JSON.stringify(a.args || {}, null, 2)]),
+          a.expires_at ? hint('有效期至 ' + fmtTime(a.expires_at) + '，过期需重新生成。') : null,
+          h('div', { class: 'toolbar' }, [
+            h('button', { class: 'btn small', onclick: function () { executeAIAction(a); } }, ['确认执行']),
+            h('button', { class: 'btn ghost small', onclick: function () { cancelAIAction(a); } }, ['取消'])
+          ])
+        ]);
+      })
+    )) : null;
+
+    var input = h('textarea', { id: 'aiChatInput', rows: '3', placeholder: '输入问题，Ctrl+Enter 发送', value: state.aiChatDraft || '',
+      oninput: function () { state.aiChatDraft = input.value; },
+      onkeydown: function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendAIChat(); } } }, []);
+    return h('div', { class: 'card' }, [
+      h('h3', {}, ['AI 助手']),
+      hint('只读工具自动执行；写操作不会直接执行，而是生成待确认卡片，由你确认后以你的身份执行。' +
+        (d.assistant_allow_write ? '' : '当前未允许助手生成写操作（ai.assistant_allow_write）。') +
+        '⚠️ 对话内容与查询到的数据会发送到配置的 LLM 服务。'),
+      log,
+      pendingBox,
+      state.aiChatErr ? h('div', { class: 'err field', role: 'alert' }, [state.aiChatErr]) : null,
+      field('消息', input),
+      h('div', { class: 'toolbar' }, [
+        h('button', { class: 'btn', id: 'aiChatSend', disabled: state.aiChatBusy ? 'disabled' : null, onclick: sendAIChat },
+          [state.aiChatBusy ? '发送中…' : '发送']),
+        h('button', { class: 'btn ghost', disabled: state.aiChatBusy ? 'disabled' : null, onclick: function () {
+          state.aiChatHistory = []; state.aiChatPending = []; state.aiChatErr = ''; render();
+        } }, ['清空对话'])
+      ])
+    ]);
+  }
+
+  // ========== 主渲染 ==========
   function render() {
     app.innerHTML = '';
     if (!state.user) { app.appendChild(loginView()); return; }
@@ -6578,6 +7071,7 @@
       case 'tasks': body = tasksView(); break;
       case 'audit': body = auditView(); break;
       case 'password': body = passwordView(); break;
+      case 'ai': body = aiView(); break;
       default: body = hostsView();
     }
     app.appendChild(h('div', { class: 'container' }, [body]));

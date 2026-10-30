@@ -13,6 +13,8 @@ type Maintainer struct {
 	db *sql.DB
 	// auditRetention 返回审计日志保留天数（页面可改，热加载）。
 	auditRetention func() int
+	// aiTokenRetention 返回已注销/过期 AI 令牌保留天数（页面可改，热加载）。
+	aiTokenRetention func() int
 }
 
 // New 创建维护器。
@@ -22,6 +24,46 @@ func New(db *sql.DB) *Maintainer {
 
 // SetAuditRetention 注入审计日志保留天数读取函数（<=0 时使用默认 180 天）。
 func (m *Maintainer) SetAuditRetention(fn func() int) { m.auditRetention = fn }
+
+// SetAITokenRetention 注入 AI 令牌（已注销/过期）保留天数读取函数（<=0 时不清理）。
+func (m *Maintainer) SetAITokenRetention(fn func() int) { m.aiTokenRetention = fn }
+
+// CleanupAITokens 删除注销或过期超过保留期的 AI 访问令牌，返回删除条数。
+func (m *Maintainer) CleanupAITokens(ctx context.Context) (int64, error) {
+	if m.aiTokenRetention == nil {
+		return 0, nil
+	}
+	days := m.aiTokenRetention()
+	if days <= 0 {
+		return 0, nil
+	}
+	res, err := m.db.ExecContext(ctx, `
+		DELETE FROM ai_access_tokens
+		WHERE (revoked_at IS NOT NULL AND revoked_at < NOW() - ($1 || ' days')::interval)
+		   OR (expires_at IS NOT NULL AND expires_at < NOW() - ($1 || ' days')::interval)`, days)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// CleanupAIActions 删除过期未执行的 AI 助手操作，以及执行/过期超过保留期（同 AI 令牌保留天数）的记录。
+func (m *Maintainer) CleanupAIActions(ctx context.Context) (int64, error) {
+	days := 0
+	if m.aiTokenRetention != nil {
+		days = m.aiTokenRetention()
+	}
+	res, err := m.db.ExecContext(ctx, `
+		DELETE FROM ai_assistant_actions
+		WHERE (executed_at IS NULL AND expires_at < NOW())
+		   OR ($1 > 0 AND COALESCE(executed_at, expires_at) < NOW() - ($1 || ' days')::interval)`, days)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
 
 // Start 启动自动维护任务（每日凌晨 2 点执行）。
 func (m *Maintainer) Start(ctx context.Context) {
@@ -87,6 +129,20 @@ func (m *Maintainer) runMaintenance(ctx context.Context) {
 
 	// 3. 清理超过保留期的审计日志
 	m.cleanupAuditLogs(ctx)
+
+	// CleanupAITokens 删除注销或过期超过保留期的 AI 访问令牌，返回删除条数。
+	if n, err := m.CleanupAITokens(ctx); err != nil {
+		log.Printf("⚠️ 清理 AI 令牌失败: %v", err)
+	} else if n > 0 {
+		log.Printf("🗑️ 清理 AI 令牌: %d 个", n)
+	}
+
+	// 3.2 清理过期的 AI 助手待确认操作
+	if n, err := m.CleanupAIActions(ctx); err != nil {
+		log.Printf("⚠️ 清理 AI 操作失败: %v", err)
+	} else if n > 0 {
+		log.Printf("🗑️ 清理过期 AI 操作: %d 个", n)
+	}
 
 	// 4. 归档旧任务（保留 90 天）
 	m.archiveOldTasks(ctx)

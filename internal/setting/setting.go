@@ -48,8 +48,11 @@ type Item struct {
 	Note string
 }
 
-// Registry 全部可页面配置项。
-var Registry = []Item{
+// Registry 全部可页面配置项（基础项 + 由 config.AIConfig 自动生成的 AI 项）。
+var Registry = append(baseRegistry, aiRegistry()...)
+
+// baseRegistry 手写的基础配置项。
+var baseRegistry = []Item{
 	// 服务器
 	{Key: "server.external_url", Group: "服务器", Label: "对外访问地址 external_url（生成 Agent 安装命令，如 https://upgrade.example.com）", Type: "string",
 		Get:      func(c *config.Config) string { return c.Server.ExternalURL },
@@ -420,8 +423,8 @@ var Registry = []Item{
 	// Task / 任务创建
 	{Key: "task.host_selector_fields", Group: "Task",
 		Label: "任务可选主机字段（逗号分隔，如 app_code,biz_group,os_family）", Type: "string",
-		Get: func(c *config.Config) string { return c.Task.HostSelectorFields },
-		Set: func(c *config.Config, v string) { c.Task.HostSelectorFields = strings.TrimSpace(v) },
+		Get:  func(c *config.Config) string { return c.Task.HostSelectorFields },
+		Set:  func(c *config.Config, v string) { c.Task.HostSelectorFields = strings.TrimSpace(v) },
 		Note: "为空时禁用字段筛选（仅保留 IP 段）；可选字段：app_code、biz_group、os_family、os_type、account、department、vendor、arch、host_type。"},
 
 	// FlyIAM 集成（与 consul_mgr 复用同一部署）
@@ -667,11 +670,143 @@ type Service struct {
 	db    *sql.DB
 	cfg   *config.Config
 	items map[string]Item
+	// base 为「默认值 → 配置文件 → 环境变量」计算出的基线（加载页面设置之前的值），
+	// 用于「恢复为配置文件值」与来源标注；defaults 为内置默认值。
+	base     *config.Config
+	defaults *config.Config
+	// pageKeys 当前已在页面保存（app_settings 中存在）的键。
+	pageKeys map[string]bool
 }
 
-// NewService 创建设置服务。
+// 设置来源：页面保存 / 配置文件或环境变量 / 内置默认值。
+const (
+	SourcePage      = "page"
+	SourceFileOrEnv = "file_or_env"
+	SourceDefault   = "default"
+)
+
+// NewService 创建设置服务。cfg 此时应为配置文件+环境变量加载后的结果。
 func NewService(db *sql.DB, cfg *config.Config) *Service {
-	return &Service{db: db, cfg: cfg, items: registryMap}
+	s := &Service{db: db, cfg: cfg, items: registryMap, pageKeys: map[string]bool{}}
+	if cfg != nil {
+		s.base = cloneConfig(cfg)
+	}
+	s.defaults = config.Default()
+	return s
+}
+
+// cloneConfig 复制配置（map 字段深拷贝；slice 字段在 Set 中总是整体替换，可共享）。
+func cloneConfig(c *config.Config) *config.Config {
+	cp := *c
+	if c.Server.ExternalBinaries != nil {
+		m := make(map[string]string, len(c.Server.ExternalBinaries))
+		for k, v := range c.Server.ExternalBinaries {
+			m[k] = v
+		}
+		cp.Server.ExternalBinaries = m
+	}
+	return &cp
+}
+
+// sourceOf 返回某项当前值的来源（调用方需持有读锁）。
+func (s *Service) sourceOf(it Item) string {
+	if s.pageKeys[it.Key] {
+		return SourcePage
+	}
+	if s.base != nil && s.defaults != nil && it.Get(s.base) != it.Get(s.defaults) {
+		return SourceFileOrEnv
+	}
+	return SourceDefault
+}
+
+// BaseValue 返回某项在配置文件/环境变量/默认值中的值（secret 脱敏）。
+func (s *Service) BaseValue(key string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	it, ok := s.items[key]
+	if !ok || s.base == nil {
+		return "", false
+	}
+	v := it.Get(s.base)
+	if it.Secret && v != "" {
+		v = MaskedSecret
+	}
+	return v, true
+}
+
+// Reset 删除页面保存的值，恢复为配置文件/环境变量/默认值（立即生效）。
+func (s *Service) Reset(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok := s.items[key]
+	if !ok {
+		return fmt.Errorf("未知设置项 %s", key)
+	}
+	if it.ReadOnly {
+		return fmt.Errorf("设置 %s 为只读项，无需恢复", key)
+	}
+	if s.db == nil {
+		return fmt.Errorf("数据库未初始化")
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM app_settings WHERE key=$1`, key); err != nil {
+		return fmt.Errorf("删除页面设置 %s 失败: %w", key, err)
+	}
+	if s.base != nil {
+		it.Set(s.cfg, it.Get(s.base))
+	}
+	delete(s.pageKeys, key)
+	return nil
+}
+
+// SyncFromDB 用数据库中的页面设置同步内存（多副本场景）：
+// 新增/修改的值写回内存；已被其他副本「恢复为配置文件值」（行已删除）的键回退到基线。
+// 只处理 keys 范围内的已注册、非只读项；返回实际变化的键。
+func (s *Service) SyncFromDB(ctx context.Context, keys []string) ([]string, error) {
+	vals, err := s.ReadValues(ctx, keys...)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := []string{}
+	for _, k := range keys {
+		it, ok := s.items[k]
+		if !ok || it.ReadOnly {
+			continue
+		}
+		v, inDB := vals[k]
+		if !inDB {
+			if s.pageKeys[k] {
+				delete(s.pageKeys, k)
+				if s.base != nil && it.Get(s.cfg) != it.Get(s.base) {
+					it.Set(s.cfg, it.Get(s.base))
+				}
+				changed = append(changed, k)
+			}
+			continue
+		}
+		s.pageKeys[k] = true
+		if it.Secret && IsMasked(v) || v == it.Get(s.cfg) {
+			continue
+		}
+		if it.Validate != nil && it.Validate(v) != nil {
+			continue
+		}
+		it.Set(s.cfg, v)
+		changed = append(changed, k)
+	}
+	return changed, nil
+}
+
+// KeysWithPrefix 返回已注册的、指定前缀的可写设置键。
+func KeysWithPrefix(prefix string) []string {
+	out := []string{}
+	for _, it := range Registry {
+		if !it.ReadOnly && strings.HasPrefix(it.Key, prefix) {
+			out = append(out, it.Key)
+		}
+	}
+	return out
 }
 
 // Load 从数据库加载设置并应用到 Config。
@@ -691,6 +826,9 @@ func (s *Service) Load(ctx context.Context) error {
 		}
 		if it, ok := s.items[k]; ok {
 			it.Set(s.cfg, v)
+			if !it.ReadOnly {
+				s.pageKeys[k] = true
+			}
 		}
 	}
 	return rows.Err()
@@ -798,6 +936,9 @@ func (s *Service) Apply(ctx context.Context, kv map[string]string) ([]string, er
 	// 期间 Snapshot 读到的是提交前的完整旧值或提交后的完整新值）。
 	for _, p := range pending {
 		p.item.Set(s.cfg, p.val)
+		if s.pageKeys != nil {
+			s.pageKeys[p.key] = true
+		}
 		applied = append(applied, p.key)
 	}
 	return applied, nil
@@ -886,6 +1027,8 @@ func (s *Service) View() []map[string]any {
 			// readonly/restart/note 供页面区分「可改且立即生效」
 			// 「可改但需重启」「只读展示」三种情况。
 			"readonly": it.ReadOnly, "restart": it.Restart, "note": it.Note,
+			// source：page（页面保存，优先级最高）/ file_or_env / default。
+			"source": s.sourceOf(it),
 		})
 	}
 	return out
