@@ -1,3 +1,6 @@
+//go:build !windows
+
+// 复用 service_test.go（!windows）中的 newCmd / fakeMgr；脚本为 /bin/sh，仅在类 Unix 上运行。
 package executor
 
 import (
