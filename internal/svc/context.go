@@ -22,6 +22,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/aitoken"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
@@ -57,6 +58,7 @@ type ServiceContext struct {
 	Maintainer *maintenance.Maintainer
 	RBAC       *rbac.Service
 	Audit      *audit.Logger // 审计日志
+	AIToken    *aitoken.Repo // AI 访问令牌
 	// cacheRef 可选 Redis 缓存（单点/集群/哨兵）；未启用时所有读写自动降级。
 	// 用原子指针保存，设置页保存后热替换不会与请求读取产生数据竞争。
 	cacheRef atomic.Pointer[cache.Cache]
@@ -77,6 +79,13 @@ type ServiceContext struct {
 //
 // 必须通过 setting.Service 快照读取：设置页 Apply 会并发写回共享 Config，
 // 直接读 c.Server.AuditRetentionDays 会与写入产生 data race。
+// InvalidateCache 失效缓存前缀（写操作后调用）。
+func (s *ServiceContext) InvalidateCache(ctx context.Context, prefix string) {
+	if c := s.GetCache(); c != nil && c.Enabled() {
+		c.DelPrefix(ctx, prefix)
+	}
+}
+
 func newMaintainer(c *config.Config, db *sql.DB, settings *setting.Service) *maintenance.Maintainer {
 	m := maintenance.New(db)
 	m.SetAuditRetention(func() int {
@@ -85,6 +94,15 @@ func newMaintainer(c *config.Config, db *sql.DB, settings *setting.Service) *mai
 		}
 		if c != nil {
 			return c.Server.AuditRetentionDays
+		}
+		return 0
+	})
+	m.SetAITokenRetention(func() int {
+		if settings != nil {
+			return settings.Snapshot().AI.TokenRetentionDays
+		}
+		if c != nil {
+			return c.AI.TokenRetentionDays
 		}
 		return 0
 	})
@@ -160,6 +178,7 @@ func New(c *config.Config) *ServiceContext {
 		Maintainer:    newMaintainer(c, db, settings),
 		RBAC:          rbac.NewService(db),
 		Audit:         audit.NewLogger(db), // 审计日志
+		AIToken:       aitoken.NewRepo(db),
 		dbMaxOpenBase: c.Database.MaxOpenConns,
 		dbMaxIdleBase: c.Database.MaxIdleConns,
 	}
@@ -297,6 +316,36 @@ func (s *ServiceContext) StartArtifactSettingsWatcher(ctx context.Context, inter
 				return
 			case <-ticker.C:
 				syncOnce()
+			}
+		}
+	}()
+}
+
+// StartAISettingsWatcher 多副本同步 AI 设置（含「恢复为配置文件值」）。
+//
+// 当前副本保存/恢复时立即生效；其他副本按 ai.settings_sync_interval 轮询数据库同步。
+// AI 设置全部在请求时读取快照，无需重建任何对象。
+func (s *ServiceContext) StartAISettingsWatcher(ctx context.Context) {
+	if s == nil || s.Settings == nil || s.DB == nil {
+		return
+	}
+	interval, err := time.ParseDuration(strings.TrimSpace(s.Settings.Snapshot().AI.SettingsSyncInterval))
+	if err != nil || interval <= 0 {
+		log.Printf("⚠️ ai.settings_sync_interval 无效，跳过 AI 设置多副本同步")
+		return
+	}
+	keys := setting.KeysWithPrefix("ai.")
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if changed, err := s.Settings.SyncFromDB(ctx, keys); err == nil && len(changed) > 0 {
+					log.Printf("🔄 已同步其他副本的 AI 设置: %s", strings.Join(changed, ", "))
+				}
 			}
 		}
 	}()

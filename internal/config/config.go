@@ -37,7 +37,9 @@ type Config struct {
 	FlyIAM   FlyIAMConfig   `yaml:"flyiam"`
 	// ConsulMgr 可选：从 consul_mgr 同步主机（多服务组、多套 Consul）。
 	ConsulMgr ConsulMgrConfig `yaml:"consul_mgr"`
-	Log       LogConfig       `yaml:"log"`
+	// AI 可选：MCP 服务、AI 访问令牌、Skills 与内置 AI 助手（见 ai.go）。
+	AI  AIConfig  `yaml:"ai"`
+	Log LogConfig `yaml:"log"`
 }
 
 // ServerConfig 监听与前端。
@@ -326,6 +328,7 @@ func Default() *Config {
 			// 默认提供常用字段；为空则禁用（仅保留 IP 段选择）。
 			HostSelectorFields: "app_code,biz_group,os_family,account",
 		},
+		AI:  defaultAI(),
 		Log: LogConfig{Level: "info"},
 	}
 }
@@ -392,6 +395,9 @@ func Load(path string) (*Config, error) {
 	lockWait, err := time.ParseDuration(strings.TrimSpace(c.Artifact.LockWait))
 	if err != nil || lockWait < time.Second || lockWait > 24*time.Hour {
 		return nil, fmt.Errorf("artifact.lock_wait 应为 1s-24h（示例 30m / 1h）")
+	}
+	if err := c.AI.validate(); err != nil {
+		return nil, err
 	}
 	return c, nil
 }
@@ -510,6 +516,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.ConsulMgr.ServiceToken, "CONSUL_MGR_SERVICE_TOKEN")
 	setInt(&c.ConsulMgr.Timeout, "CONSUL_MGR_TIMEOUT")
 	setStr(&c.Log.Level, "LOG_LEVEL")
+	c.AI.applyEnv()
 
 	if c.Server.Host == "" {
 		c.Server.Host = "0.0.0.0"
@@ -617,6 +624,9 @@ func validExternalName(s string) bool {
 }
 
 var regexpExternalName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// regexpEnvName 合法环境变量名。
+var regexpEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func splitTrim(s string) []string {
 	parts := strings.Split(s, ",")

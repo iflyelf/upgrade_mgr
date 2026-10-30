@@ -62,6 +62,7 @@ func main() {
 	// 其他副本在页面保存的制品上传配置：当前实例由保存请求立即热更新，
 	// 其他副本通过 5 秒轮询同步，无需重启。
 	sc.StartArtifactSettingsWatcher(ctx, 5*time.Second)
+	sc.StartAISettingsWatcher(ctx)
 
 	mux := http.NewServeMux()
 	limiters := registerRoutes(mux, sc)
@@ -75,7 +76,7 @@ func main() {
 	if c := sc.GetCache(); c != nil && c.Enabled() {
 		log.Printf("✅ Redis HTTP 缓存已挂载（TTL %s，前缀 %s）", c.TTL(), c.Status().Prefix)
 	}
-	root = middleware.LimitBody(1<<20, "POST /api/artifacts")(root)
+	root = middleware.LimitBody(1<<20, "POST /api/artifacts", "POST /mcp")(root)
 	// 写请求 CSRF 纵深防御：会话 Cookie 已是 SameSite=Lax，这里再校验
 	// Origin/Referer 与请求 Host（或 CORS/ExternalURL 白名单）一致。
 	// 允许的 Origin 每次请求读取设置快照，保存后立即生效。
@@ -209,9 +210,23 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("POST /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdate(sc))))
 	mux.HandleFunc("GET /api/agents/self-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AgentSelfUpdateStatus(sc))))
 
-	// 需超级管理员（全局配置影响所有租户）
 	mux.HandleFunc("GET /api/settings", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ListSettings(sc))))
 	mux.HandleFunc("PUT /api/settings", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.UpdateSettings(sc))))
+	mux.HandleFunc("DELETE /api/settings/{key}", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ResetSetting(sc))))
+
+	// AI / MCP
+	mux.HandleFunc("POST /mcp", handler.MCPServer(sc))
+	mux.HandleFunc("GET /api/ai/integration", middleware.RequireAuth(auth, handler.AIIntegration(sc)))
+	mux.HandleFunc("POST /api/ai/tokens", middleware.RequireAuth(auth, handler.CreateAIToken(sc)))
+	mux.HandleFunc("GET /api/ai/tokens", middleware.RequireAuth(auth, handler.ListAITokens(sc)))
+	mux.HandleFunc("POST /api/ai/tokens/{id}/revoke", middleware.RequireAuth(auth, handler.RevokeAIToken(sc)))
+	mux.HandleFunc("GET /api/ai/skills", middleware.RequireAuth(auth, handler.ListSkills(sc)))
+	mux.HandleFunc("GET /api/ai/skills/{name}/archive", handler.DownloadSkillWithAuth(sc))
+	mux.HandleFunc("POST /api/ai/chat", middleware.RequireAuth(auth, handler.AIChat(sc)))
+	mux.HandleFunc("POST /api/ai/actions/{id}/execute", middleware.RequireAuth(auth, handler.AIExecuteAction(sc)))
+	mux.HandleFunc("POST /api/ai/actions/{id}/cancel", middleware.RequireAuth(auth, handler.AICancelAction(sc)))
+	mux.HandleFunc("POST /api/ai/snippets", middleware.RequireAuth(auth, handler.AISnippets(sc)))
+	mux.HandleFunc("GET /api/ai/bridge/{name}", handler.DownloadBridge(sc))
 
 	// Agent 网关：register 匿名（需 enroll token）；heartbeat/poll/ack/stage/report 需 Bearer 认证
 	mux.Handle("POST /api/agent/register", middleware.RateLimitMiddleware(registerLimiter)(http.HandlerFunc(handler.AgentRegister(sc))))

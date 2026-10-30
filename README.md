@@ -3146,3 +3146,28 @@ MIT © iflyelf
 - **验证**：`go build ./...`、`go vet ./...` 全绿；新增 `internal/middleware/cache_ttl_test.go`
   与 cache 包 TTL 用例；用真实 Redis（10.1.230.44:7000）验证四种 TTL 组合
   （回退 / 显式 / 超限收敛 / 低于通用值抬升）与读写往返均符合预期。
+
+---
+
+## AI / MCP 接入
+
+upgrade_mgr 内置 **MCP (Model Context Protocol)** 服务器，为 AI 编码助手提供主机查询、任务控制等工具。
+
+### 快速开始
+
+1. 登录后访问「AI 接入」页签
+2. 创建 AI 访问令牌（可选写权限与有效期）
+3. 使用 OpenCode、Claude Code、Codex、Cursor 等客户端连接
+4. 客户端调用 `hosts_list`、`task_create` 等工具
+
+### 配置
+
+```yaml
+ai:
+  mcp_enabled: true
+  mcp_allow_write: true
+  token_prefix: upm
+  token_default_ttl: 720h
+```
+
+详见页面生成的接入命令或 `skills/catalog/upgrade-mgr-ops/SKILL.md`。

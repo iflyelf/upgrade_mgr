@@ -45,3 +45,30 @@ func UpdateSettings(s *svc.ServiceContext) http.HandlerFunc {
 		httpx.OK(w, map[string]any{"applied": applied})
 	}
 }
+
+// ResetSetting 删除页面保存的值，恢复为配置文件/环境变量/默认值：DELETE /api/settings/{key}。
+//
+// 页面设置优先级最高；不提供恢复入口时，一旦在页面保存过，之后修改配置文件将不再生效。
+func ResetSetting(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimSpace(r.PathValue("key"))
+		if err := s.Settings.Reset(r.Context(), key); err != nil {
+			auditOp(s, r, audit.ActionSettingReset, "setting", key, key, err)
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		auditOp(s, r, audit.ActionSettingReset, "setting", key, key, nil)
+		applied := []string{key}
+		if setting.NeedsConsulReload(applied) {
+			s.ReloadConsul()
+		}
+		if setting.NeedsCacheReload(applied) {
+			s.ReloadCache()
+		}
+		if setting.NeedsArtifactReload(applied) {
+			s.ReloadArtifactSettings()
+		}
+		base, _ := s.Settings.BaseValue(key)
+		httpx.OK(w, map[string]any{"key": key, "value": base})
+	}
+}
