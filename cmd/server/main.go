@@ -219,6 +219,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	mux.HandleFunc("GET /api/ai/integration", middleware.RequireAuth(auth, handler.AIIntegration(sc)))
 	mux.HandleFunc("POST /api/ai/tokens", middleware.RequireAuth(auth, handler.CreateAIToken(sc)))
 	mux.HandleFunc("GET /api/ai/tokens", middleware.RequireAuth(auth, handler.ListAITokens(sc)))
+	mux.HandleFunc("POST /api/ai/tokens/batch-delete", middleware.RequireAuth(auth, handler.BatchDeleteAITokens(sc)))
 	mux.HandleFunc("POST /api/ai/tokens/{id}/revoke", middleware.RequireAuth(auth, handler.RevokeAIToken(sc)))
 	mux.HandleFunc("GET /api/ai/skills", middleware.RequireAuth(auth, handler.ListSkills(sc)))
 	mux.HandleFunc("GET /api/ai/skills/{name}/archive", handler.DownloadSkillWithAuth(sc))

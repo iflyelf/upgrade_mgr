@@ -370,6 +370,31 @@ func (r *Repo) Revoke(ctx context.Context, actor *auth.User, id int64) (*Token, 
 	return &t, nil
 }
 
+// Delete 物理删除令牌（任意状态；本人 / 本租户管理员 / superadmin）。
+//
+// 删除有效令牌等同于立即注销：哈希不再存在，后续认证一律失败。
+func (r *Repo) Delete(ctx context.Context, actor *auth.User, id int64) (*Token, error) {
+	if actor == nil {
+		return nil, fmt.Errorf("未认证")
+	}
+	cond, vargs := visibility(actor, 2)
+	args := append([]any{id}, vargs...)
+	var t Token
+	err := r.db.QueryRowContext(ctx, `
+		DELETE FROM ai_access_tokens WHERE id=$1 AND `+cond+`
+		RETURNING id, username, name`, args...).Scan(&t.ID, &t.Username, &t.Name)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("令牌不存在或无权操作")
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.touchMu.Lock()
+	delete(r.lastTouch, id)
+	r.touchMu.Unlock()
+	return &t, nil
+}
+
 // Authenticate 校验明文令牌，返回令牌身份对应的用户与令牌信息。
 func (r *Repo) Authenticate(ctx context.Context, plaintext string) (*auth.User, *Token, error) {
 	plaintext = strings.TrimSpace(plaintext)

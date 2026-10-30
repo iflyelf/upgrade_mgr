@@ -24,6 +24,7 @@ type AIConfig struct {
 	MCPInstructions   string `yaml:"mcp_instructions"`
 	MCPRateLimit      int    `yaml:"mcp_rate_limit"`
 	MCPMaxBodyBytes   int    `yaml:"mcp_max_body_bytes"`
+	MCPListCacheTTL   string `yaml:"mcp_list_cache_ttl"` // tools/list 缓存提示（现代协议）
 	ClientTokenEnv    string `yaml:"client_token_env"`
 
 	// ---- AI 访问令牌 ----
@@ -104,6 +105,7 @@ var AIDurationKeys = map[string]bool{
 	"token_default_ttl":      false,
 	"token_max_ttl":          true,
 	"token_touch_interval":   false,
+	"mcp_list_cache_ttl":     false,
 	"settings_sync_interval": false,
 	"llm_timeout":            false,
 	"assistant_action_ttl":   false,
@@ -122,6 +124,7 @@ func defaultAI() AIConfig {
 		MCPInstructions:   defaultMCPInstructions,
 		MCPRateLimit:      120,
 		MCPMaxBodyBytes:   1 << 20,
+		MCPListCacheTTL:   "5m",
 		ClientTokenEnv:    "UPGRADE_MGR_TOKEN",
 
 		TokenPrefix:         "upm_",

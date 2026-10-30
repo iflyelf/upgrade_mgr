@@ -158,3 +158,41 @@ func AIIntegration(s *svc.ServiceContext) http.HandlerFunc {
 		})
 	}
 }
+
+// BatchDeleteAITokens 批量注销 AI 令牌：POST /api/ai/tokens/batch-delete。
+func BatchDeleteAITokens(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u, ok := auth.FromContext(r.Context())
+		if !ok || u == nil {
+			httpx.Fail(w, http.StatusUnauthorized, "未认证")
+			return
+		}
+		var req struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil || len(req.IDs) == 0 {
+			httpx.Fail(w, http.StatusBadRequest, "请提供令牌 ID 列表")
+			return
+		}
+		if len(req.IDs) > 200 {
+			httpx.Fail(w, http.StatusBadRequest, "单次最多删除 200 个令牌")
+			return
+		}
+
+		deleted := []int64{}
+		failed := []map[string]any{}
+		for _, id := range req.IDs {
+			if _, err := s.AIToken.Delete(r.Context(), u, id); err != nil {
+				failed = append(failed, map[string]any{"id": id, "error": err.Error()})
+			} else {
+				deleted = append(deleted, id)
+			}
+		}
+
+		if len(deleted) > 0 {
+			auditOpDetails(s, r, audit.ActionAITokenDelete, "ai_token_batch_delete",
+				"", "", nil, map[string]any{"deleted": deleted, "failed_count": len(failed)}, nil)
+		}
+		httpx.OK(w, map[string]any{"deleted": deleted, "failed": failed})
+	}
+}
