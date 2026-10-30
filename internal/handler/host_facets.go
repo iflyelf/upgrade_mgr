@@ -19,6 +19,11 @@ func HostFacets(s *svc.ServiceContext) http.HandlerFunc {
 			snap := s.Settings.Snapshot()
 			fieldsStr = strings.TrimSpace(snap.Task.HostSelectorFields)
 		}
+		// ?fields= 显式指定字段（主机页筛选下拉用），不受任务选主机配置影响；
+		// 仍经下方列名白名单过滤。
+		if v := strings.TrimSpace(r.URL.Query().Get("fields")); v != "" {
+			fieldsStr = v
+		}
 		if fieldsStr == "" {
 			httpx.OK(w, map[string]any{"fields": []string{}, "values": map[string][]string{}})
 			return
@@ -30,9 +35,11 @@ func HostFacets(s *svc.ServiceContext) http.HandlerFunc {
 			"biz_group": true, "department": true, "vendor": true, "arch": true, "host_type": true,
 		}
 		var fields []string
+		seen := map[string]bool{}
 		for _, f := range strings.Split(fieldsStr, ",") {
 			f = strings.TrimSpace(f)
-			if f != "" && allowedCols[f] {
+			if f != "" && allowedCols[f] && !seen[f] {
+				seen[f] = true
 				fields = append(fields, f)
 			}
 		}

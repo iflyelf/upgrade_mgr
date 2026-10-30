@@ -98,3 +98,40 @@ test('组件：多选批量删除', async ({ page }) => {
   expect(dialogs.some((m) => m.includes('已删除 2 个组件'))).toBe(true);
   await expect(page.getByText('没有匹配的组件。')).toBeVisible();
 });
+
+
+test('主机：下拉筛选 + URL 恢复 + 按筛选全选只选中筛选结果', async ({ page }) => {
+  test.skip(!DB_URL, '未设置 E2E_DATABASE_URL，跳过主机筛选用例');
+  const tag = 'e2e-hflt-' + Date.now();
+  const app = 'E2EAPP' + Date.now();
+  // 3 台匹配 app_code，2 台不匹配；关键字 tag 隔离其他数据。
+  psql(`INSERT INTO hosts (ip, hostname, app_code, tenant_id, source)
+        SELECT '${tag}-' || g, '${tag}', CASE WHEN g <= 3 THEN '${app}' ELSE 'OTHER' END, 1, 'manual'
+          FROM generate_series(1,5) g`);
+  try {
+    await login(page);
+    await page.locator('input[placeholder="IP/出口 IP/隧道地址/主机名/业务组"]').fill(tag);
+    await page.getByRole('button', { name: '搜索', exact: true }).click();
+    await expect(page.getByText('共 5')).toBeVisible();
+
+    // 下拉筛选：新插入的值会注入为选项（即使不在初始 facets 里）。
+    const appSel = page.getByRole('combobox', { name: '按 app_code 筛选' });
+    await appSel.selectOption(app);
+    await expect(page.getByText('共 3')).toBeVisible();
+    await expect(page).toHaveURL(new RegExp('app_code=' + app));
+
+    // 刷新后筛选条件从 URL 恢复。
+    await page.reload();
+    await expect(page.getByRole('combobox', { name: '按 app_code 筛选' })).toHaveValue(app);
+    await expect(page.getByText('共 3')).toBeVisible();
+
+    await page.getByRole('button', { name: '按筛选条件全选' }).click();
+    await expect(page.getByText('已按筛选条件选中 3 台可删除主机')).toBeVisible();
+
+    await page.getByRole('button', { name: '清除筛选' }).click();
+    await expect(page.getByRole('combobox', { name: '按 app_code 筛选' })).toHaveValue('');
+    await expect(page).not.toHaveURL(/app_code=/);
+  } finally {
+    psql(`DELETE FROM hosts WHERE hostname='${tag}'`);
+  }
+});

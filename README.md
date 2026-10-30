@@ -1965,11 +1965,21 @@ GET  /api/agents/self-update           # 管理员；目标版本、可用二进
 ### 主机管理
 
 ```http
-GET /api/hosts?page=1&size=50           # 分页列出主机（size 最大 500，返回 total/pages）
+GET /api/hosts?page=1&size=50&q=关键字&app_code=&os_family=&account=&agent_status=online
+                                    # 分页列出主机（size 最大 500，返回 total/pages）
+                                    # q: 关键字（IP/出口IP/隧道地址/主机名/业务组）
+                                    # app_code/os_family/account: 精确匹配
+                                    # agent_status: 按页面显示的有效状态筛选（online/offline/unknown等）
+GET /api/hosts/facets?fields=app_code,os_family,account
+                                    # 主机字段去重值（下拉筛选用）；不传 fields 时取 task.host_selector_fields 配置
+GET /api/hosts/deletable-ids?q=&app_code=  # 当前筛选条件下可删除的主机 ID（排除有未完成任务的）
 PUT /api/hosts/{id}                     # 编辑主机业务字段（管理员）
 DELETE /api/hosts/{id}                  # 删除主机（管理员）
+POST /api/host-delete-jobs              # 创建主机批量删除作业（管理员，后台按批执行）
+GET /api/host-delete-jobs/active        # 当前用户的活跃删除作业
+GET /api/host-delete-jobs/{id}          # 作业详情（含已处理数/失败列表）
 GET /api/hosts/{ip}/upgrade-history     # 主机升级历史
-POST /api/hosts/sync                    # 从 Consul 同步主机
+POST /api/hosts/sync                    # 从 Consul 同步主机（超级管理员）
 POST /api/hosts/{id}/tunnel-test        # 从平台侧拨测隧道地址（管理员）
 ```
 
