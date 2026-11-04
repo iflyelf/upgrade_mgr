@@ -48,6 +48,9 @@ func TestWriterRotates(t *testing.T) {
 	if _, err := w.Write([]byte(strings.Repeat("c", 60))); err != nil {
 		t.Fatal(err)
 	}
+	if err := w.LastRotateError(); err != nil {
+		t.Fatalf("日志切割失败: %v", err)
+	}
 
 	read := func(name string) string {
 		b, err := os.ReadFile(filepath.Join(dir, name))

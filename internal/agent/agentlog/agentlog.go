@@ -30,6 +30,8 @@ type Writer struct {
 	size     int64
 	maxBytes int64
 	backups  int
+	// lastRotateErr 记录最近一次切割失败原因，便于诊断/测试（不影响正常写入）。
+	lastRotateErr error
 }
 
 // Open 打开日志文件并返回切割写入器。
@@ -49,9 +51,15 @@ func Open(path string, maxBytes int64, backups int) (*Writer, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return nil, fmt.Errorf("创建日志目录失败: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0640)
+	// 不使用 O_APPEND：Windows 上 O_APPEND 会移除 GENERIC_WRITE，
+	// 导致 Truncate（日志切割）失败。写入由 Writer.mu 串行化并维护文件末尾偏移。
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0640)
 	if err != nil {
 		return nil, fmt.Errorf("打开日志文件失败: %w", err)
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		f.Close()
+		return nil, err
 	}
 	fi, err := f.Stat()
 	if err != nil {
@@ -64,6 +72,13 @@ func Open(path string, maxBytes int64, backups int) (*Writer, error) {
 // Path 返回日志文件路径。
 func (w *Writer) Path() string { return w.path }
 
+// LastRotateError 返回最近一次切割失败原因（正常时为 nil）。
+func (w *Writer) LastRotateError() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastRotateErr
+}
+
 // Write 写入日志；超过上限时先切割。切割失败不阻塞本次写入。
 func (w *Writer) Write(p []byte) (int, error) {
 	w.mu.Lock()
@@ -72,7 +87,9 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return 0, os.ErrClosed
 	}
 	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes {
-		_ = w.rotateLocked()
+		if err := w.rotateLocked(); err != nil {
+			w.lastRotateErr = err
+		}
 	}
 	n, err := w.file.Write(p)
 	w.size += int64(n)
