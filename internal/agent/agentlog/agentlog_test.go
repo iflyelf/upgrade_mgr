@@ -147,6 +147,7 @@ func TestSetupWritesFile(t *testing.T) {
 	if err := Setup(path, 1<<20, 2); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	defer Close()
 	log.Println("hello-agent-log")
 	b, err := os.ReadFile(path)
 	if err != nil {

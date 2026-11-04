@@ -108,15 +108,21 @@ func (w *Writer) rotateLocked() error {
 		}
 	}
 	// 复制当前文件到 .1，再截断当前文件。
-	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+	// 用独立读句柄 + 显式缓冲区，避免 Windows 上 ReadFrom/copy_file_range
+	// 对可写句柄或共享模式不兼容导致轮转失败。
+	src, err := os.Open(w.path)
+	if err != nil {
 		return err
 	}
 	tmp := w.path + ".1.tmp"
 	dst, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
 	if err != nil {
+		src.Close()
 		return err
 	}
-	_, copyErr := io.Copy(dst, w.file)
+	buf := make([]byte, 64*1024)
+	_, copyErr := io.CopyBuffer(dst, src, buf)
+	_ = src.Close()
 	if copyErr == nil {
 		copyErr = dst.Sync()
 	}
@@ -151,7 +157,32 @@ func Setup(path string, maxBytes int64, backups int) error {
 	if err != nil {
 		return err
 	}
+	currentMu.Lock()
+	prev := current
+	current = w
+	currentMu.Unlock()
+	if prev != nil {
+		_ = prev.Close()
+	}
 	log.SetOutput(io.MultiWriter(w, os.Stderr))
 	log.SetFlags(log.LstdFlags)
+	return nil
+}
+
+var (
+	currentMu sync.Mutex
+	current   *Writer
+)
+
+// Close 关闭当前全局日志文件并恢复 stderr 输出。
+func Close() error {
+	currentMu.Lock()
+	w := current
+	current = nil
+	currentMu.Unlock()
+	log.SetOutput(os.Stderr)
+	if w != nil {
+		return w.Close()
+	}
 	return nil
 }

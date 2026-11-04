@@ -99,6 +99,10 @@ func runCmd() {
 		// 文件缺失是首次安装的正常情况；内容损坏则提示运维重新安装。
 		log.Printf("⚠️ 读取状态文件失败（将按新节点处理）: %v", err)
 	}
+	// 记录本次运行的日志参数，自升级时用于刷新 systemd/upstart/SCM 服务配置。
+	cfg.LogPath = *logPath
+	cfg.LogMaxMB = *logMaxMB
+	cfg.LogBackups = *logBackups
 	// --server 支持逗号分隔的多个地址：第一个为当前地址，其余作为备用。
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = splitServers(*serverURL)[0]
@@ -135,6 +139,28 @@ func runCmd() {
 		log.Printf("⚠️ TLS 客户端配置失败: %v", err)
 	} else if client != nil {
 		http.DefaultClient = client
+	}
+
+	// 每次启动自动校正服务配置（仅当命令/日志参数有变化时写入）：
+	// 这样升级二进制后无需重装，systemd/upstart/SCM 也会自动带上最新日志参数，
+	// 并清理旧 upstart 的 stderr 重定向/外部 logrotate。前台运行无服务时自动跳过。
+	serviceURL := cfg.DefaultServerURL
+	if serviceURL == "" {
+		serviceURL = cfg.ServerURL
+	}
+	exe, _ := os.Executable()
+	if changed, err := installer.RefreshService(installer.Options{
+		ServerURL:  serviceURL,
+		ServerURLs: cfg.ServerURLs,
+		BinPath:    exe,
+		StatePath:  cfg.StatePath,
+		LogPath:    cfg.LogPath,
+		LogMaxMB:   cfg.LogMaxMB,
+		LogBackups: cfg.LogBackups,
+	}); err != nil {
+		log.Printf("⚠️ 自动刷新服务配置失败（继续运行）: %v", err)
+	} else if changed {
+		log.Printf("已自动刷新 Agent 服务配置（systemd/upstart/SCM）")
 	}
 
 	run := func(ctx context.Context) error {

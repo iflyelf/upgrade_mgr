@@ -88,8 +88,8 @@
           },
           "code_lang": "bash",
           "code": {
-            "zh": "# 控制台会生成完整的一键命令；手工执行等价于：\ncurl -fsSL -o /tmp/upgrade-agent 'http://\u003c控制台\u003e/api/agent/binary/linux-amd64'\nchmod +x /tmp/upgrade-agent\nsudo /tmp/upgrade-agent install \\\n  --server 'http://\u003c控制台\u003e' \\\n  --enroll-token '\u003c令牌\u003e'\n\nsudo /tmp/upgrade-agent status     # 查看注册/连接状态\nsudo /tmp/upgrade-agent diagnose   # 诊断到控制台的链路\n",
-            "en": "# The console generates this command; manually it is equivalent to:\ncurl -fsSL -o /tmp/upgrade-agent 'http://\u003cconsole\u003e/api/agent/binary/linux-amd64'\nchmod +x /tmp/upgrade-agent\nsudo /tmp/upgrade-agent install \\\n  --server 'http://\u003cconsole\u003e' \\\n  --enroll-token '\u003ctoken\u003e'\n\nsudo /tmp/upgrade-agent status     # registration/connection status\nsudo /tmp/upgrade-agent diagnose   # diagnose connectivity to the console\n"
+            "zh": "# 控制台会生成完整的一键命令；手工执行等价于：\ncurl -fsSL -o /tmp/upgrade-agent 'http://\u003c控制台\u003e/api/agent/binary/linux-amd64'\nchmod +x /tmp/upgrade-agent\nsudo /tmp/upgrade-agent install \\\n  --server 'http://\u003c控制台\u003e' \\\n  --enroll-token '\u003c令牌\u003e'\n\nsudo /tmp/upgrade-agent status     # 查看注册/连接状态\nsudo /tmp/upgrade-agent diagnose   # 诊断到控制台的链路\nsudo /tmp/upgrade-agent logs -f    # 实时查看 Agent 日志（Linux/Windows 通用）\n",
+            "en": "# The console generates this command; manually it is equivalent to:\ncurl -fsSL -o /tmp/upgrade-agent 'http://\u003cconsole\u003e/api/agent/binary/linux-amd64'\nchmod +x /tmp/upgrade-agent\nsudo /tmp/upgrade-agent install \\\n  --server 'http://\u003cconsole\u003e' \\\n  --enroll-token '\u003ctoken\u003e'\n\nsudo /tmp/upgrade-agent status     # registration/connection status\nsudo /tmp/upgrade-agent diagnose   # diagnose connectivity to the console\nsudo /tmp/upgrade-agent logs -f    # tail Agent logs (Linux/Windows)\n"
           }
         },
         {

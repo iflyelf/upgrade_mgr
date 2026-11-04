@@ -82,6 +82,7 @@ systems:
 
             sudo /tmp/upgrade-agent status     # 查看注册/连接状态
             sudo /tmp/upgrade-agent diagnose   # 诊断到控制台的链路
+            sudo /tmp/upgrade-agent logs -f    # 实时查看 Agent 日志（Linux/Windows 通用）
           en: |
             # The console generates this command; manually it is equivalent to:
             curl -fsSL -o /tmp/upgrade-agent 'http://<console>/api/agent/binary/linux-amd64'
@@ -92,6 +93,7 @@ systems:
 
             sudo /tmp/upgrade-agent status     # registration/connection status
             sudo /tmp/upgrade-agent diagnose   # diagnose connectivity to the console
+            sudo /tmp/upgrade-agent logs -f    # tail Agent logs (Linux/Windows)
 
       - no: "2"
         title:

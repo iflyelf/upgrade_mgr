@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/agent/executor"
+	"github.com/iflyelf/upgrade_mgr/internal/agent/installer"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/osinfo"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/selfupdate"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/svcmgr"
@@ -47,8 +48,13 @@ type Config struct {
 	Secret      string
 	// ClockSkew 是指令签名时间戳允许偏移窗口。服务端通过心跳下发并持久化；
 	// 旧 state 不含该字段时 New 会补默认 10m，保持历史行为。
-	ClockSkew     string `json:"clock_skew,omitempty"`
-	StatePath     string
+	ClockSkew string `json:"clock_skew,omitempty"`
+	StatePath string
+	// LogPath/LogMaxMB/LogBackups 是本次运行的文件日志配置（不写入 state）。
+	// 自升级时用于刷新 systemd/upstart/Windows SCM 服务命令行。
+	LogPath       string    `json:"-"`
+	LogMaxMB      int       `json:"-"`
+	LogBackups    int       `json:"-"`
 	LastHeartbeat time.Time `json:"last_heartbeat"` // 用于 watchdog 检测
 	// Version/Variant 是编译期注入的构建信息，不写入 state：
 	// 自升级替换二进制并重启后，新进程会自动使用新值。
@@ -457,6 +463,26 @@ func (a *Agent) executeSelfUpdate(ctx context.Context, cmd protocol.Command) {
 	})
 
 	binPath, _ := os.Executable()
+	// 自升级前刷新服务配置：把最新的日志参数/路径写入 systemd/upstart/SCM，
+	// 并清理旧版 upstart 的 stderr 重定向/外部 logrotate；exit(75) 后
+	// 服务管理器会用新配置拉起新版本。未安装为服务时 RefreshService 自动跳过。
+	serviceURL := a.cfg.DefaultServerURL
+	if serviceURL == "" {
+		serviceURL = a.cfg.ServerURL
+	}
+	if changed, err := installer.RefreshService(installer.Options{
+		ServerURL:  serviceURL,
+		ServerURLs: a.cfg.ServerURLs,
+		BinPath:    binPath,
+		StatePath:  a.cfg.StatePath,
+		LogPath:    a.cfg.LogPath,
+		LogMaxMB:   a.cfg.LogMaxMB,
+		LogBackups: a.cfg.LogBackups,
+	}); err != nil {
+		log.Printf("⚠️ 刷新 Agent 服务配置失败（继续自升级）: %v", err)
+	} else if changed {
+		log.Printf("已刷新 Agent 服务配置（systemd/upstart/SCM）")
+	}
 	if err := selfupdate.Execute(ctx, cmd, binPath, downloadAuth); err != nil {
 		log.Printf("自升级失败: %v", err)
 		a.postStage(cmd.ID, protocol.StageRequest{
@@ -766,7 +792,7 @@ func (a *Agent) saveState() error {
 	if a.cfg.StatePath == "" {
 		return nil
 	}
-	
+
 	// 并发注册保护：如果磁盘 AgentID 已经变化，说明另一个 install --force
 	// 重新注册了，当前进程应该退出，让 systemd 重启并加载新凭据。
 	if a.cfg.AgentID != "" {
@@ -778,7 +804,7 @@ func (a *Agent) saveState() error {
 			}
 		}
 	}
-	
+
 	data, err := json.Marshal(a.cfg)
 	if err != nil {
 		return err
