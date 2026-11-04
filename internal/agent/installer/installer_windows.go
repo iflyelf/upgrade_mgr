@@ -3,6 +3,7 @@
 package installer
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -37,8 +38,11 @@ func installPlatform(opts Options, info osinfo.Info) error {
 		}
 		_ = s.Delete()
 		_ = s.Close()
-		// 服务删除后句柄释放可能有延迟，稍等避免 CreateService 报“已标记为删除”。
-		time.Sleep(500 * time.Millisecond)
+	}
+	// SCM 删除服务是异步的：必须等服务名真正消失，否则 CreateService 会返回
+	// ERROR_SERVICE_MARKED_FOR_DELETE。最多等待 60 秒，期间继续尝试 stop/delete。
+	if err := waitServiceGone(mg, 60*time.Second); err != nil {
+		return fmt.Errorf("旧服务仍待删除，请稍后重试: %w", err)
 	}
 
 	cfg := mgr.Config{
@@ -53,9 +57,9 @@ func installPlatform(opts Options, info osinfo.Info) error {
 		cfg.Password = opts.ServicePassword
 	}
 	// 服务刚删除时句柄可能仍标记为待删除，CreateService 会返回
-	// ERROR_SERVICE_MARKED_FOR_DELETE；短暂重试即可。
+	// ERROR_SERVICE_MARKED_FOR_DELETE；持续重试最多 60 秒。
 	var s *mgr.Service
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 120; i++ {
 		s, err = mg.CreateService(ServiceName, opts.BinPath, cfg,
 			"run", "--server", opts.ServerURL, "--state", opts.StatePath,
 			"--log", opts.LogPath, "--log-max-mb", strconv.Itoa(opts.LogMaxMB),
@@ -63,7 +67,7 @@ func installPlatform(opts Options, info osinfo.Info) error {
 		if err == nil {
 			break
 		}
-		if err != windows.ERROR_SERVICE_MARKED_FOR_DELETE {
+		if !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
 			return fmt.Errorf("创建 Windows 服务失败: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -114,6 +118,34 @@ func waitStopped(s *mgr.Service, d time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("等待服务停止超时（%s）", d)
+}
+
+// waitServiceGone 等待服务名从 SCM 中真正消失。
+//
+// Delete 只是标记删除；若仍有进程/句柄持有服务，CreateService 会返回
+// ERROR_SERVICE_MARKED_FOR_DELETE。这里持续尝试 stop/delete 直到 OpenService
+// 返回“不存在”或超时。
+func waitServiceGone(mg *mgr.Mgr, d time.Duration) error {
+	deadline := time.Now().Add(d)
+	for {
+		s, err := mg.OpenService(ServiceName)
+		if err != nil {
+			if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+				return nil
+			}
+			if !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+				return err
+			}
+		} else {
+			_, _ = s.Control(svc.Stop)
+			_ = s.Delete()
+			_ = s.Close()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("等待服务删除超时（%s）", d)
+		}
+		time.Sleep(1 * time.Second)
+	}
 }
 
 // installWatchdog 注册每分钟运行的计划任务，作为 SCM 之外的兜底。
