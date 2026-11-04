@@ -5,6 +5,8 @@ package binswap
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 )
 
 // oldSuffix 是 Windows 上被换下文件的临时后缀。
@@ -16,12 +18,19 @@ const oldSuffix = ".old"
 
 // replaceFile Windows 替换：旧文件改名让位 → 新文件就位 → 尽力清理 .old。
 func replaceFile(src, dst string) error {
-	old := dst + oldSuffix
-	_ = os.Remove(old) // 上次残留（旧进程已退出时才能删掉，忽略失败）
+	old := fmt.Sprintf("%s%s.%d", dst, oldSuffix, time.Now().UnixNano())
 
 	if _, err := os.Stat(dst); err == nil {
-		if err := os.Rename(dst, old); err != nil {
-			return fmt.Errorf("重命名旧文件失败（文件可能被占用）: %w", err)
+		var renameErr error
+		for i := 0; i < 60; i++ {
+			renameErr = os.Rename(dst, old)
+			if renameErr == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if renameErr != nil {
+			return fmt.Errorf("重命名旧文件失败（文件可能被占用）: %w", renameErr)
 		}
 	}
 	if err := os.Rename(src, dst); err != nil {
@@ -42,9 +51,13 @@ func removeFile(path string) error {
 	return os.Remove(path)
 }
 
-// CleanupOld 删除上次替换遗留的 <path>.old 文件。
+// CleanupOld 删除上次替换遗留的 <path>.old / <path>.old.<时间戳> 文件。
 //
 // Agent 启动时调用：新版本已就位，旧进程已退出，此时可以安全清理。
 func CleanupOld(path string) {
 	_ = os.Remove(path + oldSuffix)
+	matches, _ := filepath.Glob(path + oldSuffix + ".*")
+	for _, m := range matches {
+		_ = os.Remove(m)
+	}
 }

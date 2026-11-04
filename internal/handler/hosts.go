@@ -56,11 +56,15 @@ type Host struct {
 	AgentBuildHash    string            `json:"agent_build_hash"`
 	AgentBuildVariant string            `json:"agent_build_variant"`
 	AgentStatus       string            `json:"agent_status"`
-	AgentUpdateStatus string            `json:"agent_update_status,omitempty"`
-	AgentUpdateStage  string            `json:"agent_update_stage,omitempty"`
-	AgentUpdateLog    string            `json:"agent_update_log,omitempty"`
-	AgentUpdateAt     *time.Time        `json:"agent_update_at,omitempty"`
-	Source            string            `json:"source"`
+	// Maintenance 表示主机处于升级/维护租约内，此时不应因心跳超时显示离线。
+	Maintenance       bool       `json:"maintenance"`
+	MaintenanceUntil  *time.Time `json:"maintenance_until,omitempty"`
+	MaintenanceReason string     `json:"maintenance_reason,omitempty"`
+	AgentUpdateStatus string     `json:"agent_update_status,omitempty"`
+	AgentUpdateStage  string     `json:"agent_update_stage,omitempty"`
+	AgentUpdateLog    string     `json:"agent_update_log,omitempty"`
+	AgentUpdateAt     *time.Time `json:"agent_update_at,omitempty"`
+	Source            string     `json:"source"`
 }
 
 // hostOfflineAfter 返回离线判定阈值；解析失败时回退默认 1m，避免配置错误导致列表失效。
@@ -118,7 +122,9 @@ func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int)
 	// 有 Agent 且心跳超时 → offline；否则取库里的状态，空值视为 unknown。
 	// 未接入 Agent 的主机（如 Consul 同步）显示「未知」，因此按 unknown 筛选命中，而不是 offline。
 	if statusFilter := strings.TrimSpace(q.Get("agent_status")); statusFilter != "" {
-		where = append(where, "(CASE WHEN COALESCE(h.agent_id,'')<>'' AND (h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+
+		where = append(where, "(CASE WHEN h.maintenance_until IS NOT NULL AND h.maintenance_until > NOW() "+
+			"THEN COALESCE(NULLIF(h.agent_status,''),'upgrading') "+
+			"WHEN COALESCE(h.agent_id,'')<>'' AND (h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+
 			offlineInterval+") THEN 'offline' ELSE COALESCE(NULLIF(h.agent_status,''),'unknown') END)=$"+strconv.Itoa(i))
 		args = append(args, statusFilter)
 		i++
@@ -170,7 +176,8 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			        h.hostname, h.os_family, h.os_type, h.arch, h.account, h.app_code,
 			        h.biz_group, h.department, h.vendor, h.host_type, COALESCE(h.agent_id,''),
 			        h.agent_version, COALESCE(h.agent_build_version,''), COALESCE(h.agent_build_hash,''),
-			        COALESCE(h.agent_build_variant,''), h.agent_status, h.source, h.last_seen
+			        COALESCE(h.agent_build_variant,''), h.agent_status, h.source, h.last_seen,
+			        h.maintenance_until, COALESCE(h.maintenance_reason,'')
 			   FROM hosts h`+whereSQL+
 				" ORDER BY h.ip LIMIT $"+strconv.Itoa(i)+" OFFSET $"+strconv.Itoa(i+1), listArgs...)
 		if err != nil {
@@ -185,6 +192,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			var checkOK sql.NullBool
 			var checkAt sql.NullTime
 			var lastSeen sql.NullTime
+			var maintenanceUntil sql.NullTime
 			var customRaw []byte
 			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerURLOverride,
 				&h.ServerURLIsAuto, &h.AgentServerURL, &h.DefaultServerURL,
@@ -193,15 +201,27 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 				&h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
 				&h.Account, &h.AppCode, &h.BizGroup, &h.Department, &h.Vendor, &h.HostType,
 				&h.AgentID, &h.AgentVersion, &h.AgentBuildVersion, &h.AgentBuildHash,
-				&h.AgentBuildVariant, &h.AgentStatus, &h.Source, &lastSeen); err != nil {
+				&h.AgentBuildVariant, &h.AgentStatus, &h.Source, &lastSeen,
+				&maintenanceUntil, &h.MaintenanceReason); err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
 			}
-			// 计算有效状态：如果 last_seen 超时或为空（且有 agent_id），覆盖为 offline。
-			// 没有 agent_id 的主机（来自 Consul 同步）保持 unknown。
-			// 规则与 hostListFilter 的 agent_status 筛选一致，空状态视为 unknown。
+			// 计算有效状态：
+			//   - 维护/升级租约内（maintenance_until > NOW()）不覆盖为 offline，
+			//     保留 upgrading/restarting，避免升级重启窗口被误判掉线；
+			//   - 无租约且 last_seen 超时（且有 agent_id）→ offline；
+			//   - 没有 agent_id 的主机（来自 Consul 同步）保持 unknown。
+			if maintenanceUntil.Valid {
+				t := maintenanceUntil.Time
+				h.MaintenanceUntil = &t
+				h.Maintenance = t.After(time.Now())
+			}
 			if h.AgentID != "" {
-				if !lastSeen.Valid || time.Since(lastSeen.Time) > d {
+				if h.Maintenance {
+					if h.AgentStatus == "" {
+						h.AgentStatus = "upgrading"
+					}
+				} else if !lastSeen.Valid || time.Since(lastSeen.Time) > d {
 					h.AgentStatus = "offline"
 				}
 			}

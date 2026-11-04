@@ -135,6 +135,79 @@ func TestListHostsIncludesNetworkFields(t *testing.T) {
 	}
 }
 
+// TestListHostsMaintenanceNotOffline 维护/升级租约内不应因心跳超时显示离线。
+func TestListHostsMaintenanceNotOffline(t *testing.T) {
+	db, sc := setupHostDB(t)
+	prefix := fmt.Sprintf("maint-test-%d", time.Now().UnixNano())
+	var maintID, staleID int64
+	if err := db.QueryRow(`
+		INSERT INTO hosts (ip, hostname, tenant_id, source, agent_id, agent_status,
+		                   last_seen, maintenance_until, maintenance_reason)
+		VALUES ($1, 'maint', 1, 'manual', 'agent-maint', 'upgrading',
+		        NOW() - INTERVAL '5 minutes', NOW() + INTERVAL '5 minutes', 'upgrading')
+		RETURNING id`, prefix+"-maint").Scan(&maintID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`
+		INSERT INTO hosts (ip, hostname, tenant_id, source, agent_id, agent_status, last_seen)
+		VALUES ($1, 'stale', 1, 'manual', 'agent-stale', 'online', NOW() - INTERVAL '5 minutes')
+		RETURNING id`, prefix+"-stale").Scan(&staleID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip LIKE $1`, prefix+"%") })
+
+	listHosts := func(qs string) []Host {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/hosts?q="+prefix+qs, nil)
+		req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+		rec := httptest.NewRecorder()
+		ListHosts(sc)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("列表查询失败 %d: %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Data struct {
+				List []Host `json:"list"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("解析响应: %v", err)
+		}
+		return out.Data.List
+	}
+
+	list := listHosts("")
+	var maint, stale *Host
+	for i := range list {
+		switch list[i].ID {
+		case maintID:
+			maint = &list[i]
+		case staleID:
+			stale = &list[i]
+		}
+	}
+	if maint == nil || stale == nil {
+		t.Fatalf("未返回测试主机: %+v", list)
+	}
+	if !maint.Maintenance || maint.AgentStatus != "upgrading" {
+		t.Fatalf("维护窗口内应为 upgrading: %+v", *maint)
+	}
+	if stale.Maintenance || stale.AgentStatus != "offline" {
+		t.Fatalf("无维护租约且心跳超时应为 offline: %+v", *stale)
+	}
+
+	// 状态筛选也应遵循维护窗口规则。
+	filtered := listHosts("&agent_status=upgrading")
+	for _, h := range filtered {
+		if h.ID == staleID {
+			t.Fatalf("offline 主机不应出现在 upgrading 筛选中: %+v", h)
+		}
+	}
+	if len(filtered) != 1 || filtered[0].ID != maintID {
+		t.Fatalf("upgrading 筛选应只命中维护主机: %+v", filtered)
+	}
+}
+
 // TestHostTunnelTestProbesAddress 验证拨测接口：可达的平台地址返回成功与阶段明细。
 func TestHostTunnelTestProbesAddress(t *testing.T) {
 	db, sc := setupHostDB(t)

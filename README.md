@@ -589,6 +589,14 @@ Get-Content "$env:ProgramData\upgrade-agent\state.json"   # 注册凭据（仅�
 - 如果是在 **cmd** 里操作，先执行 `powershell -NoProfile -ExecutionPolicy Bypass` 再粘贴命令；
 - 服务以 `LocalSystem` 运行，重启后自动恢复；失败恢复动作 5s/10s/30s 自动重启；
   另注册计划任务 `upgrade-agent-watchdog` 每分钟兜底；
+- **覆盖安装提示“旧文件无法让位 / Access is denied”**：新版安装器会自动停服务、禁用看门狗、
+  清理残留 Agent 进程，并用唯一 `.old.<时间戳>` 备份名重试。若仍失败，以管理员执行：
+  ```cmd
+  sc stop upgrade-agent
+  schtasks /Change /TN upgrade-agent-watchdog /DISABLE
+  taskkill /F /IM upgrade-agent.exe
+  ```
+  然后重新运行安装命令；安装成功后会重新启用/重建看门狗。
 - 默认路径：`%ProgramFiles%\upgrade-agent\upgrade-agent.exe`、`%ProgramData%\upgrade-agent\state.json`；
 - 卸载：`& "$env:ProgramFiles\upgrade-agent\upgrade-agent.exe" uninstall`；
 - **平台地址填写**：Windows 主机若只能通过专线/VPN 隧道访问平台，在主机页「编辑」里填
@@ -1291,6 +1299,10 @@ Agent 注册/心跳会上报 `build_version`、自身二进制 SHA256（`build_h
 服务配置中的 `ExecStart`/`exec` 行，把最新的 `--log`、`--log-max-mb`、`--log-backups`
 写入服务配置；只替换命令/日志相关行，保留其他自定义配置。旧版 upstart 的 stderr 重定向
 和外部 logrotate 也会自动清理。无需手工重装 Agent 或修改 unit/init 文件。
+
+**升级期间不掉线**：自升级开始时会申请维护租约（`hosts.maintenance_until`），主机列表在
+租约内保持「升级中」状态，不会因为服务重启窗口（SCM 5 秒 / systemd/upstart 重启）而
+误判为离线；租约过期或 Agent 真正失联后才会恢复离线判定。
 
 **旧 Agent 签名路径自动探测**：旧 Agent 注册时默认按 legacy `id` 签名。若目标 Agent 实际
 只支持 `signed_path`，首次会以「签名不匹配」拒绝；服务端自动把该 Agent 的 legacy 签名路径
