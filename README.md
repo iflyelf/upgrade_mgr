@@ -2203,6 +2203,14 @@ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
 保存设置后重启服务端，并让 Agent 重新注册（`install --force` 或删除主机后重装）。页面现在会优先显示 Agent 上报的出口 IP，并把注册来源作为次要信息展示。
 
+> **升级服务端不会改写已有 `hosts.ip`**：已经注册成 127.0.0.1 的主机必须删除旧记录后重新注册，否则页面仍会显示旧的注册来源。
+>
+> 新版服务端在注册时会打印一行日志，便于确认链路：
+> ```text
+> Agent 注册来源: host="..." remote=127.0.0.1:xxx resolved=10.0.68.133 xff="10.0.68.133" x_real_ip="10.0.68.133" trust_proxy=true trusted=[127.0.0.1 ::1]
+> ```
+> 如果 `resolved` 仍是 127.0.0.1，说明 Nginx 没传 XFF，或 Agent 走了本机代理端口。
+
 如果 Agent 是通过本机代理端口（如 127.0.0.1:7890）连接控制台，服务端可能拿不到 XFF，此时需要改为直连控制台地址，或后续引入机器唯一 ID 作为主机身份。
 
 ### Q3: 制品上传失败？

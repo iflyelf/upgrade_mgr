@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -51,6 +52,12 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 
 		snap := s.ConfigSnapshot()
 		hostname := cleanAgentText(req.Hostname, 255)
+		// 注册来源排查：远程地址、XFF、X-Real-IP 与最终采用的 IP 一起记录。
+		// 若 resolved 仍是 127.0.0.1，检查 Nginx 是否传递 XFF 以及受信代理列表。
+		log.Printf("Agent 注册来源: host=%q remote=%s resolved=%s xff=%q x_real_ip=%q trust_proxy=%v trusted=%v",
+			hostname, r.RemoteAddr, ip,
+			r.Header.Get("X-Forwarded-For"), r.Header.Get("X-Real-IP"),
+			snap.Server.TrustProxy, snap.Server.TrustedProxies)
 		osName := strings.ToLower(cleanAgentText(req.OS, 64))
 		osVersion := cleanAgentText(req.OSVersion, 64)
 		kernel := cleanAgentText(req.Kernel, 128)
