@@ -124,6 +124,7 @@ sudo /tmp/upgrade-agent install \
 
 sudo /tmp/upgrade-agent status     # 查看注册/连接状态
 sudo /tmp/upgrade-agent diagnose   # 诊断到控制台的链路
+sudo /tmp/upgrade-agent logs -f    # 实时查看 Agent 日志（Linux/Windows 通用）
 ```
 
 **2. 组件 选择 Linux 示例**
@@ -581,6 +582,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://your-ser
 ```powershell
 Get-Service upgrade-agent            # 状态应为 Running，启动类型 Automatic
 Get-Content "$env:ProgramData\upgrade-agent\state.json"   # 注册凭据（仅管理员可读）
+& 'C:\Program Files\upgrade-agent\upgrade-agent.exe' logs -f  # 实时查看 Agent 日志
 ```
 
 - 如果是在 **cmd** 里操作，先执行 `powershell -NoProfile -ExecutionPolicy Bypass` 再粘贴命令；
@@ -1219,6 +1221,24 @@ upgrade-agent status --state /x.json # 指定状态文件
 待补报条数、**最近一次切换（从哪到哪、原因、时间）**、TLS 是否启用。
 只读取本地 state，不访问服务端，因此断网也能用；绝不输出 token/secret。
 未注册时退出码为 `2`，便于巡检脚本区分。
+
+**查看 Agent 日志：`upgrade-agent logs`**
+
+Linux / Windows 使用同一命令，Agent 自身会把日志写入固定文件并自动切割：
+
+```bash
+upgrade-agent logs                 # 显示最后 100 行并持续跟随（默认 -f）
+upgrade-agent logs -n 300          # 显示最后 300 行后跟随
+upgrade-agent logs --follow=false  # 只显示最后 100 行，不跟随
+upgrade-agent logs --log /path/to/upgrade-agent.log  # 自定义日志路径
+```
+
+- Linux 默认：`/var/log/upgrade-agent.log`
+- Windows 默认：`%ProgramData%\upgrade-agent\logs\upgrade-agent.log`
+- 自动切割：默认单文件 10MB、保留 5 份（`.1` ~ `.5`）；安装时可调整
+  `--log-max-mb` / `--log-backups`。
+- Linux systemd 仍可通过 `journalctl -u upgrade-agent -f` 查看；文件日志与 journal 同时存在。
+- `Ctrl+C` 退出实时跟随，不影响 Agent 服务。
 
 **手动拨测**
 
@@ -2112,22 +2132,23 @@ initctl status upgrade-agent
 # 或
 service upgrade-agent status
 
-# 查看日志（新版 Agent 固定写入该文件）
+# 推荐：Agent 自带日志查看/实时跟随
+upgrade-agent logs -f
+
+# 直接看文件也可以
 tail -f /var/log/upgrade-agent.log
 
 # 排查启动/注册问题
 initctl restart upgrade-agent
 
-# 旧版本尚未重定向日志时：查看 init/upstart 输出
+# 旧版本 Agent 尚未写文件日志时：查看 init/upstart 输出
 grep -i upgrade-agent /var/log/messages
 ```
 
-> CentOS 6 的 upstart 默认把任务输出送到控制台。新版 upstart 模板已改为
-> `>>/var/log/upgrade-agent.log 2>&1`，并安装 logrotate（每周轮转、保留 4 份）。
-> 若 `/var/log/upgrade-agent.log` 不存在，说明 Agent 还是旧版 upstart 配置：
-> 重新执行 `upgrade-agent install ...`，或手工在 `/etc/init/upgrade-agent.conf`
-> 的启动行追加 `>>/var/log/upgrade-agent.log 2>&1` 后
-> `initctl reload-configuration && initctl restart upgrade-agent`。
+> 新版 Agent 自己写 `/var/log/upgrade-agent.log` 并自动切割（默认 10MB × 5 份），
+> 不再依赖 upstart 的 stdout 重定向或外部 logrotate。
+> 若文件不存在，说明 Agent 还是旧版本：升级 Agent 或重新执行
+> `upgrade-agent install ...` 即可，不需要手工修改 `/etc/init/upgrade-agent.conf`。
 >
 > 任务执行过程日志（下载/启动/退出码等）不以主机文件为准，直接在控制台
 > 「任务 → 详情日志」查看；主机本地日志主要用于排查 Agent 自身的连接、注册与重启问题。

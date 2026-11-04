@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/iflyelf/upgrade_mgr/internal/agent/agentlog"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/agentpath"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/agentrun"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/binswap"
@@ -53,6 +54,8 @@ func main() {
 		watchdogCmd()
 	case "status":
 		statusCmd()
+	case "logs":
+		logsCmd()
 	case "diagnose":
 		diagnoseCmd()
 	case "self-update", "upgrade":
@@ -75,7 +78,21 @@ func runCmd() {
 	tlsCA := fs.String("tls-ca", "", "可选：校验服务端证书的 CA 文件（PEM）")
 	tlsCert := fs.String("tls-cert", "", "可选：客户端证书（双向 TLS）")
 	tlsKey := fs.String("tls-key", "", "可选：客户端私钥（双向 TLS）")
+	logPath := fs.String("log", agentpath.LogPath(), "日志文件路径")
+	logMaxMB := fs.Int("log-max-mb", 10, "单个日志文件上限（MB）")
+	logBackups := fs.Int("log-backups", agentlog.DefaultBackups, "保留历史日志份数")
 	fs.Parse(os.Args[2:])
+	if *logMaxMB <= 0 {
+		*logMaxMB = 10
+	}
+	if *logBackups < 1 {
+		*logBackups = agentlog.DefaultBackups
+	}
+	// 先初始化文件日志：Linux systemd/upstart 与 Windows SCM 都统一写文件，
+	// `upgrade-agent logs` 无需区分平台即可查看。
+	if err := agentlog.Setup(*logPath, int64(*logMaxMB)<<20, *logBackups); err != nil {
+		log.Printf("⚠️ 初始化文件日志失败（仅输出到控制台）: %v", err)
+	}
 
 	cfg, err := agentrun.LoadState(*statePath)
 	if err != nil && !os.IsNotExist(err) {
@@ -194,6 +211,7 @@ func usage() {
   uninstall    卸载
   watchdog     保活看门狗（cron / 计划任务调用）
   status       打印连接地址、备用列表、最近切换原因等排查信息
+  logs         查看/实时跟随 Agent 日志（-f 默认开启）
   diagnose     主动拨测服务端链路（DNS/TCP/TLS/HTTP，可选鉴权心跳）
   self-update  自升级（P3）
   upgrade      单机升级指定组件（P3）
@@ -214,6 +232,9 @@ func installCmd() {
 	tlsKey := fs.String("tls-key", "", "可选：客户端私钥（双向 TLS）")
 	serviceAccount := fs.String("service-account", "", "可选：Windows 服务运行账户（留空为 LocalSystem）")
 	servicePassword := fs.String("service-password", "", "可选：服务账户密码（gMSA 可留空）")
+	logPath := fs.String("log", agentpath.LogPath(), "日志文件路径")
+	logMaxMB := fs.Int("log-max-mb", 10, "单个日志文件上限（MB）")
+	logBackups := fs.Int("log-backups", agentlog.DefaultBackups, "保留历史日志份数")
 	fs.Parse(os.Args[2:])
 	if *serverURL == "" {
 		fmt.Fprintln(os.Stderr, "错误: --server 必填")
@@ -224,6 +245,7 @@ func installCmd() {
 		BinPath: *binPath, StatePath: *statePath, InstallCron: *installCron,
 		Force: *force, TLSCA: *tlsCA, TLSCert: *tlsCert, TLSKey: *tlsKey,
 		ServiceAccount: *serviceAccount, ServicePassword: *servicePassword,
+		LogPath: *logPath, LogMaxMB: *logMaxMB, LogBackups: *logBackups,
 	}
 	if err := installer.Install(opts); err != nil {
 		log.Fatalf("安装失败: %v", err)
@@ -245,6 +267,28 @@ func watchdogCmd() {
 	fs.Parse(os.Args[2:])
 	if err := watchdog.Check(*statePath, *binPath, *threshold); err != nil {
 		log.Printf("watchdog: %v", err)
+		os.Exit(1)
+	}
+}
+
+// logsCmd 查看/实时跟随 Agent 日志。
+//
+// Linux/Windows 使用同一命令；默认路径由 agentpath.LogPath 决定。
+func logsCmd() {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	logPath := fs.String("log", agentpath.LogPath(), "日志文件路径")
+	lines := fs.Int("n", 100, "启动时显示最后 N 行")
+	fs.IntVar(lines, "lines", 100, "启动时显示最后 N 行")
+	follow := fs.Bool("f", true, "实时跟随新增日志")
+	fs.BoolVar(follow, "follow", true, "实时跟随新增日志")
+	fs.Parse(os.Args[2:])
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Printf("日志文件: %s\n", *logPath)
+	if err := agentlog.Tail(ctx, *logPath, *lines, *follow, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "读取日志失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "提示: 确认 Agent 已启动；自定义路径可用 --log 指定\n")
 		os.Exit(1)
 	}
 }

@@ -5,6 +5,7 @@ package installer
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,7 +53,9 @@ func installPlatform(opts Options, info osinfo.Info) error {
 	var s *mgr.Service
 	for i := 0; i < 10; i++ {
 		s, err = mg.CreateService(ServiceName, opts.BinPath, cfg,
-			"run", "--server", opts.ServerURL, "--state", opts.StatePath, "--service")
+			"run", "--server", opts.ServerURL, "--state", opts.StatePath,
+			"--log", opts.LogPath, "--log-max-mb", strconv.Itoa(opts.LogMaxMB),
+			"--log-backups", strconv.Itoa(opts.LogBackups), "--service")
 		if err == nil {
 			break
 		}

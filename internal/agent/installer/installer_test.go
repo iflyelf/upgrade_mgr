@@ -111,28 +111,55 @@ func TestWriteInitialStateForceOverwritesCredentials(t *testing.T) {
 	}
 }
 
-// TestUpstartTemplateLogsToFile CentOS 6 的 upstart 任务必须把日志重定向到固定文件。
-func TestUpstartTemplateLogsToFile(t *testing.T) {
-	content, err := render("upgrade-agent.conf.tmpl", Options{
-		BinPath:   "/usr/local/bin/upgrade-agent",
-		ServerURL: "http://mgr.example.com:8090",
-		StatePath: "/var/lib/upgrade-agent/state.json",
+// TestSystemdTemplateIncludesLogFlags systemd 服务也必须显式传入日志参数。
+func TestSystemdTemplateIncludesLogFlags(t *testing.T) {
+	content, err := render("upgrade-agent.service.tmpl", Options{
+		BinPath:    "/usr/local/bin/upgrade-agent",
+		ServerURL:  "http://mgr.example.com:8090",
+		StatePath:  "/var/lib/upgrade-agent/state.json",
+		LogPath:    "/var/log/upgrade-agent.log",
+		LogMaxMB:   10,
+		LogBackups: 5,
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	for _, want := range []string{
-		">>/var/log/upgrade-agent.log 2>&1",
+		"--log /var/log/upgrade-agent.log",
+		"--log-max-mb 10",
+		"--log-backups 5",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("systemd 模板缺少 %q:\n%s", want, content)
+		}
+	}
+}
+
+// TestUpstartTemplateIncludesLogFlags upstart 模板必须带文件日志参数，由 Agent 自切割。
+func TestUpstartTemplateIncludesLogFlags(t *testing.T) {
+	content, err := render("upgrade-agent.conf.tmpl", Options{
+		BinPath:    "/usr/local/bin/upgrade-agent",
+		ServerURL:  "http://mgr.example.com:8090",
+		StatePath:  "/var/lib/upgrade-agent/state.json",
+		LogPath:    "/var/log/upgrade-agent.log",
+		LogMaxMB:   10,
+		LogBackups: 5,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, want := range []string{
+		"--log /var/log/upgrade-agent.log",
+		"--log-max-mb 10",
+		"--log-backups 5",
 		"respawn limit 10 5",
-		"script",
-		"end script",
 	} {
 		if !strings.Contains(string(content), want) {
 			t.Fatalf("upstart 模板缺少 %q:\n%s", want, content)
 		}
 	}
-	if !strings.Contains(agentLogrotateConfig, "/var/log/upgrade-agent.log") {
-		t.Fatalf("logrotate 配置未指向 Agent 日志: %s", agentLogrotateConfig)
+	if strings.Contains(string(content), ">>/var/log/upgrade-agent.log") {
+		t.Fatalf("upstart 不应再重定向 stderr，避免与 Agent 文件日志重复:\n%s", content)
 	}
 }
 
