@@ -130,8 +130,20 @@ func Install(opts Options) error {
 	}
 	info := osinfo.Detect()
 
-	// 0. 平台预处理：Windows 上先停掉旧服务，避免安装时 exe 被占用。
-	prepareInstall(opts)
+	// 0. 平台预处理：Windows 上先停掉旧服务/看门狗并清理残留进程，避免 exe 被占用。
+	if err := prepareInstall(opts); err != nil {
+		return fmt.Errorf("准备安装失败: %w", err)
+	}
+	// 无论安装成功与否，最后都恢复/更新看门狗，避免 prepareInstall 禁用后遗留失联。
+	defer func() {
+		if opts.InstallCron {
+			if err := installWatchdog(opts.BinPath, opts.StatePath); err != nil {
+				fmt.Printf("⚠️ 安装看门狗失败: %v\n", err)
+			}
+		} else {
+			removeWatchdog()
+		}
+	}()
 
 	// 1. 复制当前二进制到目标路径（若不同）
 	self, err := os.Executable()
@@ -161,12 +173,7 @@ func Install(opts Options) error {
 		return err
 	}
 
-	// 3. 看门狗兜底
-	if opts.InstallCron {
-		if err := installWatchdog(opts.BinPath, opts.StatePath); err != nil {
-			fmt.Printf("⚠️ 安装看门狗失败: %v\n", err)
-		}
-	}
+	// 3. 看门狗由 prepareInstall 之后的 defer 统一安装/恢复。
 
 	fmt.Printf("✅ 安装完成: init=%s bin=%s\n", info.Init, opts.BinPath)
 	return nil

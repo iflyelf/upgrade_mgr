@@ -31,7 +31,10 @@ func installPlatform(opts Options, info osinfo.Info) error {
 	// 重复安装：先停掉旧服务，再删除重建，确保 BinaryPathName 与参数更新。
 	if s, err := mg.OpenService(ServiceName); err == nil {
 		_, _ = s.Control(svc.Stop)
-		_ = waitStopped(s, 20*time.Second)
+		if err := waitStopped(s, 20*time.Second); err != nil {
+			_ = s.Close()
+			return fmt.Errorf("停止旧服务失败: %w", err)
+		}
 		_ = s.Delete()
 		_ = s.Close()
 		// 服务删除后句柄释放可能有延迟，稍等避免 CreateService 报“已标记为删除”。
@@ -72,16 +75,28 @@ func installPlatform(opts Options, info osinfo.Info) error {
 
 	// 失败自动重启：SCM 默认只在崩溃时重启，配合 Agent 自升级 exit(75)
 	// 需要同时启用非崩溃失败重启。
+	if err := ensureRecoveryActions(s); err != nil {
+		return err
+	}
+
+	if err := s.Start(); err != nil && err != windows.ERROR_SERVICE_ALREADY_RUNNING {
+		return fmt.Errorf("启动 Windows 服务失败: %w", err)
+	}
+	return nil
+}
+
+// ensureRecoveryActions 确保 SCM 在自升级 exit(75)/崩溃后自动重启服务。
+func ensureRecoveryActions(s *mgr.Service) error {
 	actions := []mgr.RecoveryAction{
 		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
 		{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
 		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
 	}
-	_ = s.SetRecoveryActions(actions, 86400)
-	_ = s.SetRecoveryActionsOnNonCrashFailures(true)
-
-	if err := s.Start(); err != nil && err != windows.ERROR_SERVICE_ALREADY_RUNNING {
-		return fmt.Errorf("启动 Windows 服务失败: %w", err)
+	if err := s.SetRecoveryActions(actions, 86400); err != nil {
+		return fmt.Errorf("设置服务恢复动作失败（自升级后可能无法自动重启）: %w", err)
+	}
+	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		return fmt.Errorf("启用非崩溃失败恢复失败: %w", err)
 	}
 	return nil
 }
@@ -98,7 +113,7 @@ func waitStopped(s *mgr.Service, d time.Duration) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return nil
+	return fmt.Errorf("等待服务停止超时（%s）", d)
 }
 
 // installWatchdog 注册每分钟运行的计划任务，作为 SCM 之外的兜底。
@@ -145,14 +160,20 @@ func refreshPlatform(opts Options, info osinfo.Info) (bool, error) {
 		return false, err
 	}
 	cmdline := buildServiceCommandLine(opts)
-	if cfg.BinaryPathName == cmdline {
-		return false, nil
+	changed := false
+	if cfg.BinaryPathName != cmdline {
+		cfg.BinaryPathName = cmdline
+		if err := s.UpdateConfig(cfg); err != nil {
+			return false, err
+		}
+		changed = true
 	}
-	cfg.BinaryPathName = cmdline
-	if err := s.UpdateConfig(cfg); err != nil {
-		return false, err
+	// 无论启动参数是否变化，都幂等确保 SCM 恢复动作存在：
+	// 自升级 exit(75) 后由 SCM 5 秒后自动拉起，避免长时间离线。
+	if err := ensureRecoveryActions(s); err != nil {
+		return changed, err
 	}
-	return true, nil
+	return changed, nil
 }
 
 // buildServiceCommandLine 构造 SCM BINARY_PATH_NAME，保留原有服务账户等配置。
