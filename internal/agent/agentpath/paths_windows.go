@@ -32,6 +32,9 @@ func StatePath() string { return filepath.Join(dataDir(), "state.json") }
 // DataDir 默认数据目录。
 func DataDir() string { return dataDir() }
 
+// LogPath 默认日志文件路径（ProgramData 默认 ACL 仅管理员与 SYSTEM 可写）。
+func LogPath() string { return filepath.Join(dataDir(), "logs", "upgrade-agent.log") }
+
 // BackupDir 默认自升级备份目录。
 func BackupDir() string { return filepath.Join(dataDir(), "backup") }
 

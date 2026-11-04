@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={{.BinPath}} run --server {{.ServerURL}} --state {{.StatePath}}
+ExecStart={{.BinPath}} run --server {{.ServerURL}} --state {{.StatePath}} --log {{.LogPath}} --log-max-mb {{.LogMaxMB}} --log-backups {{.LogBackups}}
 Restart=always
 RestartSec=3
 StartLimitIntervalSec=0

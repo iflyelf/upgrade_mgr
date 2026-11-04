@@ -6,6 +6,9 @@ package agentpath
 // BinPath 默认二进制安装路径。
 func BinPath() string { return "/usr/local/bin/upgrade-agent" }
 
+// LogPath 默认日志文件路径（Linux systemd/upstart 共用）。
+func LogPath() string { return "/var/log/upgrade-agent.log" }
+
 // StatePath 默认状态文件路径（含 Agent 凭据，仅 root 可读）。
 func StatePath() string { return "/var/lib/upgrade-agent/state.json" }
 

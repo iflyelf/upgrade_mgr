@@ -17,6 +17,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/iflyelf/upgrade_mgr/internal/agent/agentlog"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/agentpath"
 	"github.com/iflyelf/upgrade_mgr/internal/agent/osinfo"
 )
@@ -37,6 +38,11 @@ type Options struct {
 	EnrollToken string
 	BinPath     string // 目标安装路径，留空使用平台默认值
 	StatePath   string
+	// LogPath / LogMaxMB / LogBackups 是 Agent 文件日志配置。
+	// 留空/<=0 时使用 agentpath.LogPath() 与默认 10MB × 5 份。
+	LogPath     string
+	LogMaxMB    int
+	LogBackups  int
 	InstallCron bool // 是否安装看门狗兜底（Linux cron / Windows 计划任务）
 	Force       bool // 强制重新注册：忽略已有 state 中的凭据并覆盖
 	// 可选 TLS / 双向 TLS：仅写入 state，由 Agent 启动时读取。
@@ -57,11 +63,20 @@ func Install(opts Options) error {
 	if opts.StatePath == "" {
 		opts.StatePath = agentpath.StatePath()
 	}
+	if opts.LogPath == "" {
+		opts.LogPath = agentpath.LogPath()
+	}
+	if opts.LogMaxMB <= 0 {
+		opts.LogMaxMB = 10
+	}
+	if opts.LogBackups < 1 {
+		opts.LogBackups = agentlog.DefaultBackups
+	}
 	opts.ServerURL = strings.TrimRight(opts.ServerURL, "/")
 	// 服务单元模板会把这些值直接写入 ExecStart；拒绝换行等控制字符，
 	// 防止构造安装参数时向 unit 文件注入额外指令。
 	for name, v := range map[string]string{
-		"server": opts.ServerURL, "bin": opts.BinPath, "state": opts.StatePath,
+		"server": opts.ServerURL, "bin": opts.BinPath, "state": opts.StatePath, "log": opts.LogPath,
 	} {
 		if strings.ContainsAny(v, "\r\n\x00") {
 			return fmt.Errorf("%s 参数包含非法控制字符", name)

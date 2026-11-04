@@ -8,9 +8,6 @@ respawn
 # CentOS 6 的 upstart 0.6.5 不支持 unlimited；限制为 10 次/5 秒，避免异常重启风暴。
 respawn limit 10 5
 
-# 显式把 stdout/stderr 写入固定文件。
-# CentOS 6 的 upstart 默认把任务输出送到控制台，若不重定向，重启后日志无法留存。
-script
-    umask 027
-    exec {{.BinPath}} run --server {{.ServerURL}} --state {{.StatePath}} >>/var/log/upgrade-agent.log 2>&1
-end script
+# 日志由 Agent 自身写入固定文件并自动切割；不要在这里重定向 stderr，
+# 否则会与 Agent 的文件日志重复。
+exec {{.BinPath}} run --server {{.ServerURL}} --state {{.StatePath}} --log {{.LogPath}} --log-max-mb {{.LogMaxMB}} --log-backups {{.LogBackups}}
