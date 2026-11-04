@@ -123,6 +123,29 @@
   }
   function hint(text) { return h('div', { class: 'hint' }, [text]); }
 
+  // 任务创建表单草稿：按登录用户保存在 localStorage，刷新页面后恢复
+  // （含主机筛选已选值、单选/多选模式以及命令脚本等输入）。
+  var TASK_DRAFT_KEY = 'upgrade_mgr_task_draft_v1';
+  function taskDraftKey() {
+    var u = state.user && (state.user.Username || state.user.username);
+    return TASK_DRAFT_KEY + ':' + (u || 'anonymous');
+  }
+  function loadTaskDraft() {
+    try {
+      var raw = localStorage.getItem(taskDraftKey());
+      if (!raw) return null;
+      var d = JSON.parse(raw);
+      return d && typeof d === 'object' ? d : null;
+    } catch (e) { return null; }
+  }
+  function saveTaskDraft(f) {
+    if (!f) return;
+    try { localStorage.setItem(taskDraftKey(), JSON.stringify(f)); } catch (e) {}
+  }
+  function clearTaskDraft() {
+    try { localStorage.removeItem(taskDraftKey()); } catch (e) {}
+  }
+
   function fallbackCopy(text) {
     var ta = document.createElement('textarea');
     ta.value = text;
@@ -3601,12 +3624,42 @@
     ]);
   }
 
-  // tagPicker 多选标签输入：从候选值选择或手填，回车/加号添加，点 × 移除。
-  // 当前用于团队授权的主机分组范围（替代只能提示、无法累加的 datalist）。
-  function tagPicker(candidates, placeholder, datalistID) {
+  // tagPicker 标签输入：支持下拉选择候选值、手填、多选或单选，回车/加号添加，点 × 移除。
+  // 当前用于团队授权的主机分组范围，以及任务创建页的主机字段筛选。
+  //
+  // options 可传字符串（兼容旧调用，视为 datalistID），或对象：
+  //   datalistID 自定义 datalist id
+  //   initial    初始值（预览/刷新触发 render 后靠它恢复已选值）
+  //   multi      false 时只保留一个值（单选），默认多选
+  //   onChange   值变化回调，便于把状态同步到上层（如 taskForm.filters）
+  function tagPicker(candidates, placeholder, options) {
+    var opts = typeof options === 'string' ? { datalistID: options } : (options || {});
+    var multi = opts.multi !== false;
     var values = [];
-    var listID = datalistID || ('tag-options-' + (++fieldSeq));
+    function pushValue(v) {
+      if (!multi) { values.length = 0; values.push(v); return; }
+      if (values.indexOf(v) < 0) values.push(v);
+    }
+    // 先恢复初始值，避免预览/局部刷新后已选筛选条件丢失。
+    (opts.initial || []).forEach(function (v) {
+      v = String(v == null ? '' : v).trim();
+      if (v) pushValue(v);
+    });
+
+    var listID = opts.datalistID || ('tag-options-' + (++fieldSeq));
     var tagsEl = h('div', { class: 'tag-picker-values' }, []);
+    var selectEl = h('select', {
+      'aria-label': placeholder || '从候选值选择',
+      onchange: function () {
+        var v = selectEl.value;
+        selectEl.value = '';
+        if (v) add(v);
+      }
+    }, [h('option', { value: '' }, ['从候选值选择…'])].concat(
+      (candidates || []).map(function (g) {
+        return h('option', { value: g }, [g]);
+      })
+    ));
     var inputEl = h('input', {
       list: listID,
       placeholder: placeholder || '选择或输入后回车添加',
@@ -3619,13 +3672,28 @@
       onclick: function () { add(inputEl.value); }
     }, ['+ 添加']);
 
+    function notify() {
+      if (typeof opts.onChange === 'function') opts.onChange(values.slice());
+    }
     function add(raw) {
-      String(raw || '').split(/[,，\s]+/).forEach(function (v) {
+      raw = String(raw || '');
+      // 候选值可能自带空格（如部门名），命中候选时整体作为一个值；
+      // 其余输入兼容逗号/空白分隔，保持原有使用习惯。
+      var parts = raw && (candidates || []).indexOf(raw) >= 0
+        ? [raw]
+        : raw.split(/[,，\s]+/);
+      parts.forEach(function (v) {
         v = v.trim();
-        if (v && values.indexOf(v) < 0) values.push(v);
+        if (v) pushValue(v);
       });
       inputEl.value = '';
       renderTags();
+      notify();
+    }
+    function removeAt(i) {
+      values.splice(i, 1);
+      renderTags();
+      notify();
     }
     function renderTags() {
       tagsEl.textContent = '';
@@ -3637,7 +3705,7 @@
           v,
           h('button', {
             class: 'tag-x', type: 'button', title: '移除', 'aria-label': '移除 ' + v,
-            onclick: function () { values.splice(i, 1); renderTags(); }
+            onclick: function () { removeAt(i); }
           }, ['×'])
         ]));
       });
@@ -3647,6 +3715,7 @@
       el: h('div', { class: 'tag-picker' }, [
         tagsEl,
         h('div', { class: 'toolbar' }, [
+          (candidates && candidates.length) ? selectEl : null,
           inputEl,
           h('datalist', { id: listID }, (candidates || []).map(function (g) {
             return h('option', { value: g }, []);
@@ -5809,6 +5878,24 @@
     return mask;
   }
 
+  // HOST_FILTER_FIELDS 任务主机筛选字段元数据（label + 默认是否单选）。
+  // 新增字段：后端 hosts 列存在且 host_facets.go 白名单放行后，
+  // 只需在此补充一条即可自动获得下拉选择、手填与模式切换。
+  var HOST_FILTER_FIELDS = {
+    app_code: { label: 'App Code' },
+    biz_group: { label: '业务组' },
+    os_family: { label: '操作系统', single: true },
+    os_type: { label: '系统类型', single: true },
+    account: { label: '账号' },
+    department: { label: '部门' },
+    vendor: { label: '厂商' },
+    arch: { label: '架构' },
+    host_type: { label: '主机类型', single: true }
+  };
+  function hostFilterMeta(col) {
+    return HOST_FILTER_FIELDS[col] || { label: col, single: false };
+  }
+
   function tasksView() {
     var compMap = {};
     state.components.forEach(function (c) { compMap[c.id] = c; });
@@ -5833,15 +5920,17 @@
     });
 
     // 表单值放在 state.taskForm 里：预览会触发 render，靠它保留用户输入。
-    var f = state.taskForm || (state.taskForm = {
+    // 首次进入时合并 localStorage 草稿，刷新页面后仍保留已填内容与单选/多选模式。
+    var f = state.taskForm || (state.taskForm = Object.assign({
       kind: 'upgrade', name: '', component_id: '', version: '', ip_expr: '',
       script: '', interpreter: '', args: '', stdin: '', tty: false, timeout: '10m',
       mode: 'count', batch_size: '10', canary_count: '1', auto_promote: true,
-      filters: {}
-    });
+      filters: {}, filterModes: {}
+    }, loadTaskDraft() || {}));
     if (!f.kind) f.kind = 'upgrade';
     if (!isAdmin() && f.kind === 'command') f.kind = 'upgrade';
     if (!f.filters) f.filters = {};
+    if (!f.filterModes) f.filterModes = {};
 
     function versionsFor(cid) {
       var out = [];
@@ -5884,7 +5973,7 @@
     }, []);
     var ipEl = h('input', {
       value: f.ip_expr, placeholder: '如 10.1.255.24-26 或 10.1.255.0/24',
-      oninput: function () { f.ip_expr = ipEl.value; }
+      oninput: function () { f.ip_expr = ipEl.value; invalidatePreview(); }
     }, []);
 
     var modeEl = h('select', {
@@ -5979,36 +6068,73 @@
       return s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r');
     }
 
-    // 字段标签映射（与后端 hostfieldmap 保持一致）
-    var fieldLabels = {
-      app_code: 'App Code', biz_group: '业务组', os_family: '操作系统',
-      os_type: '系统类型', account: '账号', department: '部门',
-      vendor: '厂商', arch: '架构', host_type: '主机类型'
-    };
+    // 预览失效：筛选条件变化后移除旧预览，避免显示过期命中数。
+    function invalidatePreview() {
+      if (!state.preview) return;
+      state.preview = null;
+      var box = document.getElementById('task-preview-box');
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+    }
 
     // 构建字段选择器（多个 tagPicker）
+    // 默认模式来自 HOST_FILTER_FIELDS；用户可在每个字段标题右侧勾选/取消「单选」自由切换。
     var facets = state.hostFacets || { fields: [], values: {} };
     var fieldPickers = {};
     var fieldPickerEls = [];
+
+    // filterField 在字段标题右侧提供「单选」开关。
+    function filterField(label, modeEl, input, hintText) {
+      if (!input.id) input.id = 'f' + (++fieldSeq);
+      return h('div', { class: 'field' }, [
+        h('div', { class: 'field-head' }, [
+          h('label', { for: input.id }, [label]),
+          h('label', { class: 'field-mode', title: '勾选后该字段只允许一个值' }, [modeEl, ' 单选'])
+        ]),
+        input,
+        hintText ? hint(hintText) : null
+      ]);
+    }
+
     facets.fields.forEach(function (col) {
-      var candidates = facets.values[col] || [];
-      var picker = tagPicker(candidates, '选择或输入 ' + (fieldLabels[col] || col) + ' 后回车');
-      fieldPickers[col] = picker;
-      // 从 f.filters[col] 初始化已选值
-      if (f.filters[col]) {
-        f.filters[col].forEach(function (v) {
-          picker.getValues(); // 先调用一次让 picker 内部同步输入框
-          if (picker.getValues().indexOf(v) < 0) {
-            // 手动添加到 picker 的 values 数组（tagPicker 内部状态）
-            // 由于 tagPicker 没有暴露 add 方法，我们只能重新构建
+      var meta = hostFilterMeta(col);
+      var label = meta.label;
+      var configured = f.filterModes[col];
+      var multi = configured === undefined ? !meta.single : !!configured;
+      var picker = tagPicker(
+        facets.values[col] || [],
+        '选择或输入 ' + label + (multi ? '（可多选）' : '（单选）') + ' 后回车',
+        {
+          initial: f.filters[col] || [],
+          multi: multi,
+          // 立即写回 taskForm：预览/自动刷新会触发 render，靠它恢复已选值。
+          onChange: function (vals) {
+            if (vals.length > 0) f.filters[col] = vals;
+            else delete f.filters[col];
+            invalidatePreview();
+            saveTaskDraft(f);
           }
-        });
-      }
-      fieldPickerEls.push(field(fieldLabels[col] || col, picker.el,
-        '多选，留空表示不限。可从已有值中选择或手填。'));
+        }
+      );
+      fieldPickers[col] = picker;
+      var singleEl = h('input', {
+        type: 'checkbox', checked: !multi,
+        'aria-label': label + '筛选单选模式',
+        onchange: function () {
+          // 先合入尚未回车的输入，再按新模式裁剪已选值。
+          picker.getValues();
+          f.filterModes[col] = !singleEl.checked;
+          if (singleEl.checked && (f.filters[col] || []).length > 1) {
+            f.filters[col] = f.filters[col].slice(0, 1);
+          }
+          invalidatePreview();
+          render();
+        }
+      }, []);
+      fieldPickerEls.push(filterField(label, singleEl, picker.el,
+        (multi ? '多选' : '单选') + '，留空表示不限；可从下拉选择或手填。'));
     });
 
-    // 预览前收集 filters
+    // 提交前收集 filters（补上用户尚未回车确认的输入）
     function collectFilters() {
       var filters = {};
       facets.fields.forEach(function (col) {
@@ -6194,7 +6320,7 @@
     if (p) {
       var batches = p.batches || [];
       var sample = p.sample_ips || [];
-      previewBox = h('div', { class: 'preview' }, [
+      previewBox = h('div', { class: 'preview', id: 'task-preview-box' }, [
         h('div', { class: p.total_hosts ? '' : 'err' }, [
           '预览：命中 ' + p.total_hosts + ' 台主机，分 ' + batches.length + ' 批'
         ]),
@@ -6224,7 +6350,7 @@
       // 主机字段筛选（如果配置了可选字段）
       fieldPickerEls.length > 0 ? h('div', { class: 'field-group' }, [
         h('h4', {}, ['主机筛选（可选）']),
-        hint('按主机字段多选过滤；留空表示不限。与 IP 段取交集。')
+        hint('按主机字段筛选（部分字段单选，其余可多选）；留空表示不限。与 IP 段取交集。')
       ].concat(fieldPickerEls)) : null,
       f.kind === 'command' ? field('命令脚本', scriptEl,
         '脚本会以文件形式交给解释器执行，支持管道、重定向与进程替换。需要交互确认时填写标准输入，必要时勾选伪终端。') : null,
@@ -6274,8 +6400,12 @@
           ? h('button', { class: 'btn ghost', onclick: function () { fillCommandWindowsSample('uninstall'); } }, ['卸载脚本'])
           : h('button', { class: 'btn ghost', onclick: function () { fillUpgradeSample('uninstall', 'windows'); } }, ['卸载组件'])
       ]),
-      hint('创建后任务处于 draft 状态，需要在下方列表点“启动”才会开始下发。')
+      hint('创建后任务处于 draft 状态，需要在下方列表点“启动”才会开始下发；表单草稿自动保存在本机浏览器，退出登录后清除。')
     ]);
+
+    // 输入/下拉变化后立即保存草稿（命令脚本等不会触发 render 的字段也能保留）。
+    form.addEventListener('input', function () { saveTaskDraft(f); });
+    form.addEventListener('change', function () { saveTaskDraft(f); });
 
     var filterCompEl = h('select', {
       value: state.taskFilterComp,
@@ -6539,6 +6669,7 @@
         : null
     ]);
 
+    saveTaskDraft(f);
     return h('div', {}, [
       !isAdmin() ? hint('当前账号可为已授权（deploy）的组件创建任务；' +
         '命令任务与授权范围外的操作仍需管理员。任务操作按钮按 owner 策略显示。') : null,
@@ -7797,6 +7928,7 @@
     stopTaskDetailTimer();
     stopAutoRefresh();
     api('/api/auth/logout', { method: 'POST' }).then(function () {
+      clearTaskDraft();
       state.user = null;
       state.myPerms = undefined;
       state.quickstart = undefined;

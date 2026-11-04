@@ -159,7 +159,7 @@ func main() {
 }
 
 // registerRoutes 注册 HTTP 路由（Go 1.22+ ServeMux 方法+路径模式）。
-func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.RateLimiter {
+func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Stopper {
 	auth := sc.Auth
 
 	// 限流器（敏感路由）
@@ -175,21 +175,34 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 		}
 	}
 	registerLimiter := middleware.NewRateLimiterWithProxies(10, 1*time.Minute, trustProxy, trusted) // Agent 注册
-	loginLimiter := middleware.NewRateLimiterWithProxies(20, 1*time.Minute, trustProxy, trusted)    // 登录
-	enrollLimiter := middleware.NewRateLimiterWithProxies(5, 1*time.Minute, trustProxy, trusted)    // Enroll Token
+	// 登录/改密限流：每次请求从设置快照读取上限，页面保存后立即生效；<=0 表示关闭。
+	loginLimiter := middleware.NewDynamicRateLimiter(1*time.Minute, trustProxy, trusted)
+	loginLimit := func() int {
+		if sc.Settings != nil {
+			return sc.Settings.Snapshot().Server.LoginRateLimit
+		}
+		return sc.Config.Server.LoginRateLimit
+	}
+	if loginLimit() <= 0 {
+		log.Printf("ℹ️ 登录限流未启用（server.login_rate_limit=0），可在设置页动态开启")
+	}
+	enrollLimiter := middleware.NewRateLimiterWithProxies(5, 1*time.Minute, trustProxy, trusted) // Enroll Token
+	limitLogin := func(h http.Handler) http.Handler {
+		return middleware.DynamicRateLimitMiddleware(loginLimiter, loginLimit)(h)
+	}
 
 	// 公开
 	mux.HandleFunc("GET /health", handler.Health())
 	mux.HandleFunc("GET /ready", handler.Ready(sc))
 	mux.HandleFunc("GET /api/auth/config", handler.AuthConfig(sc))
-	mux.Handle("POST /api/auth/login", middleware.RateLimitMiddleware(loginLimiter)(http.HandlerFunc(handler.Login(sc))))
+	mux.Handle("POST /api/auth/login", limitLogin(http.HandlerFunc(handler.Login(sc))))
 	mux.HandleFunc("POST /api/auth/logout", handler.Logout(sc))
 	// OAuth2 回调（仅 casdoor 生效；builtin 下返回 404）
-	mux.Handle("GET /api/auth/callback", middleware.RateLimitMiddleware(loginLimiter)(http.HandlerFunc(handler.AuthCallback(sc))))
+	mux.Handle("GET /api/auth/callback", limitLogin(http.HandlerFunc(handler.AuthCallback(sc))))
 
 	// 需登录
 	mux.HandleFunc("GET /api/auth/userinfo", middleware.RequireAuth(auth, handler.UserInfo(sc)))
-	mux.Handle("PUT /api/auth/password", middleware.RateLimitMiddleware(loginLimiter)(middleware.RequireAuth(auth, handler.ChangePassword(sc))))
+	mux.Handle("PUT /api/auth/password", limitLogin(middleware.RequireAuth(auth, handler.ChangePassword(sc))))
 	mux.HandleFunc("GET /api/hosts", middleware.RequireAuth(auth, handler.ListHosts(sc)))
 	mux.HandleFunc("GET /api/hosts/facets", middleware.RequireAuth(auth, handler.HostFacets(sc)))
 	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SyncHosts(sc))))
@@ -384,5 +397,6 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []*middleware.Ra
 	if sc.Config.Server.WebEmbedded {
 		mux.Handle("/", spaHandler())
 	}
-	return []*middleware.RateLimiter{registerLimiter, loginLimiter, enrollLimiter}
+	limiters := []middleware.Stopper{registerLimiter, loginLimiter, enrollLimiter}
+	return limiters
 }

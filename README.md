@@ -462,6 +462,9 @@ server:
   session_secret: "请替换为至少16字节的随机密钥；留空会自动生成并持久化到数据库"
   # 审计日志保留天数（默认 180，最小 7；也可在设置页修改）
   audit_retention_days: 180
+  # 登录/改密限流：每分钟每 IP 次数（默认 0=关闭；页面保存后立即生效）
+  # 生产环境建议开启，如 login_rate_limit: 20
+  # login_rate_limit: 0
 
 database:
   dsn: "postgresql://user:pass@localhost:5432/upgrade_mgr?sslmode=disable"

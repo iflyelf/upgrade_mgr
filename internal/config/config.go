@@ -67,6 +67,10 @@ type ServerConfig struct {
 	MetricsToken string `yaml:"metrics_token"`
 	// AuditRetentionDays 审计日志保留天数（默认 180，最小 7）。
 	AuditRetentionDays int `yaml:"audit_retention_days"`
+	// LoginRateLimit 每分钟每个客户端 IP 允许的登录/改密尝试次数（默认 0=关闭）。
+	// 页面/环境变量可动态开启（如 20）；关闭时登录接口更易被暴力破解，
+	// 请仅在可信内网或测试环境保持关闭。
+	LoginRateLimit int `yaml:"login_rate_limit"`
 	// AgentBinaryDir Agent 二进制目录，供 GET /api/agent/binary/{name} 下载（默认 ./dist）。
 	AgentBinaryDir string `yaml:"agent_binary_dir"`
 	// ExternalBinaries 允许控制台代为下载并缓存的外部文件白名单。
@@ -295,6 +299,7 @@ func Default() *Config {
 		Server: ServerConfig{
 			Host: "0.0.0.0", Port: 8090, WebEmbedded: true, AgentBinaryDir: "./dist",
 			AuditRetentionDays:       180,
+			LoginRateLimit:           0,
 			ExternalBinaryProxy:      extbin.DefaultProxyBase,
 			ExternalBinaryProxyHosts: extbin.DefaultProxyHosts(),
 		},
@@ -407,6 +412,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.Server.Host, "SERVER_HOST")
 	setInt(&c.Server.Port, "SERVER_PORT")
 	setInt(&c.Server.AuditRetentionDays, "SERVER_AUDIT_RETENTION_DAYS")
+	setInt(&c.Server.LoginRateLimit, "SERVER_LOGIN_RATE_LIMIT")
 	setStr(&c.Server.SessionSecret, "SESSION_SECRET")
 	setStr(&c.Server.ExternalURL, "SERVER_EXTERNAL_URL")
 	setBool(&c.Server.TrustProxy, "TRUST_PROXY")

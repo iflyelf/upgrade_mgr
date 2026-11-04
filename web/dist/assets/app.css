@@ -130,6 +130,13 @@ button.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-sha
 .login-card { width: 360px; max-width: 92vw; }
 .login-card h2 { margin-top: 0; }
 .field { margin-bottom: 14px; min-width: 0; }
+.field .field-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.field .field-head > label { margin-bottom: 0; }
+.field .field-mode {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--text-secondary); cursor: pointer; white-space: nowrap;
+}
+.field .field-mode input { width: auto; margin: 0; }
 .field label { display: block; margin-bottom: 6px; color: var(--text-secondary); font-size: 13px; }
 .field input:not([type="checkbox"]), .field select, .field textarea { width: 100%; }
 .field label.check {
@@ -240,7 +247,8 @@ td.tunnel-fail-cell { box-shadow: inset 3px 0 0 var(--err-color); }
 .tag-picker-values .tag { display: inline-flex; align-items: center; gap: 4px; }
 .tag-x { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
 .tag-x:hover { color: #d33; }
-.tag-picker .toolbar { margin: 0; }
+.tag-picker .toolbar { margin: 0; flex-wrap: wrap; }
+.tag-picker select { max-width: 240px; }
 .tag-picker input { min-width: 260px; }
 
 /* 表格工具：列显隐 / 排序 / 列宽拖拽 */
@@ -502,7 +510,7 @@ button, .tab, .nav-link, .nav-menu-item, .theme-btn, .user-chip {
 @media (max-width: 760px) {
   .toolbar > .btn { min-height: 40px; }
   .pager .btn, .pager input, .pager select { min-height: 38px; }
-  .tag-picker input { min-width: 0; width: 100%; }
+  .tag-picker input, .tag-picker select { min-width: 0; width: 100%; max-width: none; }
   /* 过滤条件常写成 <label>按组件筛选：<select>…</select></label>。
      select 的 option 文本（组件名）很长时，label 会被撑到 max-content 并
      把整个移动端布局视口撑宽（innerWidth 从 390 变成 543）。 */

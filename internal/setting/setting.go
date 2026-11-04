@@ -159,6 +159,18 @@ var baseRegistry = []Item{
 			}
 			return nil
 		}},
+	{Key: "server.login_rate_limit", Group: "服务器",
+		Label: "登录/改密限流：每分钟每 IP 次数（默认 0=关闭）", Type: "int",
+		Get: func(c *config.Config) string { return strconv.Itoa(c.Server.LoginRateLimit) },
+		Set: func(c *config.Config, v string) { setInt(&c.Server.LoginRateLimit, v) },
+		Validate: func(v string) error {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 0 || n > 100000 {
+				return fmt.Errorf("登录限流应为 0-100000 的整数（0 表示关闭）")
+			}
+			return nil
+		},
+		Note: "保存后立即生效，无需重启。0 表示关闭（默认）；关闭后登录接口可被暴力破解，生产环境建议开启（如 20）。"},
 
 	{Key: "consul.enabled", Group: "Consul", Label: "启用 Consul 同步", Type: "bool",
 		Get: func(c *config.Config) string { return b2s(c.Consul.Enabled) },

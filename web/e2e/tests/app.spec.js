@@ -33,6 +33,84 @@ test('登录后导航与 URL 刷新保持页面', async ({ page }) => {
   await expect(page.getByRole('heading', { name: '创建任务' })).toBeVisible();
 });
 
+test('任务主机筛选：多选/单选切换 + 预览/创建重渲染后条件不丢失', async ({ page }) => {
+  await login(page);
+  await page.locator('.main-nav').getByRole('button', { name: '任务', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '创建任务' })).toBeVisible();
+
+  // 主机字段筛选（默认 task.host_selector_fields 含 app_code）默认多选、支持手填。
+  const appInput = page.getByPlaceholder('选择或输入 App Code（可多选） 后回车');
+  await expect(appInput).toBeVisible();
+  await appInput.fill('E2E_PAY');
+  await appInput.press('Enter');
+  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_PAY');
+
+  // 切换为单选：标题右侧勾选「单选」，已选值保留且只允许一个。
+  await page.getByRole('checkbox', { name: 'App Code筛选单选模式' }).check();
+  const singleInput = page.getByPlaceholder('选择或输入 App Code（单选） 后回车');
+  await expect(singleInput).toBeVisible();
+  await expect(page.locator('.tag-picker-values .tag')).toHaveCount(1);
+  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_PAY');
+
+  // 单选模式下再填一个值，应替换旧值而不是累加。
+  await singleInput.fill('E2E_ORD');
+  await singleInput.press('Enter');
+  await expect(page.locator('.tag-picker-values .tag')).toHaveCount(1);
+  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
+
+  // 刷新页面后，草稿（含单选模式与已选值）应从 localStorage 恢复。
+  await page.reload();
+  await expect(page.getByRole('heading', { name: '创建任务' })).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: 'App Code筛选单选模式' })).toBeChecked();
+  await expect(page.getByPlaceholder('选择或输入 App Code（单选） 后回车')).toBeVisible();
+  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
+
+  // 未选组件时预览会在本地校验失败并触发 render，已填筛选值应保留。
+  await page.getByRole('button', { name: '预览', exact: true }).click();
+  await expect(page.locator('.err.field')).toContainText('请先选择组件');
+  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
+
+  // 再点创建同样会重渲染，筛选值不能丢。
+  await page.getByRole('button', { name: '创建任务', exact: true }).click();
+  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
+});
+
+test('任务主机筛选：修改条件后清除过期预览', async ({ page }) => {
+  await login(page);
+  // 等登录完成（页签出现）再复用会话调用 API。
+  await expect(page.locator('.main-nav')).toBeVisible();
+
+  // 用 API 建一个组件并 reload，确保任务页的组件下拉包含它。
+  const compName = 'e2e_preview_' + Date.now();
+  const created = await page.request.post('/api/components', { data: { name: compName } });
+  expect(created.ok()).toBeTruthy();
+  const compID = (await created.json()).data.id;
+
+  try {
+    await page.reload();
+    await page.locator('.main-nav').getByRole('button', { name: '任务', exact: true }).click();
+    const compSel = page.getByLabel('组件', { exact: true });
+    await expect(compSel).toContainText(compName);
+    await compSel.selectOption({ label: compName });
+    await page.getByLabel('目标版本', { exact: true }).fill('v1');
+
+    const previewResp = page.waitForResponse(
+      (r) => r.url().endsWith('/api/tasks/preview') && r.request().method() === 'POST'
+    );
+    await page.getByRole('button', { name: '预览', exact: true }).click();
+    expect((await previewResp).ok()).toBeTruthy();
+    await expect(page.locator('#task-preview-box')).toContainText('预览：命中');
+
+    // 修改主机筛选条件后，旧预览必须立即消失，避免展示过期命中数。
+    const appInput = page.getByPlaceholder('选择或输入 App Code（可多选） 后回车');
+    await appInput.fill('E2E_STALE');
+    await appInput.press('Enter');
+    await expect(page.locator('#task-preview-box')).toHaveCount(0);
+  } finally {
+    await page.request.delete('/api/components/' + compID);
+  }
+});
+
 test('帮助菜单包含快速上手与接入主机示例', async ({ page }) => {
   await login(page);
   await openNavMenu(page, '帮助');

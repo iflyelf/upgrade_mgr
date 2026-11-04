@@ -104,6 +104,89 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
+// DynamicRateLimiter 按运行时上限动态调整限流。
+//
+// 与固定 RateLimiter 不同，上限由调用方在每次请求时传入（如从设置快照读取），
+// 因此页面保存新的上限后无需重启即可生效；limit<=0 表示关闭限流。
+// 上限变化时会重建底层滑动窗口（窗口内计数重置），避免旧阈值残留。
+type DynamicRateLimiter struct {
+	mu         sync.Mutex
+	cur        *RateLimiter
+	curLimit   int
+	window     time.Duration
+	trustProxy bool
+	trusted    *netutil.ProxyList
+	stopped    bool
+}
+
+// NewDynamicRateLimiter 创建动态限流器。
+func NewDynamicRateLimiter(window time.Duration, trustProxy bool, trusted *netutil.ProxyList) *DynamicRateLimiter {
+	return &DynamicRateLimiter{window: window, trustProxy: trustProxy, trusted: trusted}
+}
+
+// Allow 按当前上限判断是否放行；limit<=0 时直接放行。
+func (d *DynamicRateLimiter) Allow(ip string, limit int) bool {
+	if limit <= 0 {
+		return true
+	}
+	d.mu.Lock()
+	if d.stopped {
+		d.mu.Unlock()
+		return true
+	}
+	if d.cur == nil || d.curLimit != limit {
+		if d.cur != nil {
+			d.cur.Stop()
+		}
+		d.cur = NewRateLimiterWithProxies(limit, d.window, d.trustProxy, d.trusted)
+		d.curLimit = limit
+	}
+	cur := d.cur
+	d.mu.Unlock()
+	return cur.Allow(ip)
+}
+
+// Stop 停止当前底层限流器的清理协程（可重复调用）。
+func (d *DynamicRateLimiter) Stop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped {
+		return
+	}
+	d.stopped = true
+	if d.cur != nil {
+		d.cur.Stop()
+		d.cur = nil
+	}
+}
+
+// Stopper 可停止后台清理协程的限流器（固定/动态限流器均实现）。
+type Stopper interface {
+	Stop()
+}
+
+// DynamicRateLimitMiddleware 返回动态限流中间件。
+//
+// limit 在每次请求时调用，返回当前允许的窗口内请求数；<=0 表示关闭。
+// 设置页保存 server.login_rate_limit 后，内存快照立即更新，下一次请求即生效。
+func DynamicRateLimitMiddleware(limiter *DynamicRateLimiter, limit func() int) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := 0
+			if limit != nil {
+				n = limit()
+			}
+			ip := netutil.ClientIPWithProxies(r, limiter.trustProxy, limiter.trusted)
+			if !limiter.Allow(ip, n) {
+				log.Printf("⚠️ Rate limit exceeded: %s %s (IP: %s)", r.Method, r.URL.Path, ip)
+				http.Error(w, "请求过于频繁，请稍后重试", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RateLimitMiddleware 返回限流中间件（包装 http.Handler）。
 func RateLimitMiddleware(limiter *RateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
