@@ -333,10 +333,11 @@ function Remove-StaleExeCopies {
         ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
 }
 
-# 平台地址：Agent 执行脚本时会注入 UPGRADE_AGENT_SERVER_URL。
-# 无法访问外网（或系统不支持 TLS 1.2）时，改从平台自身下载（平台代缓存，可用 HTTP）。
-$PlatformURL = $env:UPGRADE_AGENT_SERVER_URL
-# UPGRADE_MGR_SERVER 由服务端下发任务时注入（主机实际可达的平台地址），兼容未注入前者的老 Agent。
+# 平台地址：优先服务端设置页/配置文件里的 external_url（服务端下发任务时注入），
+# 其次 Agent 当前实际连通的地址，最后兼容旧版 UPGRADE_MGR_SERVER。
+# 这样示例脚本不硬编码平台 IP/域名，改 external_url 后自动跟随。
+$PlatformURL = $env:UPGRADE_MGR_EXTERNAL_URL
+if (-not $PlatformURL) { $PlatformURL = $env:UPGRADE_AGENT_SERVER_URL }
 if (-not $PlatformURL) { $PlatformURL = $env:UPGRADE_MGR_SERVER }
 if ($env:WINDOWS_EXPORTER_PLATFORM_URL) { $PlatformURL = $env:WINDOWS_EXPORTER_PLATFORM_URL }
 

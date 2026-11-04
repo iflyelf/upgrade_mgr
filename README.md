@@ -459,6 +459,8 @@ server:
   host: 0.0.0.0
   port: 8090
   external_url: http://your-server-ip:8090
+  # 修改 external_url 时是否自动同步到已安装 Agent（默认 false；开启后下一次心跳切换并自检）
+  # auto_sync_agent_url: false
   session_secret: "请替换为至少16字节的随机密钥；留空会自动生成并持久化到数据库"
   # 审计日志保留天数（默认 180，最小 7；也可在设置页修改）
   audit_retention_days: 180
@@ -912,7 +914,7 @@ consul:  # 可选：同步主机清单；编排器不依赖 Consul
 ```
 
 > **配置优先级**：运行期「设置页」写入的 `app_settings` > 环境变量 > 配置文件 > 内置默认值。
-> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_MAX_CONCURRENT_UPLOADS`、`ARTIFACT_LOCK_WAIT`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`、`EXTERNAL_BINARY_PROXY`、`EXTERNAL_BINARY_PROXY_HOSTS`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
+> 配置文件中的 `${VAR}` **不会被自动展开**，敏感项请留空并通过环境变量注入。常用变量：`SERVER_EXTERNAL_URL`、`SERVER_AUTO_SYNC_AGENT_URL`、`TRUST_PROXY`、`COOKIE_SECURE`、`ADMIN_PASSWORD`、`SESSION_SECRET`、`CONSUL_ENABLED`、`CONSUL_SYNC_INTERVAL`、`CONSUL_TOKEN`、`CONSUL_CLEANUP_MISSING`、`CASDOOR_CLIENT_SECRET`、`ARTIFACT_STORAGE_TYPE`、`ARTIFACT_MAX_CONCURRENT_UPLOADS`、`ARTIFACT_LOCK_WAIT`、`ARTIFACT_S3_*`、`ARTIFACT_OSS_*`、`EXTERNAL_BINARY_PROXY`、`EXTERNAL_BINARY_PROXY_HOSTS`（可写入 systemd 的 `EnvironmentFile` 或 K8s Secret）。
 
 **配置文件 vs 设置页**：绝大多数配置都能在「设置」页直接改，配置文件只用于首次启动的引导。
 分三类（页面上有对应标记）：
@@ -936,6 +938,15 @@ consul:  # 可选：同步主机清单；编排器不依赖 Consul
 > **页面可直接修改**：登录控制台 → 设置 → 服务器 → “对外访问地址 external_url”，保存后写入
 > `app_settings`（优先级高于配置文件和环境变量）。新生成的 Agent 安装命令**立即**使用新地址，
 > 无需重启；接入卡片会显示当前命令使用的地址，留空时回退为当前请求的 Host。
+>
+> **让已安装 Agent 自动跟随**：开启「修改 external_url 时自动同步到已安装 Agent」
+> （`server.auto_sync_agent_url`，默认关闭）。开启后保存 `external_url` 会自动写入所有
+> 未手工设置「连接地址覆盖」的主机；Agent 在下一次心跳（约 30 秒）切换并触发主机侧自检，
+> 连续 3 次失败自动回退默认地址。手工覆盖优先，不会被自动覆盖。
+>
+> **示例脚本动态读取**：服务端下发任务时会注入 `UPGRADE_MGR_EXTERNAL_URL`（即当前
+> `external_url`），示例的 node_exporter / windows_exporter 脚本会优先使用它，不再硬编码
+> 平台 IP 或域名；同时保留 `UPGRADE_AGENT_SERVER_URL` / `UPGRADE_MGR_SERVER` 作为兼容回退。
 >
 > 注意：Casdoor 回调地址和 `cookie_secure: auto` 在服务启动时计算，修改 `external_url` 后
 > 如需同步这两项，请重启服务。
@@ -985,6 +996,8 @@ Docker 环境变量方式：
 
 ```bash
 SERVER_EXTERNAL_URL=http://10.0.88.88:8090
+# 修改 external_url 时自动同步到已安装 Agent（默认 false）
+SERVER_AUTO_SYNC_AGENT_URL=false
 TRUST_PROXY=false
 COOKIE_SECURE=auto
 ```
@@ -1164,6 +1177,11 @@ Get-Service upgrade-agent
 | `hosts.agent_default_server_url` | 安装时的默认地址 | 自动上报，用于补齐协议/端口 |
 
 页面操作：主机页「编辑」→ 填「连接地址覆盖」→ 保存。
+
+**自动同步 external_url（可选）**：在「设置 → 服务器」开启「修改 external_url 时自动同步到
+已安装 Agent」后，保存 `external_url` 会把它写入所有未手工覆盖的主机（`server_url_auto=true`），
+并按上面的流程触发切换与自检。再次修改 `external_url` 时只更新自动同步的主机；运维在主机编辑
+中手工修改/清空连接地址后，该主机转为手工覆盖（`server_url_auto=false`），不再被自动更新。
 
 - 支持 `10.8.0.5`、`10.8.0.5:8090`、`https://mgr.example.com` 三种写法；
   只填 IP 时沿用安装时的协议与端口（默认地址无端口则按协议补 80/443）。

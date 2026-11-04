@@ -26,13 +26,20 @@ func UpdateSettings(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
+		before := s.Settings.Snapshot()
 		applied, err := s.Settings.Apply(r.Context(), kv)
 		if err != nil {
 			auditOp(s, r, audit.ActionSettingUpdate, "setting", "", "", err)
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}
+		after := s.Settings.Snapshot()
 		auditOp(s, r, audit.ActionSettingUpdate, "setting", "", strings.Join(applied, ","), nil)
+		// 开启自动同步后，external_url 变化（或刚开启开关）时自动写入 Agent 连接地址覆盖，
+		// 下一次心跳切换并触发主机侧自检；手工覆盖优先。
+		maybeSyncExternalURLToAgents(r.Context(), s,
+			before.Server.AutoSyncAgentURL, after.Server.AutoSyncAgentURL,
+			before.Server.ExternalURL, after.Server.ExternalURL)
 		if setting.NeedsConsulReload(applied) {
 			s.ReloadConsul()
 		}
@@ -52,12 +59,17 @@ func UpdateSettings(s *svc.ServiceContext) http.HandlerFunc {
 func ResetSetting(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimSpace(r.PathValue("key"))
+		before := s.Settings.Snapshot()
 		if err := s.Settings.Reset(r.Context(), key); err != nil {
 			auditOp(s, r, audit.ActionSettingReset, "setting", key, key, err)
 			httpx.FailErr(w, http.StatusBadRequest, err)
 			return
 		}
+		after := s.Settings.Snapshot()
 		auditOp(s, r, audit.ActionSettingReset, "setting", key, key, nil)
+		maybeSyncExternalURLToAgents(r.Context(), s,
+			before.Server.AutoSyncAgentURL, after.Server.AutoSyncAgentURL,
+			before.Server.ExternalURL, after.Server.ExternalURL)
 		applied := []string{key}
 		if setting.NeedsConsulReload(applied) {
 			s.ReloadConsul()

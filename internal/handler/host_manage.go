@@ -181,6 +181,9 @@ func HostUpdate(s *svc.ServiceContext) http.HandlerFunc {
 				host_type  = COALESCE($8, host_type),
 				tunnel_ip  = COALESCE($9, tunnel_ip),
 				server_url_override = COALESCE($10, server_url_override),
+				server_url_auto = CASE
+					WHEN $10::text IS NULL OR $10::text = COALESCE(server_url_override,'') THEN server_url_auto
+					ELSE FALSE END,
 				custom_fields = CASE WHEN $11::text IS NULL THEN custom_fields
 				                     ELSE COALESCE(custom_fields,'{}'::jsonb) || $11::jsonb END,
 				updated_at = NOW()

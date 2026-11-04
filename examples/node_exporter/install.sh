@@ -23,6 +23,8 @@
 #   NODE_EXPORTER_VERSION  版本，默认 latest
 #   NODE_EXPORTER_PROXY    下载代理前缀，默认 https://proxy.xiaonuo.live/?url=
 #   NODE_EXPORTER_BASE     下载基础 URL，默认 GitHub iflyelf release 地址
+#   UPGRADE_MGR_EXTERNAL_URL  服务端 external_url（服务端下发任务时注入），示例脚本
+#                          动态读取，不再硬编码平台地址
 #   UPGRADE_AGENT_SERVER_URL  平台地址（Agent 执行时自动注入）；GitHub 不通时回退到
 #                          平台 /api/external/binary/node-exporter-linux-<arch>（仅 latest）
 #
@@ -186,10 +188,11 @@ print_env() {
   esac
 }
 
-# 平台地址：Agent 执行脚本时注入 UPGRADE_AGENT_SERVER_URL；手工执行可自行 export。
-# UPGRADE_MGR_SERVER 由服务端下发任务时注入（主机实际可达的平台地址），兼容未注入前者的老 Agent。
-PLATFORM_URL="${UPGRADE_AGENT_SERVER_URL:-${UPGRADE_MGR_SERVER:-}}"
-PLATFORM_URL="${PLATFORM_URL%/}"
+# 平台地址候选（按顺序尝试）：
+#   1. UPGRADE_MGR_EXTERNAL_URL：服务端设置页的 external_url（动态下发，最符合“对外地址”）
+#   2. UPGRADE_AGENT_SERVER_URL：Agent 当前实际连通的地址（主机一定能访问）
+#   3. UPGRADE_MGR_SERVER：服务端为兼容旧脚本注入的地址
+PLATFORM_URLS="${UPGRADE_MGR_EXTERNAL_URL:-} ${UPGRADE_AGENT_SERVER_URL:-} ${UPGRADE_MGR_SERVER:-}"
 # 平台「外部文件」白名单中的名称（与 internal/pkg/extbin 默认条目一致）。
 PLATFORM_ASSET=""
 
@@ -258,25 +261,30 @@ fetch_binary() {
   errors="GitHub 直连/代理失败"
   echo "WARN: GitHub 直连/代理下载失败" >&2
 
-  if [ -n "$PLATFORM_URL" ] && [ "$VERSION" = "latest" ]; then
-    platform="${PLATFORM_URL}/api/external/binary/${PLATFORM_ASSET}"
-    for src in "${platform}?local=1" "$platform"; do
-      case "$src" in
-        *local=1) label="平台离线缓存" ;;
-        *) label="平台代下载" ;;
-      esac
-      echo "下载（${label}）${src}"
-      if download "$src" "$dst" && is_elf "$dst"; then
-        return 0
-      fi
-      rm -f "$dst"
-      errors="${errors}；${label}失败"
-      echo "WARN: ${label}失败" >&2
+  platform_tried=0
+  if [ "$VERSION" = "latest" ]; then
+    for platform_base in $PLATFORM_URLS; do
+      platform_base="${platform_base%/}"
+      [ -n "$platform_base" ] || continue
+      platform_tried=1
+      platform="${platform_base}/api/external/binary/${PLATFORM_ASSET}"
+      for src in "${platform}?local=1" "$platform"; do
+        case "$src" in
+          *local=1) label="平台离线缓存" ;;
+          *) label="平台代下载" ;;
+        esac
+        echo "下载（${label}）${src}"
+        if download "$src" "$dst" && is_elf "$dst"; then
+          return 0
+        fi
+        rm -f "$dst"
+        errors="${errors}；${label}失败"
+        echo "WARN: ${label}失败" >&2
+      done
     done
-  elif [ -n "$PLATFORM_URL" ]; then
-    errors="${errors}；平台仅缓存 latest，版本 ${VERSION} 不回退平台"
+    [ "$platform_tried" = 1 ] || errors="${errors}；未设置平台地址（UPGRADE_MGR_EXTERNAL_URL / UPGRADE_AGENT_SERVER_URL），跳过平台回退"
   else
-    errors="${errors}；未设置 UPGRADE_AGENT_SERVER_URL，跳过平台回退"
+    errors="${errors}；平台仅缓存 latest，版本 ${VERSION} 不回退平台"
   fi
 
   echo "下载 node_exporter-linux-${ARCH} 失败：${errors}" >&2

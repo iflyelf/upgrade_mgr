@@ -21,28 +21,40 @@ func TestHostPlatformURL(t *testing.T) {
 	}
 }
 
+func TestExternalURLValue(t *testing.T) {
+	s := &Service{}
+	if got := s.externalURLValue(); got != "" {
+		t.Fatalf("未配置时应为空: %q", got)
+	}
+	s.SetExternalURL(func() string { return " https://ext.example.com/ " })
+	if got := s.externalURLValue(); got != "https://ext.example.com" {
+		t.Fatalf("externalURLValue = %q", got)
+	}
+}
+
 func TestAppendPlatformEnv(t *testing.T) {
-	if got := appendPlatformEnv(nil, ""); got != nil {
+	if got := appendPlatformEnv(nil, "", ""); got != nil {
 		t.Fatalf("地址为空时不应追加: %v", got)
 	}
 	base := make([]string, 1, 4)
 	base[0] = "A=1"
-	got := appendPlatformEnv(base, "http://p")
-	if !reflect.DeepEqual(got, []string{"A=1", "UPGRADE_MGR_SERVER=http://p"}) {
+	got := appendPlatformEnv(base, "http://p", "https://ext.example.com")
+	want := []string{"A=1", "UPGRADE_MGR_SERVER=http://p", "UPGRADE_MGR_EXTERNAL_URL=https://ext.example.com"}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("追加结果不符: %v", got)
 	}
 	// 不能写入调用方共享切片的底层数组（多主机共用同一组件定义）。
 	if other := append(base, "B=2"); other[1] != "B=2" || got[1] != "UPGRADE_MGR_SERVER=http://p" {
 		t.Fatalf("返回值与原切片共享了底层数组: %v %v", got, other)
 	}
-	custom := []string{"UPGRADE_MGR_SERVER=http://custom"}
-	if got := appendPlatformEnv(custom, "http://p"); !reflect.DeepEqual(got, custom) {
+	custom := []string{"UPGRADE_MGR_SERVER=http://custom", "UPGRADE_MGR_EXTERNAL_URL=https://custom.example.com"}
+	if got := appendPlatformEnv(custom, "http://p", "https://ext.example.com"); !reflect.DeepEqual(got, custom) {
 		t.Fatalf("用户显式设置时不应覆盖: %v", got)
 	}
 
 	spec := protocol.CommandSpec{Script: "echo"}
-	out := withPlatformEnv(spec, "http://p")
-	if len(spec.Env) != 0 || len(out.Env) != 1 {
+	out := withPlatformEnv(spec, "http://p", "https://ext.example.com")
+	if len(spec.Env) != 0 || len(out.Env) != 2 {
 		t.Fatalf("withPlatformEnv 不应修改原规格: %v %v", spec.Env, out.Env)
 	}
 }

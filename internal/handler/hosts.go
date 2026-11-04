@@ -28,8 +28,10 @@ type Host struct {
 	TunnelIP string `json:"tunnel_ip"`
 	// ServerURLOverride 是连接地址覆盖：非空时服务端下发给 Agent 切换连接入口。
 	ServerURLOverride string `json:"server_url_override"`
-	AgentServerURL    string `json:"agent_server_url"`
-	DefaultServerURL  string `json:"agent_default_server_url"`
+	// ServerURLIsAuto 表示该覆盖由 server.external_url 自动同步（手工修改后为 false）。
+	ServerURLIsAuto  bool   `json:"server_url_auto"`
+	AgentServerURL   string `json:"agent_server_url"`
+	DefaultServerURL string `json:"agent_default_server_url"`
 	// 隧道自检结果：nil 表示未检查/已清空；false 时列表标红。
 	TunnelCheckOK        *bool      `json:"tunnel_check_ok"`
 	TunnelCheckSource    string     `json:"tunnel_check_source"`
@@ -160,7 +162,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 		listArgs := append(append([]any{}, args...), size, offset)
 		rows, err := s.DB.QueryContext(r.Context(),
 			`SELECT h.id, h.ip, COALESCE(h.exit_ip,''), COALESCE(h.tunnel_ip,''),
-			        COALESCE(h.server_url_override,''),
+			        COALESCE(h.server_url_override,''), COALESCE(h.server_url_auto,false),
 			        COALESCE(h.agent_server_url,''), COALESCE(h.agent_default_server_url,''),
 			        h.tunnel_check_ok, COALESCE(h.tunnel_check_source,''), h.tunnel_check_at,
 			        COALESCE(h.tunnel_check_latency_ms,0), COALESCE(h.tunnel_check_detail,''),
@@ -185,7 +187,7 @@ func ListHosts(s *svc.ServiceContext) http.HandlerFunc {
 			var lastSeen sql.NullTime
 			var customRaw []byte
 			if err := rows.Scan(&h.ID, &h.IP, &h.ExitIP, &h.TunnelIP, &h.ServerURLOverride,
-				&h.AgentServerURL, &h.DefaultServerURL,
+				&h.ServerURLIsAuto, &h.AgentServerURL, &h.DefaultServerURL,
 				&checkOK, &h.TunnelCheckSource, &checkAt,
 				&h.TunnelCheckLatencyMS, &h.TunnelCheckDetail, &customRaw,
 				&h.Hostname, &h.OSFamily, &h.OSType, &h.Arch,
