@@ -5,6 +5,12 @@ start on runlevel [2345]
 stop on runlevel [!2345]
 
 respawn
-respawn limit unlimited
+# CentOS 6 的 upstart 0.6.5 不支持 unlimited；限制为 10 次/5 秒，避免异常重启风暴。
+respawn limit 10 5
 
-exec {{.BinPath}} run --server {{.ServerURL}} --state {{.StatePath}}
+# 显式把 stdout/stderr 写入固定文件。
+# CentOS 6 的 upstart 默认把任务输出送到控制台，若不重定向，重启后日志无法留存。
+script
+    umask 027
+    exec {{.BinPath}} run --server {{.ServerURL}} --state {{.StatePath}} >>/var/log/upgrade-agent.log 2>&1
+end script

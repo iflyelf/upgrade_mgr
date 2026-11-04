@@ -53,9 +53,30 @@ func installUpstart(opts Options) error {
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		return err
 	}
+	// upstart 日志固定写入 /var/log/upgrade-agent.log，安装 logrotate 防止无限增长。
+	// 写入失败不影响 Agent 启动，只提示管理员手工处理。
+	if err := installAgentLogrotate(); err != nil {
+		fmt.Printf("⚠️ 写入 logrotate 配置失败（日志仍会写入 /var/log/upgrade-agent.log）: %v\n", err)
+	}
 	// upstart 的 start 对已运行实例是空操作，先 stop 确保加载新二进制和新 state。
 	_ = run("stop", "upgrade-agent")
 	return run("start", "upgrade-agent")
+}
+
+// agentLogrotateConfig Agent 文件日志轮转配置（upstart 场景）。
+const agentLogrotateConfig = `/var/log/upgrade-agent.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+`
+
+// installAgentLogrotate 写入 Agent 日志轮转配置（upstart 场景使用文件日志）。
+func installAgentLogrotate() error {
+	return os.WriteFile("/etc/logrotate.d/upgrade-agent", []byte(agentLogrotateConfig), 0644)
 }
 
 // installWatchdog 安装 cron 看门狗（每分钟检查心跳并拉起）。
@@ -79,6 +100,7 @@ func uninstallPlatform(info osinfo.Info) error {
 	case "upstart":
 		_ = run("stop", "upgrade-agent")
 		_ = os.Remove("/etc/init/upgrade-agent.conf")
+		_ = os.Remove("/etc/logrotate.d/upgrade-agent")
 	}
 	return nil
 }
