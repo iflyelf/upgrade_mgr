@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -205,6 +206,39 @@ func TestListHostsMaintenanceNotOffline(t *testing.T) {
 	}
 	if len(filtered) != 1 || filtered[0].ID != maintID {
 		t.Fatalf("upgrading 筛选应只命中维护主机: %+v", filtered)
+	}
+}
+
+// TestMigrateLoopbackHostIP 验证历史 127.0.0.1 注册来源可在心跳时自动迁移。
+func TestMigrateLoopbackHostIP(t *testing.T) {
+	db, _ := setupHostDB(t)
+	// 回环 IP 有全局唯一约束，先清理测试库中可能残留的记录。
+	_, _ = db.Exec(`DELETE FROM hosts WHERE ip IN ('127.0.0.1','::1')`)
+
+	agentID := fmt.Sprintf("agent-migrate-%d", time.Now().UnixNano())
+	var id int64
+	if err := db.QueryRow(`
+		INSERT INTO hosts (ip, hostname, tenant_id, source, agent_id)
+		VALUES ('127.0.0.1', 'migrate', 1, 'agent', $1)
+		RETURNING id`, agentID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE id=$1`, id) })
+
+	migrateLoopbackHostIP(context.Background(), db, agentID, "203.0.113.77")
+	var got string
+	if err := db.QueryRow(`SELECT ip FROM hosts WHERE id=$1`, id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "203.0.113.77" {
+		t.Fatalf("注册来源未迁移: %q", got)
+	}
+
+	// 新地址仍是回环时不修改。
+	migrateLoopbackHostIP(context.Background(), db, agentID, "127.0.0.1")
+	db.QueryRow(`SELECT ip FROM hosts WHERE id=$1`, id).Scan(&got)
+	if got != "203.0.113.77" {
+		t.Fatalf("回环新地址不应覆盖真实 IP: %q", got)
 	}
 }
 
