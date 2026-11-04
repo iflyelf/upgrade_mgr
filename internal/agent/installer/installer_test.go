@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +108,31 @@ func TestWriteInitialStateForceOverwritesCredentials(t *testing.T) {
 	}
 	if st.ServerURL != "https://new.example.com" || st.EnrollToken != "new-token" {
 		t.Fatalf("--force 应写入新服务端/令牌，got %+v", st)
+	}
+}
+
+// TestUpstartTemplateLogsToFile CentOS 6 的 upstart 任务必须把日志重定向到固定文件。
+func TestUpstartTemplateLogsToFile(t *testing.T) {
+	content, err := render("upgrade-agent.conf.tmpl", Options{
+		BinPath:   "/usr/local/bin/upgrade-agent",
+		ServerURL: "http://mgr.example.com:8090",
+		StatePath: "/var/lib/upgrade-agent/state.json",
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, want := range []string{
+		">>/var/log/upgrade-agent.log 2>&1",
+		"respawn limit 10 5",
+		"script",
+		"end script",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("upstart 模板缺少 %q:\n%s", want, content)
+		}
+	}
+	if !strings.Contains(agentLogrotateConfig, "/var/log/upgrade-agent.log") {
+		t.Fatalf("logrotate 配置未指向 Agent 日志: %s", agentLogrotateConfig)
 	}
 }
 

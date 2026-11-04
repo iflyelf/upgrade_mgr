@@ -2104,6 +2104,34 @@ journalctl -u upgrade-agent -f
 systemctl restart upgrade-agent
 ```
 
+**CentOS 6 / 老系统（upstart，无 systemd）**：
+
+```bash
+# 服务状态
+initctl status upgrade-agent
+# 或
+service upgrade-agent status
+
+# 查看日志（新版 Agent 固定写入该文件）
+tail -f /var/log/upgrade-agent.log
+
+# 排查启动/注册问题
+initctl restart upgrade-agent
+
+# 旧版本尚未重定向日志时：查看 init/upstart 输出
+grep -i upgrade-agent /var/log/messages
+```
+
+> CentOS 6 的 upstart 默认把任务输出送到控制台。新版 upstart 模板已改为
+> `>>/var/log/upgrade-agent.log 2>&1`，并安装 logrotate（每周轮转、保留 4 份）。
+> 若 `/var/log/upgrade-agent.log` 不存在，说明 Agent 还是旧版 upstart 配置：
+> 重新执行 `upgrade-agent install ...`，或手工在 `/etc/init/upgrade-agent.conf`
+> 的启动行追加 `>>/var/log/upgrade-agent.log 2>&1` 后
+> `initctl reload-configuration && initctl restart upgrade-agent`。
+>
+> 任务执行过程日志（下载/启动/退出码等）不以主机文件为准，直接在控制台
+> 「任务 → 详情日志」查看；主机本地日志主要用于排查 Agent 自身的连接、注册与重启问题。
+
 ### Q2: 制品上传失败？
 
 ```bash
