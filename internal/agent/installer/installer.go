@@ -55,8 +55,8 @@ type Options struct {
 	ServicePassword string
 }
 
-// Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选看门狗。
-func Install(opts Options) error {
+// normalizeOptions 填充默认路径与日志参数，供 Install/RefreshService 共用。
+func normalizeOptions(opts Options) Options {
 	if opts.BinPath == "" {
 		opts.BinPath = agentpath.BinPath()
 	}
@@ -73,6 +73,11 @@ func Install(opts Options) error {
 		opts.LogBackups = agentlog.DefaultBackups
 	}
 	opts.ServerURL = strings.TrimRight(opts.ServerURL, "/")
+	return opts
+}
+
+// validateServiceOptions 校验写入服务命令行的参数，防止注入或非法地址。
+func validateServiceOptions(opts Options) error {
 	// 服务单元模板会把这些值直接写入 ExecStart；拒绝换行等控制字符，
 	// 防止构造安装参数时向 unit 文件注入额外指令。
 	for name, v := range map[string]string{
@@ -90,6 +95,38 @@ func Install(opts Options) error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("server 必须是 http(s) 绝对地址: %q", opts.ServerURL)
 		}
+	}
+	return nil
+}
+
+// RefreshService 用当前运行参数刷新已安装的服务配置（systemd/upstart/SCM）。
+//
+// 该函数供 Agent 启动与自升级时调用：只更新命令/日志相关行，保留服务文件里的
+// 其他自定义配置；不重启服务。返回 changed 表示是否实际写入/更新。
+// 服务不存在（例如前台运行/未安装）时静默跳过，不影响自升级。
+func RefreshService(opts Options) (bool, error) {
+	opts = normalizeOptions(opts)
+	if err := validateServiceOptions(opts); err != nil {
+		return false, err
+	}
+	// 仅服务进程启动/自升级时刷新；手工前台 run 不覆盖已安装服务配置。
+	if !isServiceProcess() {
+		return false, nil
+	}
+	return refreshPlatform(opts, osinfo.Detect())
+}
+
+// serviceArgs 返回服务命令行中二进制之后的参数，供模板与增量刷新共用。
+func serviceArgs(opts Options) string {
+	return fmt.Sprintf("run --server %s --state %s --log %s --log-max-mb %d --log-backups %d",
+		opts.ServerURL, opts.StatePath, opts.LogPath, opts.LogMaxMB, opts.LogBackups)
+}
+
+// Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选看门狗。
+func Install(opts Options) error {
+	opts = normalizeOptions(opts)
+	if err := validateServiceOptions(opts); err != nil {
+		return err
 	}
 	info := osinfo.Detect()
 

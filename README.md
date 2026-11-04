@@ -257,6 +257,7 @@ sudo /tmp/upgrade-agent install \
 
 sudo /tmp/upgrade-agent status     # registration/connection status
 sudo /tmp/upgrade-agent diagnose   # diagnose connectivity to the console
+sudo /tmp/upgrade-agent logs -f    # tail Agent logs (Linux/Windows)
 ```
 
 **2. Component: use a Linux example**
@@ -1285,6 +1286,11 @@ Agent 注册/心跳会上报 `build_version`、自身二进制 SHA256（`build_h
 → 原子替换 → `exit(75)` → systemd/upstart 重启 → 新 Agent 心跳上报新 `build_hash` →
 服务端用指令中的目标哈希精确匹配并标记 `success`、清除维护窗口。Agent 不需要在退出前
 上报 success，因此即使 `exit(75)` 立即退出也能正确闭环。
+
+**服务配置自动刷新**：Agent 启动和自升级前会检查并自动更新 systemd / upstart / Windows SCM
+服务配置中的 `ExecStart`/`exec` 行，把最新的 `--log`、`--log-max-mb`、`--log-backups`
+写入服务配置；只替换命令/日志相关行，保留其他自定义配置。旧版 upstart 的 stderr 重定向
+和外部 logrotate 也会自动清理。无需手工重装 Agent 或修改 unit/init 文件。
 
 **旧 Agent 签名路径自动探测**：旧 Agent 注册时默认按 legacy `id` 签名。若目标 Agent 实际
 只支持 `signed_path`，首次会以「签名不匹配」拒绝；服务端自动把该 Agent 的 legacy 签名路径

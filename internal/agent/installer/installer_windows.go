@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -117,6 +118,56 @@ func installWatchdog(binPath, statePath string) error {
 
 func removeWatchdog() {
 	_ = exec.Command("schtasks.exe", "/Delete", "/TN", "upgrade-agent-watchdog", "/F").Run()
+}
+
+// isServiceProcess 判断当前进程是否由 Windows SCM 启动。
+func isServiceProcess() bool {
+	is, err := svc.IsWindowsService()
+	return err == nil && is
+}
+
+// refreshPlatform 自升级时更新已存在 Windows 服务的启动参数，不重启服务。
+func refreshPlatform(opts Options, info osinfo.Info) (bool, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false, err
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(ServiceName)
+	if err != nil {
+		return false, nil // 未安装为服务（前台运行），无需刷新
+	}
+	defer s.Close()
+
+	cfg, err := s.Config()
+	if err != nil {
+		return false, err
+	}
+	cmdline := buildServiceCommandLine(opts)
+	if cfg.BinaryPathName == cmdline {
+		return false, nil
+	}
+	cfg.BinaryPathName = cmdline
+	if err := s.UpdateConfig(cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// buildServiceCommandLine 构造 SCM BINARY_PATH_NAME，保留原有服务账户等配置。
+func buildServiceCommandLine(opts Options) string {
+	args := []string{
+		"run", "--server", opts.ServerURL, "--state", opts.StatePath,
+		"--log", opts.LogPath, "--log-max-mb", strconv.Itoa(opts.LogMaxMB),
+		"--log-backups", strconv.Itoa(opts.LogBackups), "--service",
+	}
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, syscall.EscapeArg(opts.BinPath))
+	for _, a := range args {
+		parts = append(parts, syscall.EscapeArg(a))
+	}
+	return strings.Join(parts, " ")
 }
 
 // uninstallPlatform 停止并删除 Windows 服务。
