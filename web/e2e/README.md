@@ -12,6 +12,10 @@
 go build -o /tmp/upgrade-mgr ./cmd/server
 /tmp/upgrade-mgr -c /tmp/config.yaml   # 需 PostgreSQL，admin 密码与下方一致
 
+# 全量用例每个测试都会登录一次。登录限流现默认关闭（server.login_rate_limit=0），
+# 如手动开启过，建议在本地配置中显式设为 0，避免 429 导致偶发失败。
+# CI 工作流也显式关闭了该限流。
+
 # 2. 安装依赖与浏览器（.npmrc 已指向 npmmirror）
 cd web/e2e
 npm ci

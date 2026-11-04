@@ -82,6 +82,8 @@ jobs:
             web_embedded: true
             agent_binary_dir: ./dist
             audit_retention_days: 30
+            # E2E 用例很多且每个用例都登录一次；关闭登录限流避免 429 造成偶发失败。
+            login_rate_limit: 0
           database:
             host: 127.0.0.1
             port: 5432

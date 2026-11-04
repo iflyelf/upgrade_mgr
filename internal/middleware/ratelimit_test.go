@@ -95,6 +95,51 @@ func TestRateLimit_StopIdempotent(t *testing.T) {
 	rl.Stop()
 }
 
+// TestDynamicRateLimit_FollowsLimit 页面改上限后下一次请求立即生效，0 表示关闭。
+func TestDynamicRateLimit_FollowsLimit(t *testing.T) {
+	limit := 0
+	dl := NewDynamicRateLimiter(time.Minute, false, nil)
+	defer dl.Stop()
+	h := DynamicRateLimitMiddleware(dl, func() int { return limit })(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	hit := func() int {
+		req := httptest.NewRequest("POST", "/api/auth/login", nil)
+		req.RemoteAddr = "10.0.0.9:12345"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// 默认关闭：连续请求全部放行。
+	for i := 0; i < 5; i++ {
+		if code := hit(); code != 200 {
+			t.Fatalf("关闭限流时应放行，第 %d 次返回 %d", i+1, code)
+		}
+	}
+
+	// 动态开启为 2：立即只放行 2 次。
+	limit = 2
+	if code := hit(); code != 200 {
+		t.Fatalf("第 1 次应放行，实际 %d", code)
+	}
+	if code := hit(); code != 200 {
+		t.Fatalf("第 2 次应放行，实际 %d", code)
+	}
+	if code := hit(); code != http.StatusTooManyRequests {
+		t.Fatalf("第 3 次应被限流，实际 %d", code)
+	}
+
+	// 再关闭：无需重启立即恢复放行。
+	limit = 0
+	if code := hit(); code != 200 {
+		t.Fatalf("关闭限流后应放行，实际 %d", code)
+	}
+
+	dl.Stop()
+	dl.Stop()
+}
+
 // TestRateLimit_Concurrent 并发下限流器无竞态（配合 -race）。
 func TestRateLimit_Concurrent(t *testing.T) {
 	rl := NewRateLimiter(100, time.Minute)

@@ -22,6 +22,35 @@ func TestLoadServerEnvOverrides(t *testing.T) {
 	}
 }
 
+// TestLoadLoginRateLimit 默认关闭（0）；环境变量可开启/关闭。
+func TestLoadLoginRateLimit(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Server.LoginRateLimit != 0 {
+		t.Fatalf("默认 LoginRateLimit = %d, want 0（关闭）", c.Server.LoginRateLimit)
+	}
+
+	t.Setenv("SERVER_LOGIN_RATE_LIMIT", "30")
+	c, err = Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Server.LoginRateLimit != 30 {
+		t.Fatalf("LoginRateLimit = %d, want 30", c.Server.LoginRateLimit)
+	}
+
+	t.Setenv("SERVER_LOGIN_RATE_LIMIT", "0")
+	c, err = Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Server.LoginRateLimit != 0 {
+		t.Fatalf("LoginRateLimit = %d, want 0（关闭）", c.Server.LoginRateLimit)
+	}
+}
+
 func TestLoadConsulSyncEnv(t *testing.T) {
 	t.Setenv("CONSUL_ENABLED", "true")
 	t.Setenv("CONSUL_SYNC_ON_START", "true")
