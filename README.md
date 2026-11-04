@@ -463,6 +463,9 @@ server:
   external_url: http://your-server-ip:8090
   # 修改 external_url 时是否自动同步到已安装 Agent（默认 false；开启后下一次心跳切换并自检）
   # auto_sync_agent_url: false
+  # 反向代理真实 IP：默认开启，仅信任本机回环；Nginx 在其它机器时追加代理 IP/CIDR
+  trust_proxy: true
+  trusted_proxies: ["127.0.0.1", "::1"]
   session_secret: "请替换为至少16字节的随机密钥；留空会自动生成并持久化到数据库"
   # 审计日志保留天数（默认 180，最小 7；也可在设置页修改）
   audit_retention_days: 180
@@ -999,7 +1002,7 @@ server:
   port: 8090
   web_embedded: true     # 默认 true，直接提供前端页面
   external_url: "http://10.0.88.88:8090"
-  trust_proxy: false     # 没有反向代理时必须保持 false
+  trust_proxy: false     # 无反向代理可显式关闭；默认 true 也只信任本机回环，外部 XFF 不会生效
   cookie_secure: "auto"  # HTTP 下自动为 false，登录正常
 ```
 
@@ -1009,7 +1012,9 @@ Docker 环境变量方式：
 SERVER_EXTERNAL_URL=http://10.0.88.88:8090
 # 修改 external_url 时自动同步到已安装 Agent（默认 false）
 SERVER_AUTO_SYNC_AGENT_URL=false
-TRUST_PROXY=false
+# 反向代理真实 IP：默认 true，仅信任本机回环；Nginx 在其它机器时追加代理 IP/CIDR
+TRUST_PROXY=true
+TRUSTED_PROXIES=127.0.0.1,::1
 COOKIE_SECURE=auto
 ```
 
@@ -2175,7 +2180,9 @@ grep -i upgrade-agent /var/log/messages
 
 Agent 注册时，`hosts.ip` 记录的是**服务端看到的 TCP 来源地址**，它同时也是主机身份，不能用 Agent 自报的出口 IP 直接替代（否则可伪造他人 IP 劫持主机）。
 
-显示 127.0.0.1 通常是因为控制台前面有 Nginx/本机隧道/代理：
+显示 127.0.0.1 通常是因为控制台前面有 Nginx/本机隧道/代理。
+
+新版默认已开启 `trust_proxy: true`，并只信任本机回环：
 
 ```yaml
 server:
@@ -2185,7 +2192,9 @@ server:
     - ::1
 ```
 
-Nginx 需要传递真实来源：
+也可以在页面配置：**设置 → 反向代理（需重启）→ 信任 X-Forwarded-For / X-Real-IP** 和 **受信代理 IP/CIDR**。
+
+如果 Nginx 在另一台机器，需要把它的 IP/CIDR 追加到 `trusted_proxies`，例如 `10.0.0.0/8`。Nginx 需要传递真实来源：
 
 ```nginx
 proxy_set_header X-Real-IP $remote_addr;

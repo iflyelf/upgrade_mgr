@@ -61,11 +61,12 @@ type ServerConfig struct {
 	AutoSyncAgentURL bool `yaml:"auto_sync_agent_url"`
 	// TrustProxy 是否信任 X-Forwarded-For / X-Real-IP 头。
 	//
-	// 安全要点：仅当服务确实部署在可信反向代理（Nginx/LB）之后才可开启。
-	// 若服务直接暴露而开启此项，攻击者可伪造该头绕过基于 IP 的限流与审计。
-	// 默认 false（只信任 TCP 对端地址）。
+	// 安全要点：只有请求来源命中 TrustedProxies 时才采信转发头。默认开启并只信任
+	// 本机回环（127.0.0.1 / ::1），适配「Nginx 与控制在同机」的常见部署；
+	// 直连客户端伪造 XFF 不会生效。反向代理在其它机器时，必须把代理 IP/CIDR
+	// 加入 TrustedProxies，否则会回退为 TCP 对端地址。
 	TrustProxy bool `yaml:"trust_proxy"`
-	// TrustedProxies 受信代理 CIDR/IP 列表（如 10.0.0.0/8、127.0.0.1）。
+	// TrustedProxies 受信代理 CIDR/IP 列表（默认本机回环）。
 	// TrustProxy=true 时从 X-Forwarded-For 右侧向左跳过这些地址，取第一个非受信地址为客户端 IP；
 	// 列表为空时取 XFF 最右值（即直连代理所见的对端）。
 	TrustedProxies []string `yaml:"trusted_proxies"`
@@ -304,6 +305,10 @@ func Default() *Config {
 	return &Config{
 		Server: ServerConfig{
 			Host: "0.0.0.0", Port: 8090, WebEmbedded: true, AgentBinaryDir: "./dist",
+			// 默认信任本机回环代理（Nginx 与控制在同机），直连客户端不会命中受信列表，
+			// 因此伪造 XFF 不会生效。反向代理在其它机器时需在页面/配置中追加代理 IP。
+			TrustProxy:               true,
+			TrustedProxies:           []string{"127.0.0.1", "::1"},
 			AuditRetentionDays:       180,
 			LoginRateLimit:           0,
 			ExternalBinaryProxy:      extbin.DefaultProxyBase,
