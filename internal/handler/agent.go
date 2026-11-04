@@ -723,9 +723,18 @@ func normalizeAgentStatus(s string) string {
 }
 
 // clientIP 返回请求来源 IP。转发头是否可信由 server.trust_proxy 决定，
-// 默认不信任（直接暴露时 XFF 可被任意伪造）。
+// 默认不信任（直接暴露时 XFF 可被任意伪造）。配置 trusted_proxies 时只信任
+// 这些代理的转发头，避免直连客户端伪造 XFF。
 func clientIP(s *svc.ServiceContext, r *http.Request) string {
-	return netutil.ClientIP(r, s.ConfigSnapshot().Server.TrustProxy)
+	snap := s.ConfigSnapshot()
+	if !snap.Server.TrustProxy {
+		return netutil.ClientIP(r, false)
+	}
+	var trusted *netutil.ProxyList
+	if len(snap.Server.TrustedProxies) > 0 {
+		trusted, _ = netutil.ParseTrustedProxies(snap.Server.TrustedProxies)
+	}
+	return netutil.ClientIPWithProxies(r, true, trusted)
 }
 
 // isValidArch 校验架构白名单（防注入恶意文件名）。

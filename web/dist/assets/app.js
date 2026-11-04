@@ -1450,7 +1450,7 @@
       // 支持「按筛选条件全选」，删除走服务端后台作业（刷新页面不中断）。
       async: HOST_DELETE_JOB,
       confirmText: '删除后将级联删除这些主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n存在未完成任务或指令的主机会被跳过。',
-      label: function (x) { return x.ip; },
+      label: function (x) { return x.exit_ip || x.ip; },
       onDone: function (wholePage) {
         if (wholePage && state.hostPage > 1) state.hostPage--;
         loadHosts();
@@ -1674,14 +1674,16 @@
   }
 
   // ipCell 展示主机地址：
-  //   - 主地址为注册来源 IP（服务端观察到的地址，作为主机身份）；
-  //   - 多网卡时补充 Agent 探测到的出口 IP；
+  //   - 主地址优先展示 Agent 探测到的出口 IP（实际业务网地址）；
+  //   - 没有出口 IP 时回退注册来源 IP；
+  //   - 两者不同时把注册来源作为次要信息展示（如 127.0.0.1/反向代理场景）；
   //   - 主机隧道 IP 仅作展示/筛选；
   //   - 连接地址覆盖非空时展示，并用 Agent 自报的连接地址确认是否已切换。
   function ipCell(x) {
-    var out = [h('div', {}, [x.ip])];
+    var primary = x.exit_ip || x.ip;
+    var out = [h('div', {}, [primary])];
     if (x.exit_ip && x.exit_ip !== x.ip) {
-      out.push(h('div', { class: 'muted' }, ['出口 ' + x.exit_ip]));
+      out.push(h('div', { class: 'muted' }, ['注册来源 ' + x.ip]));
     }
     if (x.tunnel_ip) {
       out.push(h('div', { class: 'muted' }, ['主机隧道 ' + x.tunnel_ip]));
@@ -1858,8 +1860,11 @@
     };
 
     return h('div', { class: 'card' }, [
-      h('h3', {}, ['编辑主机 ' + host.ip]),
+      h('h3', {}, ['编辑主机 ' + (host.exit_ip || host.ip)]),
       hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。出口 IP 与连接地址覆盖见下方说明。'),
+      (host.exit_ip && host.exit_ip !== host.ip
+        ? hint('注册来源 IP：' + host.ip + '（可能是反向代理/隧道地址；主机身份仍以注册来源为准）')
+        : null),
       h('div', { class: 'grid2' }, [
         field('主机名 (hostname)', nameEl),
         field('账号 (account)', accountEl)
@@ -1916,7 +1921,7 @@
   }
 
   function deleteHost(host) {
-    var msg = '确定删除主机 ' + host.ip + ' 吗？\n\n' +
+    var msg = '确定删除主机 ' + (host.exit_ip || host.ip) + ' 吗？\n\n' +
       '删除后将级联删除该主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n' +
       '如果主机存在未完成任务或指令，删除会被拒绝。';
     if (!confirm(msg)) return;

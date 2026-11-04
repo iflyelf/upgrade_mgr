@@ -14,7 +14,28 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/middleware"
 	"github.com/iflyelf/upgrade_mgr/internal/setting"
+	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
+
+func TestClientIPUsesTrustedProxy(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.TrustProxy = true
+	cfg.Server.TrustedProxies = []string{"127.0.0.1"}
+	sc := &svc.ServiceContext{Config: cfg}
+
+	req := httptest.NewRequest("POST", "/api/agent/register", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	if got := clientIP(sc, req); got != "203.0.113.9" {
+		t.Fatalf("受信代理的 XFF 应被采用，got %q", got)
+	}
+
+	// 直连客户端即使伪造 XFF，也不应被信任。
+	req.RemoteAddr = "198.51.100.7:12345"
+	if got := clientIP(sc, req); got != "198.51.100.7" {
+		t.Fatalf("非受信来源应忽略 XFF，got %q", got)
+	}
+}
 
 func TestBuildInstallCommandRemovesStaleBinary(t *testing.T) {
 	cmd := buildInstallCommand("http://10.1.230.50:8090", "amd64", "tok-123", false, "")
