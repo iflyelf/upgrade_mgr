@@ -765,7 +765,7 @@
   //      不会被外层 `exit $LASTEXITCODE` 吞成成功。
   function windowsInstallScript(action) {
     var args = action === 'uninstall' ? ' uninstall -Yes' : ' ' + action;
-    // 控制台地址兜底：老 Agent 可能没有注入 UPGRADE_AGENT_SERVER_URL。
+    // 控制台地址兜底：老 Agent 可能没有注入平台地址变量。
     var consoleBase = '';
     try {
       if (location && location.origin && location.origin !== 'null' &&
@@ -776,7 +776,8 @@
     return [
       "$ErrorActionPreference = 'Stop'",
       "# 平台地址优先（2008 R2 可用 HTTP，不依赖 GitHub/TLS 1.2）",
-      "$base = $env:UPGRADE_AGENT_SERVER_URL",
+      "$base = $env:UPGRADE_MGR_EXTERNAL_URL",
+      "if (-not $base) { $base = $env:UPGRADE_AGENT_SERVER_URL }",
       "if (-not $base) { $base = $env:UPGRADE_MGR_SERVER }",
       "if (-not $base) { $base = '" + consoleBase + "' }",
       "$localUrl = ''",
@@ -882,14 +883,14 @@
   // installScript(action) 生成"先下载 install.sh 再执行指定动作"的脚本。
   // 优先从平台内网缓存下载，失败后自动切换到外网代理。
   //
-  // 平台地址取 Agent 注入的 UPGRADE_AGENT_SERVER_URL（Agent 当前实际连通的地址），
-  // 与 install.sh / Windows 示例一致；UPGRADE_MGR_SERVER 由服务端下发时按主机注入
-  // （兼容老 Agent），两者都为空时才用控制台页面地址兜底，不再回退到 localhost。
+  // 平台地址优先取服务端下发的 UPGRADE_MGR_EXTERNAL_URL（设置页 external_url），
+  // 其次 Agent 注入的 UPGRADE_AGENT_SERVER_URL，再次兼容变量 UPGRADE_MGR_SERVER，
+  // 都为空时才用控制台页面地址兜底，不再回退到 localhost。
   function installScript(action) {
     return [
       '#!/bin/bash',
       'set -e',
-      'b="${UPGRADE_AGENT_SERVER_URL:-${UPGRADE_MGR_SERVER:-' + consoleBaseURL() + '}}"',
+      'b="${UPGRADE_MGR_EXTERNAL_URL:-${UPGRADE_AGENT_SERVER_URL:-${UPGRADE_MGR_SERVER:-' + consoleBaseURL() + '}}}"',
       'b="${b%/}"',
       'proxyUrl=\'' + INSTALL_SCRIPT_URL + '\'',
       'f=$(mktemp /tmp/node_exporter-install.XXXXXX.sh)',
@@ -917,7 +918,7 @@
       '  try "平台离线缓存" "$b' + INSTALL_SCRIPT_PLATFORM_URL + '?local=1" && ok=1',
       '  [ "$ok" = 1 ] || { try "平台代下载" "$b' + INSTALL_SCRIPT_PLATFORM_URL + '" && ok=1; }',
       'else',
-      '  echo "WARN: 未获取到平台地址（UPGRADE_AGENT_SERVER_URL 为空），跳过平台下载" >&2',
+      '  echo "WARN: 未获取到平台地址（UPGRADE_MGR_EXTERNAL_URL / UPGRADE_AGENT_SERVER_URL 为空），跳过平台下载" >&2',
       'fi',
       '[ "$ok" = 1 ] || { try "外网代理" "$proxyUrl" && ok=1; }',
       'if [ "$ok" != 1 ]; then',
@@ -1686,7 +1687,9 @@
       out.push(h('div', { class: 'muted' }, ['主机隧道 ' + x.tunnel_ip]));
     }
     if (x.server_url_override) {
-      out.push(h('div', { class: 'muted' }, ['连接覆盖 ' + x.server_url_override]));
+      out.push(h('div', { class: 'muted' }, [
+        '连接覆盖' + (x.server_url_auto ? '（external_url 自动同步）' : '') + ' ' + x.server_url_override
+      ]));
       var connected = x.agent_server_url || '';
       out.push(h('div', { class: 'muted' }, [
         connected && connected.indexOf('://') >= 0 && sameEndpoint(connected, x.server_url_override)
@@ -1890,6 +1893,9 @@
       ]) : null,
       (host.exit_ip ? hint('Agent 上报的出口 IP：' + host.exit_ip + '（多网卡时用于确认实际出口网卡）') : null),
       (host.agent_server_url ? hint('Agent 当前连接地址：' + host.agent_server_url) : null),
+      (host.server_url_auto
+        ? hint('当前「连接地址覆盖」由 server.external_url 自动同步；手工修改后会转为手工覆盖，不再随 external_url 自动更新。')
+        : null),
       (host.server_url_override && host.tunnel_check_ok === false
         ? h('div', { class: 'err' }, ['上次连接地址自检未通过：' + (host.tunnel_check_detail || '')])
         : null),

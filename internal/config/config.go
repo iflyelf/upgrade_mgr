@@ -53,6 +53,12 @@ type ServerConfig struct {
 	// 生产环境务必经 HTTPS 暴露，否则会话令牌可被明文窃取。
 	CookieSecure string `yaml:"cookie_secure"`
 	ExternalURL  string `yaml:"external_url"` // 对外可达地址，用于生成 Agent 安装命令
+	// AutoSyncAgentURL 修改 external_url 时自动同步到已安装 Agent。
+	//
+	// 开启后保存 external_url 会把新地址写入所有未手工覆盖连接地址的主机，
+	// Agent 在下一次心跳自动切换并触发主机侧自检；手工覆盖优先。
+	// 默认关闭：external_url 可能只对浏览器/公网可达，Agent 仍走内网地址。
+	AutoSyncAgentURL bool `yaml:"auto_sync_agent_url"`
 	// TrustProxy 是否信任 X-Forwarded-For / X-Real-IP 头。
 	//
 	// 安全要点：仅当服务确实部署在可信反向代理（Nginx/LB）之后才可开启。
@@ -415,6 +421,7 @@ func (c *Config) applyEnv() {
 	setInt(&c.Server.LoginRateLimit, "SERVER_LOGIN_RATE_LIMIT")
 	setStr(&c.Server.SessionSecret, "SESSION_SECRET")
 	setStr(&c.Server.ExternalURL, "SERVER_EXTERNAL_URL")
+	setBool(&c.Server.AutoSyncAgentURL, "SERVER_AUTO_SYNC_AGENT_URL")
 	setBool(&c.Server.TrustProxy, "TRUST_PROXY")
 	setStr(&c.Server.CookieSecure, "COOKIE_SECURE")
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {

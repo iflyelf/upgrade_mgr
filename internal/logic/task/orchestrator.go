@@ -345,7 +345,7 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 					"Agent 版本过低，不支持执行命令任务；请先升级 Agent")
 				continue
 			}
-			spec := withPlatformEnv(cmdSpec, o.svc.hostPlatformURL(r.agentURL))
+			spec := withPlatformEnv(cmdSpec, o.svc.hostPlatformURL(r.agentURL), o.svc.externalURLValue())
 			payload := protocol.CommandPayload{Command: &spec, ToVersion: version}
 			pj, _ := json.Marshal(payload)
 			ok, err := o.dispatchHostWithType(ctx, taskID, r.thID, r.hostID, r.aid, protocol.CmdRunCommand, pj)
@@ -382,7 +382,7 @@ func (o *Orchestrator) dispatchBatch(ctx context.Context, taskID, compID int64, 
 		}
 		// 组件的 exec_args/脚本同样可能引用 UPGRADE_MGR_SERVER；按主机补上实际可达的平台地址。
 		hostComp := comp
-		hostComp.ExecEnv = appendPlatformEnv(comp.ExecEnv, o.svc.hostPlatformURL(r.agentURL))
+		hostComp.ExecEnv = appendPlatformEnv(comp.ExecEnv, o.svc.hostPlatformURL(r.agentURL), o.svc.externalURLValue())
 		payload := protocol.CommandPayload{
 			Component: hostComp, ToVersion: version,
 			Artifact: art,
