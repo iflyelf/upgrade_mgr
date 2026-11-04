@@ -238,6 +238,10 @@ func AgentHeartbeat(s *svc.ServiceContext) http.HandlerFunc {
 			build_hash=CASE WHEN $4<>'' THEN $4 ELSE build_hash END,
 			build_variant=CASE WHEN $4<>'' THEN $5 ELSE build_variant END
 			WHERE agent_id=$1`, agentID, status, buildVersion, buildHash, buildVariant, modes, caps)
+		// 历史数据修正：旧版本经 Nginx 注册时 hosts.ip 可能被写成 127.0.0.1。
+		// 若本次心跳已能解析出真实来源 IP，自动把该主机的注册来源迁移过去，
+		// 无需删除主机后重新注册。
+		migrateLoopbackHostIP(r.Context(), s.DB, agentID, clientIP(s, r))
 		// 自升级命令在 Agent 退出前无法上报 success，由新版本心跳按目标 SHA256 确认。
 		if buildHash != "" {
 			markSelfUpdateSuccess(r.Context(), s.DB, agentID, buildHash)
@@ -742,6 +746,34 @@ func clientIP(s *svc.ServiceContext, r *http.Request) string {
 		trusted, _ = netutil.ParseTrustedProxies(snap.Server.TrustedProxies)
 	}
 	return netutil.ClientIPWithProxies(r, true, trusted)
+}
+
+// migrateLoopbackHostIP 把历史注册来源为 127.0.0.1/::1 的主机自动迁移到真实来源 IP。
+//
+// 只处理「当前 ip 是回环地址、本次请求解析出非回环地址」的情况，避免影响正常主机。
+// hosts.ip 有全局唯一约束：若真实 IP 已被其他记录占用，更新失败只记录日志，
+// 由运维清理重复记录，不影响心跳。
+func migrateLoopbackHostIP(ctx context.Context, db *sql.DB, agentID, newIP string) {
+	if db == nil || agentID == "" || newIP == "" {
+		return
+	}
+	parsed := net.ParseIP(newIP)
+	if parsed == nil || parsed.IsLoopback() {
+		return
+	}
+	res, err := db.ExecContext(ctx, `
+		UPDATE hosts SET ip=$2
+		WHERE agent_id=$1 AND (ip='127.0.0.1' OR ip='::1')`, agentID, newIP)
+	if err != nil {
+		log.Printf("⚠️ 自动修正注册来源 IP 失败 agent=%s -> %s: %v", agentID, newIP, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("🔧 已自动修正 Agent 注册来源 IP: agent=%s -> %s", agentID, newIP)
+	}
+	_, _ = db.ExecContext(ctx, `
+		UPDATE agents SET ip=$2
+		WHERE agent_id=$1 AND (ip='127.0.0.1' OR ip='::1')`, agentID, newIP)
 }
 
 // isValidArch 校验架构白名单（防注入恶意文件名）。
