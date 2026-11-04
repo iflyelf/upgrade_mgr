@@ -2171,7 +2171,32 @@ grep -i upgrade-agent /var/log/messages
 > 任务执行过程日志（下载/启动/退出码等）不以主机文件为准，直接在控制台
 > 「任务 → 详情日志」查看；主机本地日志主要用于排查 Agent 自身的连接、注册与重启问题。
 
-### Q2: 制品上传失败？
+### Q2: 主机列表 IP 显示 127.0.0.1，但出口 IP 是真实地址？
+
+Agent 注册时，`hosts.ip` 记录的是**服务端看到的 TCP 来源地址**，它同时也是主机身份，不能用 Agent 自报的出口 IP 直接替代（否则可伪造他人 IP 劫持主机）。
+
+显示 127.0.0.1 通常是因为控制台前面有 Nginx/本机隧道/代理：
+
+```yaml
+server:
+  trust_proxy: true
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
+```
+
+Nginx 需要传递真实来源：
+
+```nginx
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+```
+
+保存设置后重启服务端，并让 Agent 重新注册（`install --force` 或删除主机后重装）。页面现在会优先显示 Agent 上报的出口 IP，并把注册来源作为次要信息展示。
+
+如果 Agent 是通过本机代理端口（如 127.0.0.1:7890）连接控制台，服务端可能拿不到 XFF，此时需要改为直连控制台地址，或后续引入机器唯一 ID 作为主机身份。
+
+### Q3: 制品上传失败？
 
 ```bash
 # 检查磁盘空间
