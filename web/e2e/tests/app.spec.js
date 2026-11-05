@@ -15,6 +15,10 @@ async function openNavMenu(page, label) {
   await page.locator('.main-nav .nav-link', { hasText: label }).click();
 }
 
+function autoAccept(page) {
+  page.on('dialog', (d) => d.accept());
+}
+
 test('登录失败提示', async ({ page }) => {
   await login(page, ADMIN, 'wrong-password');
   await expect(page.locator('.err')).toContainText('用户名或密码错误');
@@ -293,5 +297,83 @@ test('顶栏下拉菜单展开后不被父容器裁剪', async ({ page }) => {
     // 点击页面空白处关闭，保证下一轮从未展开状态开始。
     await page.locator('body').click({ position: { x: 5, y: 300 } });
     await expect(page.locator('.nav-dropdown.open')).toHaveCount(0);
+  }
+});
+
+test('主机 CSV 导入与批量编辑', async ({ page }) => {
+  autoAccept(page);
+  await login(page);
+  await page.locator('.main-nav').getByRole('button', { name: '主机', exact: true }).click();
+
+  const ip = '10.99.99.' + (Date.now() % 200 + 10);
+  await page.getByRole('button', { name: '导入 CSV' }).click();
+  const modal = page.locator('.modal');
+  await modal.locator('textarea').fill('ip,hostname,app_code\n' + ip + ',e2e-import,E2E');
+  await modal.getByRole('button', { name: '开始导入' }).click();
+  await expect(modal).toContainText('新建 1');
+  await modal.getByRole('button', { name: '关闭', exact: true }).click();
+
+  const search = page.locator('input[placeholder="IP/出口 IP/隧道地址/主机名/业务组"]');
+  await search.fill(ip);
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await expect(page.locator('table')).toContainText(ip);
+
+  await page.getByRole('checkbox', { name: '选择主机 ' + ip }).check();
+  await page.getByRole('button', { name: '批量编辑' }).click();
+  const edit = page.locator('.modal');
+  await edit.getByRole('checkbox', { name: '修改 主机名' }).check();
+  await edit.locator('.field input:not([type="checkbox"])').first().fill('e2e-edited');
+  await edit.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('table')).toContainText('e2e-edited');
+
+  // 清理导入的主机。
+  const list = await page.evaluate(async (q) => {
+    const r = await fetch('/api/hosts?q=' + encodeURIComponent(q));
+    return (await r.json()).data.list || [];
+  }, ip);
+  for (const h of list) {
+    await page.evaluate(async (id) => {
+      await fetch('/api/hosts/' + id, { method: 'DELETE' });
+    }, h.id);
+  }
+});
+
+test('自动化令牌支持批量删除', async ({ page }) => {
+  autoAccept(page);
+  await login(page);
+  await expect(page.locator('.main-nav')).toBeVisible();
+  const suffix = Date.now();
+  const names = ['e2e-batch-' + suffix + '-a', 'e2e-batch-' + suffix + '-b'];
+  const ids = [];
+  for (const name of names) {
+    const resp = await page.evaluate(async (n) => {
+      const r = await fetch('/api/agent/enroll-tokens', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: n, permanent: true })
+      });
+      return { ok: r.ok, body: await r.json() };
+    }, name);
+    expect(resp.ok).toBeTruthy();
+    ids.push(resp.body.data.id);
+  }
+  try {
+    await page.locator('.main-nav').getByRole('button', { name: '主机', exact: true }).click();
+    await page.getByRole('tab', { name: '自动化令牌' }).click();
+    await page.getByRole('button', { name: '刷新列表' }).click();
+    const tokenTable = page.locator('table').filter({ hasText: 'Token' });
+    for (const name of names) {
+      await expect(tokenTable).toContainText(name);
+      await page.getByRole('checkbox', { name: '选择自动化令牌 ' + name }).check();
+    }
+    await page.getByRole('button', { name: '批量删除（2）' }).click();
+    for (const name of names) {
+      await expect(tokenTable).not.toContainText(name);
+    }
+  } finally {
+    for (const id of ids) {
+      await page.evaluate(async (tid) => {
+        await fetch('/api/agent/enroll-tokens/' + tid + '/revoke', { method: 'POST' });
+      }, id);
+    }
   }
 });

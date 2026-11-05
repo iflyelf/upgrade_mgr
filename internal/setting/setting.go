@@ -493,6 +493,11 @@ var baseRegistry = []Item{
 			}
 			return nil
 		}},
+	{Key: "consul_mgr.cleanup_missing", Group: "consul_mgr 对接",
+		Label: "同步后自动清理该服务组已不存在的主机", Type: "bool",
+		Get:  func(c *config.Config) string { return b2s(c.ConsulMgr.CleanupMissing) },
+		Set:  func(c *config.Config, v string) { c.ConsulMgr.CleanupMissing = v == "true" },
+		Note: "只删除 source=consul_mgr 且属于当前同步服务组、无 Agent、无未完成任务/指令、非维护中的主机；manual/CSV 导入主机不受影响。服务组查询不完整（partial）时本轮跳过清理。"},
 	// 服务组不在设置里配置：同步时在主机页的下拉中选择（候选来自
 	// GET /api/consul-mgr/groups），避免「页面能选、配置又写死」两处语义冲突。
 

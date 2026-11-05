@@ -41,7 +41,11 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 			groupID = n
 		}
 
-		res, err := s.Syncer.SyncFromConsulMgr(r.Context(), cli, groupID)
+		cleanup := true
+		if s.Settings != nil {
+			cleanup = s.Settings.Snapshot().ConsulMgr.CleanupMissing
+		}
+		res, err := s.Syncer.SyncFromConsulMgr(r.Context(), cli, groupID, cleanup)
 		if errors.Is(err, synclogic.ErrSyncInProgress) {
 			httpx.Fail(w, http.StatusConflict, "已有同步任务正在执行，请稍后重试")
 			return
@@ -56,11 +60,13 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 			map[string]any{
 				"groups": res.Groups, "hosts": res.Hosts,
 				"upserted": res.Upserted, "partial": res.Partial,
+				"cleanup_deleted": res.CleanupDeleted, "cleanup_skipped": res.CleanupSkipped,
 			}, nil)
 		httpx.OK(w, map[string]any{
 			"groups": res.Groups, "hosts": res.Hosts,
 			"upserted": res.Upserted, "mappings": res.Mappings,
 			"failed_groups": res.FailedGroups, "partial": res.Partial,
+			"cleanup_deleted": res.CleanupDeleted, "cleanup_skipped": res.CleanupSkipped,
 			"duration": res.Duration.String(),
 		})
 	}

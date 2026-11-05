@@ -162,6 +162,8 @@ type hostRow struct {
 	Node       string
 	Datacenter string
 	Meta       map[string]string
+	// SourceGroup 外部同步来源的分组标识（consul_mgr group_id）。
+	SourceGroup string
 }
 
 func (h *hostRow) merge(in consul.ServiceInstance) {
@@ -226,6 +228,12 @@ func (s *Syncer) upsert(ctx context.Context, h *hostRow, set *hostfieldmap.Set,
 	updates := []string{
 		"last_synced_at = EXCLUDED.last_synced_at",
 		"updated_at     = EXCLUDED.updated_at",
+	}
+	if h.SourceGroup != "" {
+		args = append(args, h.SourceGroup)
+		insertCols = append(insertCols, "source_group")
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+		updates = append(updates, "source_group = EXCLUDED.source_group")
 	}
 	for _, name := range names {
 		// 白名单复核：绝不把未授权的列名拼进 SQL。
@@ -441,4 +449,106 @@ func (s *Syncer) deleteMissingHosts(ctx context.Context, syncedAt time.Time, ids
 		return deleted, err
 	}
 	return deleted, nil
+}
+
+// missingMgrHostCond 返回「可从 consul_mgr 当前服务组安全删除」的过滤条件。
+//
+// groupParam/syncedAtParam 由调用方传入占位符（如 $1/$2）。
+func missingMgrHostCond(groupParam, syncedAtParam string) string {
+	return `
+		h.source='consul_mgr'
+		AND h.source_group=` + groupParam + `
+		AND (h.agent_id IS NULL OR h.agent_id='')
+		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
+		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
+		AND (h.maintenance_until IS NULL OR h.maintenance_until <= NOW())
+		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.ip = h.ip)
+		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.host_id = h.id)
+		AND NOT EXISTS (SELECT 1 FROM task_hosts th
+		                WHERE th.host_id=h.id AND th.status IN ('pending','running'))
+		AND NOT EXISTS (SELECT 1 FROM commands c
+		                WHERE c.host_id=h.id AND c.status IN ('pending','dispatched','accepted','running'))`
+}
+
+// findMissingMgrHosts 无锁挑选 consul_mgr 当前服务组中待清理的主机。
+func (s *Syncer) findMissingMgrHosts(ctx context.Context, groupID int64, syncedAt time.Time, limit int) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT h.id FROM hosts h
+		WHERE `+missingMgrHostCond("$1", "$2")+`
+		ORDER BY h.id
+		LIMIT $3`, groupID, syncedAt, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// deleteMissingMgrHosts 按统一锁序删除 consul_mgr 当前服务组的候选主机。
+func (s *Syncer) deleteMissingMgrHosts(ctx context.Context, groupID int64, syncedAt time.Time, ids []int64) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	deleted := 0
+	for _, id := range ids {
+		for _, q := range []string{
+			`SELECT 1 FROM task_hosts WHERE host_id=$1 FOR UPDATE`,
+			`SELECT 1 FROM commands WHERE host_id=$1 FOR UPDATE`,
+		} {
+			rows, err := tx.QueryContext(ctx, q, id)
+			if err != nil {
+				return deleted, err
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return deleted, err
+			}
+		}
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM hosts h
+			WHERE h.id=$1 AND `+missingMgrHostCond("$2", "$3"), id, groupID, syncedAt)
+		if err != nil {
+			return deleted, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			deleted += int(n)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
+}
+
+// cleanupMissingMgrHosts 清理 consul_mgr 当前服务组中本轮未出现的主机。
+func (s *Syncer) cleanupMissingMgrHosts(ctx context.Context, groupID int64, syncedAt time.Time) (int, error) {
+	total := 0
+	for round := 0; round < maxCleanupBatches; round++ {
+		ids, err := s.findMissingMgrHosts(ctx, groupID, syncedAt, cleanupBatchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		n, err := s.deleteMissingMgrHosts(ctx, groupID, syncedAt, ids)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n == 0 || len(ids) < cleanupBatchSize {
+			return total, nil
+		}
+	}
+	return total, nil
 }

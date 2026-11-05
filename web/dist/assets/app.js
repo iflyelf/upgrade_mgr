@@ -60,6 +60,7 @@
     guideOpen: null, guideOS: '', quickstart: undefined, quickstartErr: '', enroll: null,
     enrollMode: 'one_time', automationList: null, automationErr: '', automationLoading: false, automationCreated: null,
     preview: null, editingComp: null, taskForm: null, uploadComponent: '',
+    hostImport: null, hostBatchEdit: null,
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
     taskDetailOpenLogs: {},
@@ -1427,6 +1428,13 @@
       filterSelect('os_family', 'OS', facetOptions('os_family')),
       filterSelect('account', '账号', facetOptions('account')),
       hostFilterActive() ? h('button', { class: 'btn ghost', onclick: clearAll }, ['清除筛选']) : null,
+      isAdmin() ? h('a', {
+        class: 'btn ghost',
+        href: '/api/hosts/export' + (hostFilterQS().length ? '?' + hostFilterQS().join('&') : ''),
+        download: ''
+      }, ['导出 CSV']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: openHostImport }, ['导入 CSV']) : null,
+      isAdmin() ? h('button', { class: 'btn ghost', onclick: openHostBatchEdit }, ['批量编辑']) : null,
       // 同步会写入/清理全局主机清单，后端要求 superadmin；其他角色不展示入口。
       isSuperAdmin() ? h('button', { class: 'btn ghost', onclick: syncHosts }, ['同步 Consul']) : null,
       // consul_mgr 同步仅 superadmin 可见：后端为 RequireSuperAdmin，其他角色点了必然 403。
@@ -1535,6 +1543,229 @@
         state.total > 0 ? hostsPager() : null
       ])
     ]);
+  }
+
+  function selectedHostIDs() {
+    if (state.hostAllSel && state.hostAllSel.ids) {
+      return Object.keys(state.hostAllSel.ids).map(Number);
+    }
+    var sel = state.hostSelected || {};
+    return (state.hosts || []).filter(function (x) { return sel[x.id]; }).map(function (x) { return x.id; });
+  }
+
+  function openHostImport() {
+    state.hostImport = {
+      csv: '', clearEmpty: false, createMissing: true,
+      busy: false, result: null, err: ''
+    };
+    render();
+  }
+
+  function hostImportModal() {
+    var st = state.hostImport;
+    var ta = h('textarea', {
+      rows: '10', spellcheck: 'false',
+      placeholder: 'ip,hostname,account,app_code,biz_group,department,vendor,host_type,tunnel_ip,server_url_override',
+      oninput: function () { st.csv = ta.value; }
+    }, []);
+    ta.value = st.csv || '';
+    var fileEl = h('input', {
+      type: 'file', accept: '.csv,text/csv',
+      onchange: function () {
+        var f = fileEl.files && fileEl.files[0];
+        if (!f) return;
+        var reader = new FileReader();
+        reader.onload = function () {
+          st.csv = String(reader.result || '');
+          ta.value = st.csv;
+        };
+        reader.readAsText(f, 'utf-8');
+      }
+    }, []);
+    var clearEl = h('input', {
+      type: 'checkbox', checked: !!st.clearEmpty,
+      onchange: function () { st.clearEmpty = clearEl.checked; }
+    }, []);
+    var createEl = h('input', {
+      type: 'checkbox', checked: st.createMissing !== false,
+      onchange: function () { st.createMissing = createEl.checked; }
+    }, []);
+    var resultBox = null;
+    if (st.result) {
+      var r = st.result;
+      var errs = r.errors || [];
+      resultBox = h('div', { class: 'field' }, [
+        h('div', {}, ['导入完成：新建 ' + (r.created || 0) + '，更新 ' + (r.updated || 0) +
+          '，跳过 ' + (r.skipped || 0) + '，失败 ' + (r.failed || 0)]),
+        errs.length ? h('div', { class: 'muted' }, ['前 ' + errs.length + ' 条错误：']) : null
+      ].concat(errs.map(function (e) {
+        return h('div', { class: 'err' }, ['第 ' + e.row + ' 行 ' + (e.ip || '') + '：' + e.error]);
+      })));
+    }
+    var errBox = st.err ? h('div', { class: 'err field', role: 'alert' }, [st.err]) : null;
+    var submit = h('button', {
+      class: 'btn', disabled: st.busy ? 'disabled' : null,
+      onclick: function () {
+        if (!String(st.csv || '').trim()) { alert('请选择 CSV 文件或粘贴内容'); return; }
+        st.busy = true;
+        st.err = '';
+        st.result = null;
+        submit.disabled = true;
+        submit.textContent = '导入中…';
+        api('/api/hosts/import', {
+          method: 'POST',
+          body: JSON.stringify({
+            csv: st.csv, clear_empty: !!st.clearEmpty,
+            create_missing: st.createMissing !== false
+          })
+        }).then(function (d) {
+          st.busy = false;
+          st.result = d || {};
+          loadHosts();
+          render();
+        }).catch(function (e) {
+          st.busy = false;
+          st.err = e.message;
+          render();
+        });
+      }
+    }, [st.busy ? '导入中…' : '开始导入']);
+    var mask = h('div', {
+      class: 'modal-mask',
+      onclick: function (e) { if (e.target === mask) { state.hostImport = null; render(); } }
+    }, [
+      h('div', { class: 'modal' }, [
+        h('h3', {}, ['导入主机 CSV']),
+        hint('以 ip 为唯一键：已存在主机更新非空单元格；不存在且勾选“创建缺失主机”时创建 manual 主机。' +
+          '导出文件可直接修改后导入；exit_ip 等只读列会被忽略。'),
+        field('选择 CSV 文件', fileEl, '支持 UTF-8；表头可用 ip/hostname/... 或中文列名。'),
+        field('或粘贴 CSV 内容', ta, '第一行必须是表头。'),
+        h('label', { class: 'check' }, [clearEl, ' 空单元格也覆盖（清空已有值）']),
+        h('label', { class: 'check' }, [createEl, ' IP 不存在时创建主机']),
+        errBox, resultBox,
+        h('div', { class: 'toolbar' }, [
+          submit,
+          h('button', {
+            class: 'btn ghost',
+            onclick: function () { state.hostImport = null; render(); }
+          }, ['关闭'])
+        ])
+      ])
+    ]);
+    return mask;
+  }
+
+  function openHostBatchEdit() {
+    var ids = selectedHostIDs();
+    if (!ids.length) {
+      alert('请先在主机列表勾选要编辑的主机');
+      return;
+    }
+    state.hostBatchEdit = { ids: ids, busy: false, err: '' };
+    render();
+  }
+
+  function hostBatchEditModal() {
+    var st = state.hostBatchEdit;
+    var rows = [];
+    function addRow(key, label, custom, input) {
+      var check = h('input', { type: 'checkbox', 'aria-label': '修改 ' + label }, []);
+      rows.push({ key: key, custom: custom, check: check, input: input });
+      return h('div', { class: 'field' }, [
+        h('label', { class: 'check' }, [check, ' ' + label]),
+        input
+      ]);
+    }
+    var builtins = [
+      ['hostname', '主机名'], ['account', '账号'], ['app_code', 'app_code'],
+      ['biz_group', '业务组'], ['department', '部门'], ['vendor', '厂商'],
+      ['host_type', '主机类型'], ['tunnel_ip', '主机隧道 IP'],
+      ['server_url_override', '连接地址覆盖']
+    ];
+    var nodes = builtins.map(function (b) {
+      var input = h('input', {
+        placeholder: b[0] === 'server_url_override'
+          ? '如 10.8.0.5、10.8.0.5:8090 或 https://mgr.example.com'
+          : ''
+      }, []);
+      return addRow(b[0], b[1], false, input);
+    });
+    var customDefs = (state.hostFieldDefs || []).filter(function (d) {
+      return d.editable;
+    }).sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
+    customDefs.forEach(function (d) {
+      var input;
+      if (d.fieldType === 'select') {
+        var opts = [];
+        try { opts = JSON.parse(d.options || '[]'); } catch (e) { opts = []; }
+        input = h('select', {}, [h('option', { value: '' }, ['（清空/未设置）'])].concat(
+          opts.map(function (x) { return h('option', { value: x }, [x]); })
+        ));
+      } else if (d.fieldType === 'textarea') {
+        input = h('textarea', { rows: '2' }, []);
+      } else {
+        input = h('input', {
+          type: d.fieldType === 'number' ? 'number' : (d.fieldType === 'date' ? 'date' : 'text')
+        }, []);
+      }
+      nodes.push(addRow(d.fieldKey, d.label || d.fieldKey, true, input));
+    });
+    var errBox = st.err ? h('div', { class: 'err field', role: 'alert' }, [st.err]) : null;
+    var submit = h('button', {
+      class: 'btn', disabled: st.busy ? 'disabled' : null,
+      onclick: function () {
+        var fields = {}, custom = {};
+        rows.forEach(function (r) {
+          if (!r.check.checked) return;
+          if (r.custom) custom[r.key] = r.input.value;
+          else fields[r.key] = r.input.value;
+        });
+        if (!Object.keys(fields).length && !Object.keys(custom).length) {
+          alert('请勾选至少一个要修改的字段');
+          return;
+        }
+        st.busy = true;
+        st.err = '';
+        submit.disabled = true;
+        submit.textContent = '保存中…';
+        api('/api/hosts/batch-update', {
+          method: 'POST',
+          body: JSON.stringify({ ids: st.ids, fields: fields, custom_fields: custom })
+        }).then(function (d) {
+          alert('已更新 ' + ((d && d.updated) || 0) + ' 台主机');
+          state.hostBatchEdit = null;
+          state.hostSelected = {};
+          state.hostAllSel = null;
+          loadHosts();
+          render();
+        }).catch(function (e) {
+          st.busy = false;
+          st.err = e.message;
+          submit.disabled = false;
+          submit.textContent = '保存';
+          alert('批量编辑失败: ' + e.message);
+        });
+      }
+    }, [st.busy ? '保存中…' : '保存']);
+    var mask = h('div', {
+      class: 'modal-mask',
+      onclick: function (e) { if (e.target === mask) { state.hostBatchEdit = null; render(); } }
+    }, [
+      h('div', { class: 'modal' }, [
+        h('h3', {}, ['批量编辑主机（' + st.ids.length + ' 台）']),
+        hint('勾选要修改的字段并填写新值；未勾选的字段保持不变。清空某个字段时勾选它并留空即可。'),
+        errBox,
+        h('div', { class: 'grid2' }, nodes),
+        h('div', { class: 'toolbar' }, [
+          submit,
+          h('button', {
+            class: 'btn ghost',
+            onclick: function () { state.hostBatchEdit = null; render(); }
+          }, ['取消'])
+        ])
+      ])
+    ]);
+    return mask;
   }
 
   function loadAgentStats() {
@@ -1780,10 +2011,12 @@
     // 主机自定义字段：定义来自 /api/field-defs/host（在 loadHosts 中加载一次）。
     // 值来自 host.custom_fields；保存时整体提交，服务端按键合并。
     var hostFieldInputs = {};
-    var hostFieldNodes = (state.hostFieldDefs || [])
-      .filter(function (d) { return d.showInForm && d.editable; })
+    var hostPrimaryNodes = [];
+    var hostOptionalNodes = [];
+    (state.hostFieldDefs || [])
+      .filter(function (d) { return d.editable; })
       .sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); })
-      .map(function (d) {
+      .forEach(function (d) {
         var cur = (host.custom_fields && host.custom_fields[d.fieldKey]) || '';
         var el;
         if (d.fieldType === 'select') {
@@ -1803,7 +2036,9 @@
           }, []);
         }
         hostFieldInputs[d.fieldKey] = el;
-        return field(d.label, el, '');
+        var node = field(d.label, el, '');
+        if (d.showInForm) hostPrimaryNodes.push(node);
+        else hostOptionalNodes.push(node);
       });
 
     // testTunnel 从平台侧拨测候选连接地址；结果保留在 state.tunnelTest，
@@ -1892,9 +2127,13 @@
           '保存后 Agent 在下一次心跳（约 30 秒内）自动切换并持久化；清空后回退默认地址。' +
           '连续 3 次心跳失败会自动回退并在 5 分钟内不再重试，避免失联。')
       ]),
-      hostFieldNodes.length ? h('div', {}, [
-        h('h3', {}, ['自定义字段']),
-        h('div', { class: 'grid2' }, hostFieldNodes)
+      (hostPrimaryNodes.length || hostOptionalNodes.length) ? h('div', {}, [
+        h('h3', {}, ['可选字段']),
+        hostPrimaryNodes.length ? h('div', { class: 'grid2' }, hostPrimaryNodes) : null,
+        hostOptionalNodes.length ? h('details', {}, [
+          h('summary', { class: 'muted' }, ['更多可选字段（' + hostOptionalNodes.length + '）']),
+          h('div', { class: 'grid2', style: 'margin-top:10px' }, hostOptionalNodes)
+        ]) : null
       ]) : null,
       (host.exit_ip ? hint('Agent 上报的出口 IP：' + host.exit_ip + '（多网卡时用于确认实际出口网卡）') : null),
       (host.agent_server_url ? hint('Agent 当前连接地址：' + host.agent_server_url) : null),
@@ -2090,12 +2329,28 @@
     } else if (!list || !list.length) {
       listBlock = hint('暂无自动化令牌。');
     } else {
-      listBlock = simpleTable(['名称', 'Token', '租户', '到期', '已用 / 上限', '最后使用', '状态', '操作'], list,
+      var tokenSel = batchSelection({
+        stateKey: 'automationTokenSel',
+        items: list,
+        noun: '自动化令牌',
+        unit: '个',
+        url: '/api/agent/enroll-tokens/batch-delete',
+        confirmText: '删除后无法恢复。有效令牌删除等同于立即注销，只阻止新主机注册。',
+        label: function (x) { return x.name || String(x.id); },
+        onDone: function () {
+          state.automationList = null;
+          loadAutomationTokens();
+          render();
+        }
+      });
+      var cols = ['名称', 'Token', '租户', '到期', '已用 / 上限', '最后使用', '状态', '操作'];
+      if (tokenSel) cols.unshift('选择');
+      var table = simpleTable(cols, list,
         function (x) {
           var status = x.status || (x.enabled ? 'active' : 'revoked');
           var statusText = { active: '启用', revoked: '已注销', expired: '已过期', exhausted: '已达上限' }[status] || status;
           var usage = x.max_uses ? x.used_count + ' / ' + x.max_uses : x.used_count + ' / 不限';
-          return [
+          var cells = [
             x.name || '-',
             (x.token_prefix || '-') + '…',
             String(x.tenant_id || ''),
@@ -2114,7 +2369,10 @@
               }, ['轮换']) : null
             ])
           ];
+          if (tokenSel) cells.unshift(tokenSel.cell(x));
+          return cells;
         });
+      listBlock = h('div', {}, [tokenSel ? tokenSel.bar : null, table]);
     }
 
     return h('div', {}, [
@@ -7259,6 +7517,12 @@
     if (state.mgrSync) {
       app.appendChild(consulMgrSyncModal());
     }
+    if (state.hostImport) {
+      app.appendChild(hostImportModal());
+    }
+    if (state.hostBatchEdit) {
+      app.appendChild(hostBatchEditModal());
+    }
     if (state.taskDetailId) {
       app.appendChild(taskDetailModal());
       // 自动刷新会重建 DOM，恢复用户原来的滚动位置。
@@ -7822,6 +8086,11 @@
           msg += '\n\n⚠️ 部分服务组查询失败，清单不完整：' +
             (d.failed_groups || []).join('、');
         }
+        if (d.cleanup_deleted) {
+          msg += '\n已清理该服务组已不存在的主机：' + d.cleanup_deleted + ' 台';
+        } else if (d.cleanup_skipped) {
+          msg += '\n未清理: ' + d.cleanup_skipped;
+        }
         if (d.mappings === 0) {
           msg += '\n\n提示：consul_mgr 来源还没有启用的字段映射。' +
             '可在「人员组织 → 主机字段映射」里扫描来源键并配置。';
@@ -7891,7 +8160,8 @@
     if (document.hidden) return;
     // 弹窗打开时暂停列表自动刷新：重建 DOM 会让弹窗/表单焦点抖动，
     // 也避免用户点击时元素被替换导致点击失效。
-    if (!state.user || state.taskDetailId || state.editingHost || state.helpOpen || state.navOpen) {
+    if (!state.user || state.taskDetailId || state.editingHost || state.helpOpen || state.navOpen ||
+        state.hostImport || state.hostBatchEdit) {
       scheduleAutoRefresh();
       return;
     }

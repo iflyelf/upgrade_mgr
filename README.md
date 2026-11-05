@@ -508,6 +508,7 @@ consul_mgr:
   endpoint: ""                # 如 http://consul-mgr.internal:8888
   service_token: ""           # 与 consul_mgr 的 service_api.token 一致
   timeout: 30                 # 请求超时秒数；主机多时放大
+  cleanup_missing: true       # 同步后清理该服务组已不存在的主机（默认开启）
   # 服务组在主机页的下拉中选择，不在此配置
 
 agent:
@@ -1169,6 +1170,23 @@ Get-Service upgrade-agent
 > 覆盖目标机已有 state 并用新令牌重新注册。也可手动执行：
 > `/tmp/upgrade-agent install --server '<url>' --enroll-token '<新令牌>' --force`。
 > `--force` 必须同时提供 `--enroll-token`；普通重装请勿勾选，否则会生成新的 Agent 身份。
+
+#### 主机批量维护（CSV 导入导出 / 批量编辑）
+
+主机页管理员工具栏提供：
+
+- **导出 CSV**：按当前筛选条件导出主机（最多 50000 行，UTF-8 BOM，可直接用 Excel 打开）；
+- **导入 CSV**：以 `ip` 为唯一键，已存在主机更新非空单元格，不存在时可创建 `manual` 主机；
+- **批量编辑**：勾选多台主机后，一次修改主机名、业务字段、隧道/连接覆盖以及自定义可选字段。
+
+CSV 表头支持英文键（`ip,hostname,account,app_code,biz_group,department,vendor,host_type,tunnel_ip,server_url_override`）
+或常见中文列名。自定义字段使用字段键或字段标签作为列名。`exit_ip` 等只读列导出后导入会被忽略。
+
+导入默认只覆盖非空单元格；勾选「空单元格也覆盖」可清空已有值。导入/批量编辑都会校验字段长度、
+IP/地址格式和自定义字段选项，并逐行返回失败原因。
+
+> 导入的 `manual` 主机与 Agent 主机不会被 Consul/consul_mgr 自动清理；自动清理只处理
+> `source=consul` / `source=consul_mgr` 且属于当前同步范围、无 Agent、无未完成任务/指令的主机。
 
 #### 连接地址覆盖与连通性测试
 
@@ -1982,6 +2000,7 @@ POST /api/agent/enroll-tokens         # 创建自动化令牌（管理员）
 GET /api/agent/enroll-tokens          # 自动化令牌列表（脱敏）
 POST /api/agent/enroll-tokens/{id}/revoke  # 注销自动化令牌
 POST /api/agent/enroll-tokens/{id}/rotate  # 轮换自动化令牌
+POST /api/agent/enroll-tokens/batch-delete # 批量删除自动化令牌
 ```
 
 自动化令牌与一次性令牌并存：
@@ -2037,6 +2056,9 @@ GET /api/hosts?page=1&size=50&q=关键字&app_code=&os_family=&account=&agent_st
 GET /api/hosts/facets?fields=app_code,os_family,account
                                     # 主机字段去重值（下拉筛选用）；不传 fields 时取 task.host_selector_fields 配置
 GET /api/hosts/deletable-ids?q=&app_code=  # 当前筛选条件下可删除的主机 ID（排除有未完成任务的）
+GET /api/hosts/export?q=&app_code=      # 导出主机 CSV（管理员，尊重筛选条件，最多 5 万行）
+POST /api/hosts/import                  # 导入/更新主机 CSV（管理员；body: {csv,clear_empty,create_missing}）
+POST /api/hosts/batch-update            # 批量编辑主机（管理员；body: {ids,fields,custom_fields}）
 PUT /api/hosts/{id}                     # 编辑主机业务字段（管理员）
 DELETE /api/hosts/{id}                  # 删除主机（管理员）
 POST /api/host-delete-jobs              # 创建主机批量删除作业（管理员，后台按批执行）
@@ -2071,6 +2093,14 @@ POST /api/hosts/{id}/tunnel-test        # 从平台侧拨测隧道地址（管�
 - 任一服务实例查询失败，或本轮 Consul 未返回任何主机时，**整轮跳过清理**，防止 Consul ACL/网络/配置异常导致误删。
 - 返回字段：`upserted`（写入/更新数）、`deleted`（清理数）、`cleanup_skipped`（跳过原因）。
 - 环境变量：`CONSUL_CLEANUP_MISSING=false` 可关闭。
+
+**consul_mgr 自动清理**
+
+- 默认开启（`consul_mgr.cleanup_missing=true`，设置页 consul_mgr 分组可关闭）。
+- 按服务组同步时，只清理 `source='consul_mgr'` 且 `source_group=当前 group_id` 的主机，不会误删其他服务组。
+- 同样保留有 Agent、有未完成任务/指令、维护中的主机；`manual` / CSV 导入主机完全不受影响。
+- 服务组查询不完整（`partial=true`）时本轮跳过清理；同步全部服务组（`group_id=0`）时不做清理，避免跨组误删。
+- 返回字段：`cleanup_deleted`、`cleanup_skipped`。
 
 **几万台主机的分页**
 

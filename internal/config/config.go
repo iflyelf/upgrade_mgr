@@ -291,6 +291,10 @@ type ConsulMgrConfig struct {
 	ServiceToken string `yaml:"service_token"`
 	// Timeout 请求超时秒数（默认 30）；主机多时适当放大。
 	Timeout int `yaml:"timeout"`
+	// CleanupMissing 同步后清理该服务组已不存在的主机（默认 true）。
+	// 只删除 source=consul_mgr 且 source_group=当前 group_id 的主机，
+	// 并保留有 Agent、有未完成任务/指令、维护中的主机；manual/import 主机不受影响。
+	CleanupMissing bool `yaml:"cleanup_missing"`
 	// 服务组不在此配置：同步时由页面下拉选择（候选来自 consul_mgr 的
 	// /api/service/groups），避免配置写死后与页面选择产生歧义。
 }
@@ -324,7 +328,7 @@ func Default() *Config {
 			Enabled: false, Mode: "single", Host: "localhost", Port: 6379,
 			TTL: 10, Prefix: "upgrade_mgr:",
 		},
-		ConsulMgr: ConsulMgrConfig{Timeout: 30},
+		ConsulMgr: ConsulMgrConfig{Timeout: 30, CleanupMissing: true},
 		Artifact: ArtifactConfig{
 			Dir:                  "/var/lib/upgrade_mgr/artifacts",
 			MaxConcurrentUploads: 4, LockWait: "30m",
@@ -533,6 +537,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.ConsulMgr.Endpoint, "CONSUL_MGR_ENDPOINT")
 	setStr(&c.ConsulMgr.ServiceToken, "CONSUL_MGR_SERVICE_TOKEN")
 	setInt(&c.ConsulMgr.Timeout, "CONSUL_MGR_TIMEOUT")
+	setBool(&c.ConsulMgr.CleanupMissing, "CONSUL_MGR_CLEANUP_MISSING")
 	setStr(&c.Log.Level, "LOG_LEVEL")
 	c.AI.applyEnv()
 

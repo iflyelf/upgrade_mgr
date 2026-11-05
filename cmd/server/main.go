@@ -76,7 +76,7 @@ func main() {
 	if c := sc.GetCache(); c != nil && c.Enabled() {
 		log.Printf("✅ Redis HTTP 缓存已挂载（TTL %s，前缀 %s）", c.TTL(), c.Status().Prefix)
 	}
-	root = middleware.LimitBody(1<<20, "POST /api/artifacts", "POST /mcp")(root)
+	root = middleware.LimitBody(1<<20, "POST /api/artifacts", "POST /mcp", "POST /api/hosts/import")(root)
 	// 写请求 CSRF 纵深防御：会话 Cookie 已是 SameSite=Lax，这里再校验
 	// Origin/Referer 与请求 Host（或 CORS/ExternalURL 白名单）一致。
 	// 允许的 Origin 每次请求读取设置快照，保存后立即生效。
@@ -213,6 +213,9 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
 	mux.HandleFunc("POST /api/hosts/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostBatchDelete(sc))))
+	mux.HandleFunc("POST /api/hosts/batch-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostBatchUpdate(sc))))
+	mux.HandleFunc("GET /api/hosts/export", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostExportCSV(sc))))
+	mux.HandleFunc("POST /api/hosts/import", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostImportCSV(sc))))
 	mux.HandleFunc("GET /api/hosts/deletable-ids", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeletableIDs(sc))))
 	mux.HandleFunc("POST /api/host-delete-jobs", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeleteJobCreate(sc))))
 	mux.HandleFunc("GET /api/host-delete-jobs/active", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDeleteJobActive(sc))))
@@ -259,6 +262,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.Handle("GET /api/agent/enroll-tokens", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenList(sc))))
 	mux.Handle("POST /api/agent/enroll-tokens/{id}/revoke", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenRevoke(sc))))
 	mux.Handle("POST /api/agent/enroll-tokens/{id}/rotate", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenRotate(sc))))
+	mux.Handle("POST /api/agent/enroll-tokens/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenBatchDelete(sc))))
 	// Agent 二进制下载（无鉴权，白名单架构；支持 kernel 参数自动选择构建）
 	mux.HandleFunc("GET /api/agent/binary/{name}", handler.AgentBinaryDownload(sc))
 	// 白名单外部二进制（控制台代为下载缓存）：供无法 TLS 1.2 的老系统用 HTTP 拉取

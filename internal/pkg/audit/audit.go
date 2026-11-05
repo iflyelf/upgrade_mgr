@@ -154,6 +154,7 @@ const (
 	// 自动化注册令牌：注销/轮换与创建分开审计。
 	ActionEnrollTokenRevoke = "enroll_token.revoke"
 	ActionEnrollTokenRotate = "enroll_token.rotate"
+	ActionEnrollTokenDelete = "enroll_token.delete"
 	ActionSettingUpdate     = "setting.update"
 	ActionSettingReset      = "setting.reset"
 	// AI / MCP

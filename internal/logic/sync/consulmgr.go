@@ -17,14 +17,16 @@ const consulMgrLockKey int64 = 0x7570677261646505 // "upgrade\x05"
 
 // MgrResult 一次 consul_mgr 同步的统计。
 type MgrResult struct {
-	Groups       int
-	Hosts        int
-	Upserted     int
-	Mappings     int
-	FailedGroups []string
-	Partial      bool
-	StartedAt    time.Time
-	Duration     time.Duration
+	Groups         int
+	Hosts          int
+	Upserted       int
+	Mappings       int
+	FailedGroups   []string
+	Partial        bool
+	CleanupDeleted int
+	CleanupSkipped string
+	StartedAt      time.Time
+	Duration       time.Duration
 }
 
 // SyncFromConsulMgr 从 consul_mgr 拉取主机清单并 upsert 到 hosts。
@@ -37,7 +39,7 @@ type MgrResult struct {
 //
 // 字段映射同样完全由 host_field_mappings 驱动（source=consul_mgr），
 // 服务组名/编码等结构信息作为基础值，可被映射规则覆盖。
-func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, groupID int64) (*MgrResult, error) {
+func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, groupID int64, cleanupMissing bool) (*MgrResult, error) {
 	if cli == nil {
 		return nil, fmt.Errorf("consul_mgr 未配置：请在「设置 → consul_mgr 对接」填写地址与服务令牌")
 	}
@@ -75,16 +77,39 @@ func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, g
 		if rh.IP == "" {
 			continue
 		}
+		gid := rh.GroupID
+		if gid == 0 {
+			gid = groupID
+		}
 		row := &hostRow{
-			IP:         rh.IP,
-			Node:       rh.Node,
-			Datacenter: rh.Datacenter,
-			Meta:       mergeMgrMeta(rh),
+			IP:          rh.IP,
+			Node:        rh.Node,
+			Datacenter:  rh.Datacenter,
+			Meta:        mergeMgrMeta(rh),
+			SourceGroup: fmt.Sprintf("%d", gid),
 		}
 		if err := s.upsert(ctx, row, set, hostfieldmap.SourceConsulMgr, now); err != nil {
 			return res, err
 		}
 		res.Upserted++
+	}
+
+	// 清理该服务组已不存在的主机：必须限定 source_group=当前 group_id，
+	// 避免把其他服务组的主机误删；partial 时清单不完整，本轮跳过清理。
+	if cleanupMissing && groupID > 0 {
+		if res.Partial {
+			res.CleanupSkipped = "部分服务组查询失败，本轮跳过清理"
+		} else {
+			deleted, err := s.cleanupMissingMgrHosts(ctx, groupID, now)
+			if err != nil {
+				return res, err
+			}
+			res.CleanupDeleted = deleted
+		}
+	} else if groupID == 0 {
+		res.CleanupSkipped = "同步全部服务组时不做清理，请按服务组逐个同步"
+	} else {
+		res.CleanupSkipped = "未开启自动清理"
 	}
 
 	res.Duration = time.Since(res.StartedAt)
