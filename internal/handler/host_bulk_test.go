@@ -117,10 +117,13 @@ func TestHostImportCSV(t *testing.T) {
 // TestAutomationTokenBatchDelete 批量删除自动化令牌并按租户隔离。
 func TestAutomationTokenBatchDelete(t *testing.T) {
 	db, sc := setupHostDB(t)
+	tenantID := int64(900000 + time.Now().UnixNano()%100000)
 	if _, err := db.Exec(`INSERT INTO tenants (id, name, display_name, status)
-		VALUES (2, 'test-tenant', '测试租户', 'active') ON CONFLICT (id) DO NOTHING`); err != nil {
+		VALUES ($1, $2, '测试租户', 'active')`, tenantID, fmt.Sprintf("tok-tenant-%d", tenantID)); err != nil {
 		t.Fatal(err)
 	}
+	// 先注册租户清理，后注册令牌清理：t.Cleanup 为 LIFO，令牌先删再删租户。
+	t.Cleanup(func() { db.Exec(`DELETE FROM tenants WHERE id=$1`, tenantID) })
 	prefix := fmt.Sprintf("tok-%d", time.Now().UnixNano())
 	insert := func(name string, tenant int64) int64 {
 		var id int64
@@ -133,7 +136,7 @@ func TestAutomationTokenBatchDelete(t *testing.T) {
 		return id
 	}
 	id1 := insert("one", 1)
-	id2 := insert("two", 2)
+	id2 := insert("two", tenantID)
 	t.Cleanup(func() { db.Exec(`DELETE FROM enroll_tokens WHERE token_hash LIKE $1`, prefix+"%") })
 
 	body, _ := json.Marshal(map[string]any{"ids": []int64{id1, id2}})
