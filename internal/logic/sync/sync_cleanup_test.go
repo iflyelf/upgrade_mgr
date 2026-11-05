@@ -129,3 +129,61 @@ func TestCleanupMissingHosts(t *testing.T) {
 	check(taskHostID, 1, "有未完成任务的主机")
 	check(commandHostID, 1, "有未完成指令的主机")
 }
+
+// TestCleanupMissingMgrHosts 验证 consul_mgr 清理只影响当前服务组。
+func TestCleanupMissingMgrHosts(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL，跳过 consul_mgr 清理集成测试")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("连接数据库失败: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+	ctx := context.Background()
+	syncer := NewSyncer(db)
+	prefix := fmt.Sprintf("mgr-cleanup-%d", time.Now().UnixNano())
+	now := time.Now()
+	old := now.Add(-time.Hour)
+	insert := func(tag, source, group string, synced time.Time) int64 {
+		t.Helper()
+		var id int64
+		if err := db.QueryRow(`
+			INSERT INTO hosts (ip, hostname, tenant_id, source, source_group, last_synced_at)
+			VALUES ($1, $2, 1, $3, $4, $5) RETURNING id`,
+			prefix+"-"+tag, tag, source, group, synced).Scan(&id); err != nil {
+			t.Fatalf("插入主机 %s 失败: %v", tag, err)
+		}
+		return id
+	}
+	g1Stale := insert("g1-stale", "consul_mgr", "1", old)
+	g1Fresh := insert("g1-fresh", "consul_mgr", "1", now)
+	g2Stale := insert("g2-stale", "consul_mgr", "2", old)
+	manual := insert("manual", "manual", "", old)
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip LIKE $1`, prefix+"%") })
+
+	deleted, err := syncer.cleanupMissingMgrHosts(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("清理失败: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("应只清理当前服务组 1 台，实际 %d", deleted)
+	}
+	exists := func(id int64) bool {
+		var n int
+		db.QueryRow(`SELECT COUNT(1) FROM hosts WHERE id=$1`, id).Scan(&n)
+		return n > 0
+	}
+	if exists(g1Stale) {
+		t.Fatal("当前服务组过期主机应被删除")
+	}
+	for name, id := range map[string]int64{"fresh": g1Fresh, "other-group": g2Stale, "manual": manual} {
+		if !exists(id) {
+			t.Fatalf("%s 主机不应被清理", name)
+		}
+	}
+}

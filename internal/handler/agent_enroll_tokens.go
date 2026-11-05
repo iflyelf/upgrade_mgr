@@ -547,3 +547,58 @@ func buildAutomationInstallCommand(s *svc.ServiceContext, r *http.Request, token
 	// 自动化接入时不支持 variant 参数，默认生成普通构建的安装命令
 	return buildInstallCommand(safeURL, arch, token, force, ""), serverURL, nil
 }
+
+// AutomationEnrollTokenBatchDelete 批量删除自动化令牌：POST /api/agent/enroll-tokens/batch-delete。
+//
+// 删除会直接从列表移除；有效令牌删除等同于立即注销，只阻止后续注册。
+func AutomationEnrollTokenBatchDelete(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u, ok := auth.FromContext(r.Context())
+		if !ok || u == nil {
+			httpx.Fail(w, http.StatusUnauthorized, "未认证")
+			return
+		}
+		var req struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil || len(req.IDs) == 0 {
+			httpx.Fail(w, http.StatusBadRequest, "请提供令牌 ID 列表")
+			return
+		}
+		ids := uniquePositiveIDs(req.IDs)
+		if len(ids) > 200 {
+			httpx.Fail(w, http.StatusBadRequest, "单次最多删除 200 个令牌")
+			return
+		}
+		deleted := []int64{}
+		failed := []map[string]any{}
+		for _, id := range ids {
+			args := []any{id}
+			tenantSQL := ""
+			if !u.IsSuperAdmin() {
+				tid := u.TenantID
+				if tid <= 0 {
+					tid = 1
+				}
+				tenantSQL = " AND tenant_id=$2"
+				args = append(args, tid)
+			}
+			res, err := s.DB.ExecContext(r.Context(),
+				`DELETE FROM enroll_tokens WHERE id=$1 AND token_type='automation'`+tenantSQL, args...)
+			if err != nil {
+				failed = append(failed, map[string]any{"id": id, "error": err.Error()})
+				continue
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				failed = append(failed, map[string]any{"id": id, "error": "令牌不存在"})
+				continue
+			}
+			deleted = append(deleted, id)
+		}
+		if len(deleted) > 0 {
+			auditOpDetails(s, r, audit.ActionEnrollTokenDelete, "enroll_token_batch_delete",
+				"", "", nil, map[string]any{"deleted": deleted, "failed_count": len(failed)}, nil)
+		}
+		httpx.OK(w, map[string]any{"deleted": deleted, "failed": failed})
+	}
+}
