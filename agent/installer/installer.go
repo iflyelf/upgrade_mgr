@@ -25,6 +25,9 @@ type Options struct {
 	BinPath     string // 目标安装路径，默认 /usr/local/bin/upgrade-agent
 	StatePath   string
 	InstallCron bool // 是否安装 cron 看门狗兜底
+	// Force 强制重新注册：删除本地 state.json，让 Agent 用本次令牌重新注册。
+	// 服务端会按来源 IP/出口 IP/隧道 IP 匹配存量主机并更新，不会重复建档。
+	Force bool
 }
 
 // Install 执行安装：复制自身二进制 → 写服务单元 → 启用启动 → 可选 cron。
@@ -48,6 +51,13 @@ func Install(opts Options) error {
 		}
 	}
 	_ = os.MkdirAll(filepath.Dir(opts.StatePath), 0755)
+	if opts.Force {
+		// 删除旧状态后，服务重启会走首次注册流程；主机记录由服务端按
+		// 来源 IP/出口 IP/隧道 IP 匹配并更新，不会新增重复主机。
+		if err := os.Remove(opts.StatePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("清理旧状态失败: %w", err)
+		}
+	}
 
 	// 2. 按 init 类型写服务
 	switch info.Init {
@@ -84,7 +94,9 @@ func installSystemd(opts Options) error {
 		return err
 	}
 	run("systemctl", "daemon-reload")
-	return run("systemctl", "enable", "--now", "upgrade-agent")
+	run("systemctl", "enable", "upgrade-agent")
+	// 强制/普通重装都重启一次：确保新二进制与新状态立即生效。
+	return run("systemctl", "restart", "upgrade-agent")
 }
 
 func installUpstart(opts Options) error {
@@ -96,6 +108,7 @@ func installUpstart(opts Options) error {
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		return err
 	}
+	run("stop", "upgrade-agent")
 	return run("start", "upgrade-agent")
 }
 

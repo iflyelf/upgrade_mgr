@@ -106,6 +106,7 @@ func installCmd() {
 	binPath := fs.String("bin", "/usr/local/bin/upgrade-agent", "安装路径")
 	statePath := fs.String("state", "/var/lib/upgrade-agent/state.json", "状态文件路径")
 	installCron := fs.Bool("cron", true, "安装 cron 看门狗兜底")
+	force := fs.Bool("force", false, "强制重新注册：删除本地状态并按新令牌重新注册")
 	fs.Parse(os.Args[2:])
 	if *serverURL == "" {
 		fmt.Fprintln(os.Stderr, "错误: --server 必填")
@@ -114,6 +115,7 @@ func installCmd() {
 	opts := installer.Options{
 		ServerURL: *serverURL, EnrollToken: *enrollToken,
 		BinPath: *binPath, StatePath: *statePath, InstallCron: *installCron,
+		Force: *force,
 	}
 	if err := installer.Install(opts); err != nil {
 		log.Fatalf("安装失败: %v", err)
@@ -131,7 +133,7 @@ func watchdogCmd() {
 	statePath := fs.String("state", "/var/lib/upgrade-agent/state.json", "状态文件路径")
 	binPath := fs.String("bin", "/usr/local/bin/upgrade-agent", "二进制路径")
 	threshold := fs.Duration("threshold", 3*time.Minute, "心跳超时阈值")
-	_ = fs.Bool("quiet", false, "静默模式（兼容 cron 调用）")  // 兼容性参数，实际未使用
+	_ = fs.Bool("quiet", false, "静默模式（兼容 cron 调用）") // 兼容性参数，实际未使用
 	fs.Parse(os.Args[2:])
 	if err := watchdog.Check(*statePath, *binPath, *threshold); err != nil {
 		log.Printf("watchdog: %v", err)
