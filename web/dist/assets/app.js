@@ -3486,7 +3486,7 @@
       if (isCreate && !username) { alert('请填写域账号'); return; }
       if (pwdEl.value && pwdEl.value.length < 8) { alert('密码不能少于 8 位'); return; }
       if (!isCreate) {
-        api('/api/users/casdoor/' + encodeURIComponent(f.username), {
+        api('/api/casdoor/users/' + encodeURIComponent(f.username), {
           method: 'PUT',
           body: JSON.stringify({
             display_name: dispEl.value.trim(), email: mailEl.value.trim(),
@@ -3501,7 +3501,7 @@
       }
       var roles = Object.keys(roleEls).filter(function (k) { return roleEls[k].checked; });
       if (!roles.length) roles = ['user'];
-      api('/api/users/casdoor', {
+      api('/api/casdoor/users', {
         method: 'POST',
         body: JSON.stringify({
           name: username, display_name: dispEl.value.trim(), email: mailEl.value.trim(),
@@ -3560,7 +3560,7 @@
     var pwd = prompt('为 ' + u.username + ' 重置 Casdoor 密码（留空自动生成 16 位）');
     if (pwd === null) return;
     if (pwd && pwd.length < 8) { alert('密码不能少于 8 位'); return; }
-    api('/api/users/casdoor/' + encodeURIComponent(u.username) + '/reset-password', {
+    api('/api/casdoor/users/' + encodeURIComponent(u.username) + '/reset-password', {
       method: 'POST', body: JSON.stringify({ password: pwd })
     }).then(function (r) {
       if (r && r.password) alert('密码已重置（仅显示一次）：' + r.password);
@@ -3573,7 +3573,7 @@
     var next = !u.casdoor_admin;
     if (!confirm((next ? '设为' : '取消') + ' Casdoor 管理员：' + u.username + '？\n\n' +
       'Casdoor 管理员可在 FlyIAM 等系统中拥有管理权限，请谨慎操作。')) return;
-    api('/api/users/casdoor/' + encodeURIComponent(u.username) + '/admin', {
+    api('/api/casdoor/users/' + encodeURIComponent(u.username) + '/admin', {
       method: 'POST', body: JSON.stringify({ is_admin: next })
     }).then(function () { loadOrg(); loadUserDir(); })
       .catch(function (e) { alert('操作失败: ' + e.message); });
