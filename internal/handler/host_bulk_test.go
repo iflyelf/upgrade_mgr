@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -156,4 +157,49 @@ func TestAutomationTokenBatchDelete(t *testing.T) {
 	if n != 1 {
 		t.Fatal("其他租户令牌不应被删除")
 	}
+}
+
+// TestHostExportCSVIncludesOSColumns 导出 CSV 必须包含 os_family/os_type/os_version。
+func TestHostExportCSVIncludesOSColumns(t *testing.T) {
+	db, sc := setupHostDB(t)
+	ip := fmt.Sprintf("198.39.%d.%d", time.Now().UnixNano()%250, time.Now().UnixNano()%250)
+	if _, err := db.Exec(`INSERT INTO hosts
+		(ip, hostname, os_family, os_type, os_version, tenant_id, source)
+		VALUES ($1,'csv-os','rhel','linux','7.9',1,'manual')`, ip); err != nil {
+		t.Fatalf("插入主机失败: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip=$1`, ip) })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/hosts/export", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec := httptest.NewRecorder()
+	HostExportCSV(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("导出失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	records, err := csv.NewReader(rec.Body).ReadAll()
+	if err != nil || len(records) < 2 {
+		t.Fatalf("解析 CSV 失败: %v", err)
+	}
+	header := records[0]
+	index := map[string]int{}
+	for i, h := range header {
+		index[h] = i
+	}
+	for _, key := range []string{"os_family", "os_type", "os_version"} {
+		if _, ok := index[key]; !ok {
+			t.Fatalf("CSV 缺少 %s 列: %v", key, header)
+		}
+	}
+	for _, row := range records[1:] {
+		if row[index["ip"]] != ip {
+			continue
+		}
+		if row[index["os_family"]] != "rhel" || row[index["os_type"]] != "linux" ||
+			row[index["os_version"]] != "7.9" {
+			t.Fatalf("OS 列值不符: %v", row)
+		}
+		return
+	}
+	t.Fatal("CSV 中未找到测试主机")
 }
