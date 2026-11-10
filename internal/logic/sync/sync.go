@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/iflyelf/upgrade_mgr/internal/logic/hostfieldmap"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/consul"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/pglock"
@@ -164,6 +166,9 @@ type hostRow struct {
 	Meta       map[string]string
 	// SourceGroup 外部同步来源的分组标识（consul_mgr group_id）。
 	SourceGroup string
+	// Services 该主机最近一次同步时运行的服务名（consul_mgr 导出）。
+	// 用于按服务名称同步时的精确清理；nil 表示来源不提供该信息。
+	Services []string
 }
 
 func (h *hostRow) merge(in consul.ServiceInstance) {
@@ -234,6 +239,13 @@ func (s *Syncer) upsert(ctx context.Context, h *hostRow, set *hostfieldmap.Set,
 		insertCols = append(insertCols, "source_group")
 		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
 		updates = append(updates, "source_group = EXCLUDED.source_group")
+	}
+	if h.Services != nil {
+		// 每次同步都以最新服务列表覆盖，供「按服务名称」精确清理。
+		args = append(args, pq.Array(h.Services))
+		insertCols = append(insertCols, "source_services")
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+		updates = append(updates, "source_services = EXCLUDED.source_services")
 	}
 	for _, name := range names {
 		// 白名单复核：绝不把未授权的列名拼进 SQL。
@@ -542,6 +554,110 @@ func (s *Syncer) cleanupMissingMgrHosts(ctx context.Context, groupID int64, sync
 			return total, nil
 		}
 		n, err := s.deleteMissingMgrHosts(ctx, groupID, syncedAt, ids)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n == 0 || len(ids) < cleanupBatchSize {
+			return total, nil
+		}
+	}
+	return total, nil
+}
+
+// missingMgrServiceHostCond 按「服务名称」清理的候选条件。
+//
+// 只清理上次同步时 source_services 包含该服务、本次未被更新（已不在服务范围）
+// 的主机；保留有 Agent、维护中、有未完成任务/指令的主机，规则与按服务组清理一致。
+func missingMgrServiceHostCond(groupParam, serviceParam, syncedAtParam string) string {
+	return `
+		h.source='consul_mgr'
+		AND h.source_group=` + groupParam + `
+		AND h.source_services @> ARRAY[` + serviceParam + `]::text[]
+		AND (h.agent_id IS NULL OR h.agent_id='')
+		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
+		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
+		AND (h.maintenance_until IS NULL OR h.maintenance_until <= NOW())
+		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.ip = h.ip)
+		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.host_id = h.id)
+		AND NOT EXISTS (SELECT 1 FROM task_hosts th
+		                WHERE th.host_id=h.id AND th.status IN ('pending','running'))
+		AND NOT EXISTS (SELECT 1 FROM commands c
+		                WHERE c.host_id=h.id AND c.status IN ('pending','dispatched','accepted','running'))`
+}
+
+// findMissingMgrServiceHosts 无锁挑选按服务名称清理的候选主机。
+func (s *Syncer) findMissingMgrServiceHosts(ctx context.Context, groupID int64, service string, syncedAt time.Time, limit int) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT h.id FROM hosts h
+		WHERE `+missingMgrServiceHostCond("$1", "$2", "$3")+`
+		ORDER BY h.id
+		LIMIT $4`, groupID, service, syncedAt, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// deleteMissingMgrServiceHosts 按统一锁序删除按服务名称筛选的候选主机。
+func (s *Syncer) deleteMissingMgrServiceHosts(ctx context.Context, groupID int64, service string, syncedAt time.Time, ids []int64) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	deleted := 0
+	for _, id := range ids {
+		for _, q := range []string{
+			`SELECT 1 FROM task_hosts WHERE host_id=$1 FOR UPDATE`,
+			`SELECT 1 FROM commands WHERE host_id=$1 FOR UPDATE`,
+		} {
+			rows, err := tx.QueryContext(ctx, q, id)
+			if err != nil {
+				return deleted, err
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return deleted, err
+			}
+		}
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM hosts h
+			WHERE h.id=$1 AND `+missingMgrServiceHostCond("$2", "$3", "$4"), id, groupID, service, syncedAt)
+		if err != nil {
+			return deleted, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			deleted += int(n)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
+}
+
+// cleanupMissingMgrServiceHosts 按服务名称清理已不在该服务范围内的主机。
+func (s *Syncer) cleanupMissingMgrServiceHosts(ctx context.Context, groupID int64, service string, syncedAt time.Time) (int, error) {
+	total := 0
+	for round := 0; round < maxCleanupBatches; round++ {
+		ids, err := s.findMissingMgrServiceHosts(ctx, groupID, service, syncedAt, cleanupBatchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		n, err := s.deleteMissingMgrServiceHosts(ctx, groupID, service, syncedAt, ids)
 		if err != nil {
 			return total, err
 		}

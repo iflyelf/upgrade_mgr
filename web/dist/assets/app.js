@@ -8722,7 +8722,7 @@
             st.servicesErr ? h('div', { class: 'err' }, [st.servicesErr]) : null,
             !st.groupID ? h('div', { class: 'muted' }, ['选择具体服务组后，可按服务名称过滤（如 selfnode_exporter）。']) : null,
             st.groupID && !st.servicesLoading && !st.servicesErr
-              ? hint('只同步运行该服务的主机；按服务名称过滤时不会清理同组其它服务的主机。')
+              ? hint('只同步运行该服务的主机；开启自动清理时，会删除「上次属于该服务、本次已不在服务范围」的主机，不影响同组其它服务。')
               : null
           ]);
         })()
@@ -8784,7 +8784,8 @@
             (d.failed_groups || []).join('、');
         }
         if (d.cleanup_deleted) {
-          msg += '\n已清理该服务组已不存在的主机：' + d.cleanup_deleted + ' 台';
+          msg += '\n已清理' + (d.service ? '该服务范围内' : '该服务组') +
+            '已不存在的主机：' + d.cleanup_deleted + ' 台';
         } else if (d.cleanup_skipped) {
           msg += '\n未清理: ' + d.cleanup_skipped;
         }
