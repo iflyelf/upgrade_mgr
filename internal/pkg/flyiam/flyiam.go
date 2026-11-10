@@ -90,7 +90,13 @@ func (c *Client) do(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("读取响应失败: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("FlyIAM 返回 HTTP %d: %s", resp.StatusCode, snippet(raw))
+		// 404/405 多半不是令牌问题，而是 FlyIAM 版本过旧缺少导出接口
+		// （例如 /api/users/export 在旧版本会命中 /api/users/:id 返回 405）。
+		hint := ""
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			hint = fmt.Sprintf("（FlyIAM 可能缺少 %s 接口，请升级 FlyIAM 后重试）", strings.SplitN(path, "?", 2)[0])
+		}
+		return fmt.Errorf("FlyIAM 返回 HTTP %d%s: %s", resp.StatusCode, hint, snippet(raw))
 	}
 	var env struct {
 		Code    int             `json:"code"`

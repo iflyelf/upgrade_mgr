@@ -713,6 +713,9 @@ func buildAuth(c *config.Config, db *sql.DB) auth.Provider {
 			RedirectURI:    redirect,
 			SessionSecret:  c.Server.SessionSecret,
 			CookieSecure:   cookieSecure(c),
+			// SSO 用户与本地账号合并：租户/角色/禁用状态以 local_users 为准，
+			// 首次登录自动建档（否则用户管理页只有内置 admin，且 superadmin 菜单丢失）。
+			LocalUsers: auth.NewLocalDirectory(db).Resolve,
 		})
 	}
 	// 默认 builtin

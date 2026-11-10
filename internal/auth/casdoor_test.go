@@ -37,7 +37,7 @@ func newTestCasdoor(endpoint, org string) *Casdoor {
 	return NewCasdoor(CasdoorOptions{
 		Endpoint: endpoint, ClientID: "cid", ClientSecret: "csecret",
 		Organization: org, Application: "app",
-		RedirectURI: "http://localhost/api/auth/callback",
+		RedirectURI:   "http://localhost/api/auth/callback",
 		SessionSecret: "test-secret-at-least-16-bytes-long",
 	})
 }
@@ -132,4 +132,60 @@ func TestCasdoorBadCode(t *testing.T) {
 		t.Fatal("无效授权码必须失败")
 	}
 	t.Log("✅ 无效授权码被拒绝")
+}
+
+// TestCasdoorMergesLocalAccount SSO 身份必须与 local_users 的租户/角色合并，
+// 否则 Casdoor 管理员只有 admin 角色，前端会隐藏「系统设置」等 superadmin 菜单。
+func TestCasdoorMergesLocalAccount(t *testing.T) {
+	srv := mockCasdoor(t, map[string]any{
+		"name": "bob", "displayName": "Bob", "owner": "myorg", "isAdmin": true,
+	})
+	defer srv.Close()
+
+	c := NewCasdoor(CasdoorOptions{
+		Endpoint: srv.URL, ClientID: "cid", ClientSecret: "csecret",
+		Organization: "myorg", Application: "app",
+		RedirectURI:   "http://localhost/api/auth/callback",
+		SessionSecret: "test-secret-at-least-16-bytes-long",
+		LocalUsers: func(_ context.Context, username, display string, casdoorAdmin bool) (*LocalAccount, error) {
+			if username != "bob" || !casdoorAdmin {
+				t.Fatalf("解析参数错误: username=%s admin=%v", username, casdoorAdmin)
+			}
+			return &LocalAccount{
+				DisplayName: "Bob（本地）", TenantID: 2,
+				Roles: []string{RoleAdmin, RoleSuperAdmin}, IsAdmin: true,
+			}, nil
+		},
+	})
+
+	u, _, err := c.HandleCallback(context.Background(), "good-code", c.signState(""))
+	if err != nil {
+		t.Fatalf("回调失败: %v", err)
+	}
+	if !u.IsSuperAdmin() {
+		t.Fatalf("必须沿用本地 superadmin 角色，实际 roles=%v", u.Roles)
+	}
+	if u.TenantID != 2 || u.DisplayName != "Bob（本地）" {
+		t.Fatalf("必须沿用本地租户与显示名: %+v", u)
+	}
+}
+
+// TestCasdoorRejectsDisabledLocalAccount 本地禁用的账号必须拒绝登录。
+func TestCasdoorRejectsDisabledLocalAccount(t *testing.T) {
+	srv := mockCasdoor(t, map[string]any{"name": "carol", "owner": "myorg"})
+	defer srv.Close()
+
+	c := NewCasdoor(CasdoorOptions{
+		Endpoint: srv.URL, ClientID: "cid", ClientSecret: "csecret",
+		Organization: "myorg", Application: "app",
+		RedirectURI:   "http://localhost/api/auth/callback",
+		SessionSecret: "test-secret-at-least-16-bytes-long",
+		LocalUsers: func(context.Context, string, string, bool) (*LocalAccount, error) {
+			return &LocalAccount{Disabled: true, TenantID: 1, Roles: []string{RoleUser}}, nil
+		},
+	})
+
+	if _, _, err := c.HandleCallback(context.Background(), "good-code", c.signState("")); err == nil {
+		t.Fatal("本地禁用账号必须拒绝登录")
+	}
 }
