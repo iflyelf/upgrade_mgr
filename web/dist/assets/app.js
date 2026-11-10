@@ -1239,7 +1239,7 @@
     if (!os) {
       var winCount = 0, linuxCount = 0;
       (state.hosts || []).forEach(function (h) {
-        if ((h.os_family || '').toLowerCase() === 'windows') winCount++; else linuxCount++;
+        if ((h.os_family || h.os_type || '').toLowerCase() === 'windows') winCount++; else linuxCount++;
       });
       os = (winCount > 0 && linuxCount === 0) ? 'windows' : 'linux';
     }
@@ -1497,7 +1497,7 @@
     // 下拉筛选：选项来自 /api/hosts/facets?fields=...（租户内去重值），只加载一次。
     if (state.hostListFacets === null) {
       state.hostListFacets = { values: {} };
-      api('/api/hosts/facets?fields=app_code,os_family,account')
+      api('/api/hosts/facets?fields=app_code,os_family,os_type,account')
         .then(function (d) { state.hostListFacets = d || { values: {} }; render(); })
         .catch(function () {});
     }
@@ -1523,6 +1523,19 @@
     function facetOptions(key) {
       return (facetVals[key] || []).map(function (v) { return [v, v]; });
     }
+    // OS 筛选：优先发行版族（rhel/debian），没有 Agent 信息的清单主机回退 os_type（linux/windows）。
+    function osFacetOptions() {
+      var seen = {};
+      var out = [];
+      (facetVals.os_family || []).concat(facetVals.os_type || []).forEach(function (v) {
+        v = String(v || '').trim();
+        if (!v || seen[v]) return;
+        seen[v] = true;
+        out.push([v, v]);
+      });
+      out.sort(function (a, b) { return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0); });
+      return out;
+    }
     var statusOptions = ['online', 'offline', 'upgrading', 'restarting', 'crash_loop', 'unknown']
       .map(function (s) { return [s, agentStatusText(s)]; });
     var clearAll = function () {
@@ -1536,7 +1549,7 @@
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
       filterSelect('agent_status', 'Agent 状态', statusOptions),
       filterSelect('app_code', 'app_code', facetOptions('app_code')),
-      filterSelect('os_family', 'OS', facetOptions('os_family')),
+      filterSelect('os_family', 'OS', osFacetOptions()),
       filterSelect('account', '账号', facetOptions('account')),
       hostFilterActive() ? h('button', { class: 'btn ghost', onclick: clearAll }, ['清除筛选']) : null,
       isAdmin() ? h('button', { class: 'btn', onclick: openCreateHost }, ['新增主机']) : null,
@@ -1585,7 +1598,7 @@
       var cells = [
         hostSel ? h('td', {}, [hostSel.cell(x)]) : null,
         h('td', {}, [ipCell(x)]), h('td', {}, [x.hostname || '-']),
-        h('td', {}, [x.os_type || x.os_family || '-']), h('td', {}, [x.arch || '-']),
+        h('td', {}, [x.os_family || x.os_type || '-']), h('td', {}, [x.arch || '-']),
         h('td', {}, [x.biz_group || '-']), h('td', {}, [x.app_code || '-']),
         h('td', {}, [
           h('span', { class: 'tag' }, [agentStatusText(x.agent_status)]),
