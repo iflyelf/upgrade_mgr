@@ -452,3 +452,52 @@ func TestAgentRegisterMatchesExistingHostByExitIP(t *testing.T) {
 		t.Fatalf("不应按来源 IP %s 新建主机", srcIP)
 	}
 }
+
+// TestAgentRegisterExitIPPrecedesSourceIP 多网卡场景：出口 IP 优先于来源 IP。
+// 即使来源 IP 恰好命中另一条存量主机，也应绑定到出口 IP 对应的主机。
+func TestAgentRegisterExitIPPrecedesSourceIP(t *testing.T) {
+	db, sc := setupHostDB(t)
+	sc.Config = config.Default()
+	sc.Config.Agent.RequireEnrollToken = false
+
+	sfx := time.Now().UnixNano()
+	srcIP := fmt.Sprintf("198.20.%d.%d", (sfx/250)%250, sfx%250)
+	exitIP := fmt.Sprintf("198.21.%d.%d", (sfx/250)%250, (sfx+11)%250)
+	decoyIP := fmt.Sprintf("198.22.%d.%d", (sfx/250)%250, (sfx+13)%250)
+
+	var decoyID, targetID int64
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, tenant_id, source)
+		VALUES ($1,'decoy-source',1,'manual') RETURNING id`, srcIP).Scan(&decoyID); err != nil {
+		t.Fatalf("插入来源主机失败: %v", err)
+	}
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, tenant_id, source)
+		VALUES ($1,'multi-nic',1,'consul_mgr') RETURNING id`, decoyIP).Scan(&targetID); err != nil {
+		t.Fatalf("插入出口主机失败: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE hosts SET exit_ip=$1 WHERE id=$2`, exitIP, targetID); err != nil {
+		t.Fatalf("设置出口 IP 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM agents WHERE host_id IN ($1,$2)`, decoyID, targetID)
+		db.Exec(`DELETE FROM hosts WHERE id IN ($1,$2)`, decoyID, targetID)
+	})
+
+	body := `{"hostname":"multi-nic","arch":"amd64","exit_ip":"` + exitIP + `"}`
+	req := httptest.NewRequest("POST", "/api/agent/register", strings.NewReader(body))
+	req.RemoteAddr = srcIP + ":12345"
+	rec := httptest.NewRecorder()
+	AgentRegister(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("注册失败 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var decoyAgent, targetAgent string
+	db.QueryRow(`SELECT COALESCE(agent_id,'') FROM hosts WHERE id=$1`, decoyID).Scan(&decoyAgent)
+	db.QueryRow(`SELECT COALESCE(agent_id,'') FROM hosts WHERE id=$1`, targetID).Scan(&targetAgent)
+	if decoyAgent != "" {
+		t.Fatal("来源 IP 命中的诱饵主机不应被绑定")
+	}
+	if targetAgent == "" {
+		t.Fatal("应绑定到出口 IP 对应的主机")
+	}
+}

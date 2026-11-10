@@ -48,6 +48,8 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		// 安全：绝不信任请求体中的 req.IP。
 		// 否则攻击者可传入他人 IP，借 hosts 表 ON CONFLICT(ip) DO UPDATE
 		// 改写该主机的 agent_id，从而劫持并接收本应发往该主机的升级指令。
+		// 出口 IP（req.ExitIP）仅用于匹配存量主机（多网卡身份），
+		// 且需通过来源 IP / 主机名交叉校验；真正的认证仍是一次性 enroll token。
 		ip := clientIP(s, r)
 
 		snap := s.ConfigSnapshot()
@@ -91,8 +93,9 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		// 出口 IP 由 Agent 按路由探测上报；多网卡主机据此展示真实出口地址。
-		// 只做格式校验，不参与主机身份（身份仍是服务端观察到的来源 IP）。
+		// 出口 IP 由 Agent 按路由探测上报。多网卡主机以出口 IP 作为匹配存量
+		// 主机的优先身份，避免不同网卡/路由导致来源 IP 变化时重复建档；
+		// 来源 IP 与主机名仅作为兜底与防误合并校验。
 		exitIP := hostnet.NormalizeExitIP(req.ExitIP)
 
 		tenantID := int64(1)
@@ -123,21 +126,18 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 			tenantID = tid
 		}
 
-		// 先查找现有主机，避免同一台机器因来源 IP 与清单 IP 不一致而重复建档：
-		//   1) 来源 IP 精确匹配（原有行为）；
-		//   2) 出口 IP 匹配：存量主机 ip=出口 IP（清单主键即出口地址），
-		//      或 exit_ip=出口 IP 且（尚无 Agent 或主机名一致）。
-		// 找到后更新该主机（保留原 ip），而不是新建一行。
+		// 查找现有主机：多网卡场景下出口 IP 才是稳定身份，优先按出口 IP 匹配，
+		// 其次来源 IP，最后主机名（仅未绑定 Agent 的唯一主机）。
+		// 命中后更新原主机（保留原 ip），而不是新建重复行。
 		var hostID, hostTenant int64
-		lookupErr := tx.QueryRowContext(ctx,
-			`SELECT id, tenant_id FROM hosts WHERE ip=$1 FOR UPDATE`, ip).
-			Scan(&hostID, &hostTenant)
-		if lookupErr == sql.ErrNoRows && exitIP != "" && exitIP != ip {
+
+		// 1) 出口 IP 优先。
+		if exitIP != "" {
 			rows, qerr := tx.QueryContext(ctx, `
 				SELECT id, tenant_id, (ip=$1) AS exact
 				FROM hosts
-				WHERE ip=$1
-				   OR (exit_ip=$1 AND (COALESCE(agent_id,'')='' OR hostname=$2))
+				WHERE (ip=$1 OR exit_ip=$1)
+				  AND (ip=$1 OR COALESCE(agent_id,'')='' OR hostname=$2)
 				ORDER BY exact DESC, id
 				FOR UPDATE`, exitIP, hostname)
 			if qerr != nil {
@@ -177,10 +177,53 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 					"存在多台主机使用同一出口 IP，请先在主机列表中清理重复记录后再接入")
 				return
 			}
-		} else if lookupErr != nil && lookupErr != sql.ErrNoRows {
-			auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, lookupErr)
-			httpx.Fail(w, http.StatusInternalServerError, "注册失败")
-			return
+		}
+
+		// 2) 来源 IP 兜底（旧 Agent 未上报出口 IP，或清单里还没有出口地址）。
+		if hostID == 0 {
+			err := tx.QueryRowContext(ctx,
+				`SELECT id, tenant_id FROM hosts WHERE ip=$1 FOR UPDATE`, ip).
+				Scan(&hostID, &hostTenant)
+			if err != nil && err != sql.ErrNoRows {
+				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, err)
+				httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+				return
+			}
+		}
+
+		// 3) 主机名兜底：仅匹配「尚未绑定 Agent」的唯一主机，避免把不同机器合并。
+		if hostID == 0 && hostname != "" {
+			rows, qerr := tx.QueryContext(ctx, `
+				SELECT id, tenant_id FROM hosts
+				WHERE hostname=$1 AND COALESCE(agent_id,'')=''
+				ORDER BY id LIMIT 2
+				FOR UPDATE`, hostname)
+			if qerr != nil {
+				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, qerr)
+				httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+				return
+			}
+			var ids, tenants []int64
+			for rows.Next() {
+				var id, tenant int64
+				if scanErr := rows.Scan(&id, &tenant); scanErr != nil {
+					rows.Close()
+					auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, scanErr)
+					httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+					return
+				}
+				ids = append(ids, id)
+				tenants = append(tenants, tenant)
+			}
+			rows.Close()
+			if rowsErr := rows.Err(); rowsErr != nil {
+				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, rowsErr)
+				httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+				return
+			}
+			if len(ids) == 1 {
+				hostID, hostTenant = ids[0], tenants[0]
+			}
 		}
 
 		if hostID > 0 {
