@@ -2231,7 +2231,8 @@
       ]),
       h('div', { class: 'grid2' }, [
         field('主机侧隧道 IP (tunnel_ip)', hostTunnelEl,
-          '可选。主机在隧道网段里的地址（如 WireGuard/IPSec 分配的 172.16.x.x），仅用于展示与筛选。' +
+          '可选。主机在隧道网段里的地址（如 WireGuard/IPSec 分配的 172.16.x.x）。' +
+          '填写后再次接入 Agent 时会优先按该地址匹配存量主机，避免重复建档；' +
           '平台不主动反连主机，指令仍由 Agent 外连取回。'),
         field('连接地址覆盖 (server_url_override)', serverOverrideEl,
           '可选。临时改写该主机 Agent 连接平台的地址，例如该主机只能走某条专线/VPN 入口。' +

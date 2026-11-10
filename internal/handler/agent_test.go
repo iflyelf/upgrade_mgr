@@ -501,3 +501,49 @@ func TestAgentRegisterExitIPPrecedesSourceIP(t *testing.T) {
 		t.Fatal("应绑定到出口 IP 对应的主机")
 	}
 }
+
+// TestAgentRegisterTunnelIPPrecedesExitIP 手工填写的 tunnel_ip 优先级最高：
+// 即使出口 IP 命中另一台主机，也应绑定到隧道 IP 对应的主机。
+func TestAgentRegisterTunnelIPPrecedesExitIP(t *testing.T) {
+	db, sc := setupHostDB(t)
+	sc.Config = config.Default()
+	sc.Config.Agent.RequireEnrollToken = false
+
+	sfx := time.Now().UnixNano()
+	srcIP := fmt.Sprintf("198.23.%d.%d", (sfx/250)%250, sfx%250)
+	tunnelIP := fmt.Sprintf("198.24.%d.%d", (sfx/250)%250, (sfx+3)%250)
+	otherIP := fmt.Sprintf("198.25.%d.%d", (sfx/250)%250, (sfx+5)%250)
+
+	var tunnelHostID, exitHostID int64
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, tunnel_ip, tenant_id, source)
+		VALUES ($1,'tunnel-host',$2,1,'manual') RETURNING id`, otherIP, tunnelIP).Scan(&tunnelHostID); err != nil {
+		t.Fatalf("插入隧道主机失败: %v", err)
+	}
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, exit_ip, tenant_id, source)
+		VALUES ($1,'exit-host',$2,1,'consul_mgr') RETURNING id`, fmt.Sprintf("198.26.%d.%d", (sfx/250)%250, (sfx+7)%250), tunnelIP).Scan(&exitHostID); err != nil {
+		t.Fatalf("插入出口主机失败: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM agents WHERE host_id IN ($1,$2)`, tunnelHostID, exitHostID)
+		db.Exec(`DELETE FROM hosts WHERE id IN ($1,$2)`, tunnelHostID, exitHostID)
+	})
+
+	body := `{"hostname":"tunnel-host","arch":"amd64","exit_ip":"` + tunnelIP + `"}`
+	req := httptest.NewRequest("POST", "/api/agent/register", strings.NewReader(body))
+	req.RemoteAddr = srcIP + ":12345"
+	rec := httptest.NewRecorder()
+	AgentRegister(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("注册失败 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var tunnelAgent, exitAgent string
+	db.QueryRow(`SELECT COALESCE(agent_id,'') FROM hosts WHERE id=$1`, tunnelHostID).Scan(&tunnelAgent)
+	db.QueryRow(`SELECT COALESCE(agent_id,'') FROM hosts WHERE id=$1`, exitHostID).Scan(&exitAgent)
+	if tunnelAgent == "" {
+		t.Fatal("应优先绑定到手工填写的隧道 IP 主机")
+	}
+	if exitAgent != "" {
+		t.Fatal("出口 IP 命中的主机不应被绑定")
+	}
+}

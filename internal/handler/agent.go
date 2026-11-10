@@ -126,13 +126,63 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 			tenantID = tid
 		}
 
-		// 查找现有主机：多网卡场景下出口 IP 才是稳定身份，优先按出口 IP 匹配，
-		// 其次来源 IP，最后主机名（仅未绑定 Agent 的唯一主机）。
-		// 命中后更新原主机（保留原 ip），而不是新建重复行。
+		// 查找现有主机：手工隧道 IP 优先（管理员显式身份），其次出口 IP
+		// （多网卡场景下的稳定地址），再其次来源 IP，最后主机名
+		// （仅未绑定 Agent 的唯一主机）。命中后更新原主机（保留原 ip），
+		// 而不是新建重复行。
 		var hostID, hostTenant int64
 
+		// 0) 手工隧道 IP 优先：管理员显式填写的 tunnel_ip 是强身份，
+		//    来源 IP 或出口 IP 命中它时直接绑定该主机（保留手工值）。
+		if ip != "" || exitIP != "" {
+			rows, qerr := tx.QueryContext(ctx, `
+				SELECT id, tenant_id, (tunnel_ip=$1) AS exact
+				FROM hosts
+				WHERE tunnel_ip <> ''
+				  AND (tunnel_ip=$1 OR ($2 <> '' AND tunnel_ip=$2))
+				ORDER BY exact DESC, id
+				FOR UPDATE`, ip, exitIP)
+			if qerr != nil {
+				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, qerr)
+				httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+				return
+			}
+			var ids, tenants []int64
+			for rows.Next() {
+				var id, tenant int64
+				var isExact bool
+				if scanErr := rows.Scan(&id, &tenant, &isExact); scanErr != nil {
+					rows.Close()
+					auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, scanErr)
+					httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+					return
+				}
+				ids = append(ids, id)
+				tenants = append(tenants, tenant)
+				if isExact {
+					hostID, hostTenant = id, tenant
+				}
+			}
+			rows.Close()
+			if rowsErr := rows.Err(); rowsErr != nil {
+				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, rowsErr)
+				httpx.Fail(w, http.StatusInternalServerError, "注册失败")
+				return
+			}
+			if hostID == 0 && len(ids) == 1 {
+				hostID, hostTenant = ids[0], tenants[0]
+			}
+			if hostID == 0 && len(ids) > 1 {
+				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip,
+					fmt.Errorf("隧道 IP 匹配到 %d 台主机", len(ids)))
+				httpx.Fail(w, http.StatusConflict,
+					"存在多台主机填写了相同的隧道 IP，请先在主机列表中清理重复记录后再接入")
+				return
+			}
+		}
+
 		// 1) 出口 IP 优先。
-		if exitIP != "" {
+		if hostID == 0 && exitIP != "" {
 			rows, qerr := tx.QueryContext(ctx, `
 				SELECT id, tenant_id, (ip=$1) AS exact
 				FROM hosts
