@@ -44,6 +44,63 @@
     });
   }
 
+  // ---- 认证方式（builtin / casdoor） ----
+  //
+  // casdoor 模式下后端禁用密码登录，必须跳转 FlyIAM 完成 SSO。
+  // 启动时先读 /api/auth/config，登录页据此决定展示密码表单还是 SSO 按钮。
+  var authConfigPromise = null;
+
+  function loadAuthConfig() {
+    if (authConfigPromise) return authConfigPromise;
+    authConfigPromise = api('/api/auth/config').then(function (cfg) {
+      state.authProvider = (cfg && cfg.provider) || 'builtin';
+      state.authLoginURL = (cfg && cfg.login_url) || '';
+      return state.authProvider;
+    }).catch(function () {
+      // 旧版后端没有该接口时退回内置登录，避免登录页整体不可用。
+      state.authProvider = 'builtin';
+      state.authLoginURL = '';
+      return 'builtin';
+    });
+    return authConfigPromise;
+  }
+
+  function isSSO() { return state.authProvider === 'casdoor'; }
+
+  // ssoLogin 重新获取授权地址再跳转：
+  //   - 授权地址里的 state 带 10 分钟时效；
+  //   - nonce cookie 每次请求都会刷新，用最新的地址才能通过回调校验。
+  function ssoLogin() {
+    if (state.ssoBusy) return;
+    state.ssoBusy = true;
+    state.ssoErr = '';
+    render();
+    api('/api/auth/config').then(function (cfg) {
+      var url = cfg && cfg.login_url;
+      if (!url) throw new Error('SSO 登录地址为空，请检查「设置 → Casdoor」是否填写完整并重启服务');
+      window.location.href = url;
+    }).catch(function (e) {
+      state.ssoBusy = false;
+      state.ssoErr = e.message;
+      render();
+    });
+  }
+
+  // readSSOError 读取回调失败时后端带回来的提示（?sso_error=...），并清理地址栏。
+  function readSSOError() {
+    try {
+      var m = /[?&]sso_error=([^&]*)/.exec(window.location.search || '');
+      if (!m) return '';
+      var msg = decodeURIComponent(m[1].replace(/\+/g, ' '));
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname + (window.location.hash || ''));
+      }
+      return msg;
+    } catch (e) {
+      return '';
+    }
+  }
+
   var state = { user: null, view: 'hosts', lang: (function () {
     try { return localStorage.getItem('lang') === 'en' ? 'en' : 'zh'; } catch (e) { return 'zh'; }
   })(), hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
@@ -66,6 +123,8 @@
     taskDetailOpenLogs: {},
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
+    // 认证方式：casdoor 时登录页只展示 SSO 按钮（authLoginURL 由 /api/auth/config 提供）。
+    authProvider: '', authLoginURL: '', ssoBusy: false, ssoErr: '',
     // 任务页按组件/类型/名称筛选与服务端分页。
     taskFilterComp: '', taskFilterKind: '', taskFilterStatus: '', taskFilterCreator: '', taskQ: '',
     taskPage: 1, taskSize: 50, taskPages: 1, taskTotal: 0, taskCreators: null,
@@ -1304,7 +1363,31 @@
     } catch (e) {}
   }
 
+  // ssoLoginView FlyIAM/Casdoor 统一登录入口。
+  //
+  // casdoor 模式下后端不接受账号密码，必须走 OAuth 跳转，因此这里不再渲染
+  // 用户名/密码表单，避免用户输入后被拒（audit 里会留下「casdoor 模式请使用 SSO 登录」）。
+  function ssoLoginView() {
+    var card = h('div', { class: 'card login-card' }, [
+      h('h2', {}, ['登录']),
+      state.ssoErr ? h('div', { class: 'err field', role: 'alert' }, [state.ssoErr]) : null,
+      h('p', { class: 'muted' }, ['本系统已接入 FlyIAM 统一身份认证，请使用统一账号登录。']),
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn', disabled: state.ssoBusy ? 'disabled' : null,
+          onclick: ssoLogin
+        }, [state.ssoBusy ? '正在跳转…' : '使用 FlyIAM 登录']),
+        h('button', {
+          class: 'btn ghost', title: 'Switch language',
+          onclick: function () { toggleLang(); }
+        }, [state.lang === 'en' ? '中文' : 'EN'])
+      ])
+    ]);
+    return h('div', { class: 'login-wrap' }, [card]);
+  }
+
     function loginView() {
+    if (isSSO()) return ssoLoginView();
     var uEl, pEl;
     var doLogin = function () {
       if (state.loginBusy) return;
@@ -8220,6 +8303,7 @@
       state.hostsSig = '';
       state.tasksSig = '';
       state.taskDetailSig = '';
+      state.ssoErr = '';
       render();
     });
   }
@@ -8233,7 +8317,11 @@
     switchView(route.view);
   });
 
-  api('/api/auth/userinfo').then(function (u) {
+  // 启动：先取认证方式（casdoor 需要登录页展示 SSO 入口），再尝试拿当前用户。
+  loadAuthConfig().then(function () {
+    state.ssoErr = readSSOError();
+    return api('/api/auth/userinfo');
+  }).then(function (u) {
     state.user = u;
     var route = parseHash();
     if (route) {

@@ -679,6 +679,21 @@ func buildAuth(c *config.Config, db *sql.DB) auth.Provider {
 		log.Println("⚠️ SESSION_SECRET 未设置或过短（<16 字节）：多副本会话/Casdoor 登录不互通，重启后需重新登录；生产请设置所有副本一致的 32+ 字节密钥")
 	}
 	if c.Auth.Provider == "casdoor" {
+		// 缺任何一项都会让 SSO 无法完成：登录页能跳出去，但回调换 token 必然失败。
+		// 这里显式告警，避免只剩「SSO 登录失败」一句难以定位。
+		missing := make([]string, 0, 3)
+		if strings.TrimSpace(c.Casdoor.Endpoint) == "" {
+			missing = append(missing, "casdoor.endpoint")
+		}
+		if strings.TrimSpace(c.Casdoor.ClientId) == "" {
+			missing = append(missing, "casdoor.client_id")
+		}
+		if strings.TrimSpace(c.Casdoor.ClientSecret) == "" {
+			missing = append(missing, "casdoor.client_secret")
+		}
+		if len(missing) > 0 {
+			log.Printf("❌ casdoor 配置不完整（缺少 %s）：SSO 登录将无法完成，请到「设置 → Casdoor」补齐后重启", strings.Join(missing, ", "))
+		}
 		redirect := c.Casdoor.RedirectURI
 		if redirect == "" && c.Server.ExternalURL != "" {
 			// 未显式配置时按对外地址推导，减少误配导致「无人能登录」。
