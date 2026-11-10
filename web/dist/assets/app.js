@@ -1539,12 +1539,12 @@
       filterSelect('os_family', 'OS', facetOptions('os_family')),
       filterSelect('account', '账号', facetOptions('account')),
       hostFilterActive() ? h('button', { class: 'btn ghost', onclick: clearAll }, ['清除筛选']) : null,
+      isAdmin() ? h('button', { class: 'btn', onclick: openCreateHost }, ['新增主机']) : null,
       isAdmin() ? h('a', {
         class: 'btn ghost',
         href: '/api/hosts/export' + (hostFilterQS().length ? '?' + hostFilterQS().join('&') : ''),
         download: ''
       }, ['导出 CSV']) : null,
-      isAdmin() ? h('button', { class: 'btn', onclick: openCreateHost }, ['新增主机']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: openHostImport }, ['导入 CSV']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: openHostBatchEdit }, ['批量编辑']) : null,
       // 同步会写入/清理全局主机清单，后端要求 superadmin；其他角色不展示入口。
