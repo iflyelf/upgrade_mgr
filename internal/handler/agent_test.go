@@ -390,3 +390,65 @@ func TestAgentHeartbeatUpdatesBuildVersion(t *testing.T) {
 		t.Fatalf("空构建信息不应覆盖 agent_version，got %q", gotVersion)
 	}
 }
+
+// TestAgentRegisterMatchesExistingHostByExitIP 再次接入时若来源 IP 与清单 IP
+// 不一致，应按 Agent 上报的出口 IP 匹配存量主机并更新，而不是重复建档。
+func TestAgentRegisterMatchesExistingHostByExitIP(t *testing.T) {
+	db, sc := setupHostDB(t)
+	sc.Config = config.Default()
+	sc.Config.Agent.RequireEnrollToken = false
+
+	sfx := time.Now().UnixNano()
+	existingIP := fmt.Sprintf("198.18.%d.%d", (sfx/250)%250, sfx%250)
+	srcIP := fmt.Sprintf("198.19.%d.%d", (sfx/250)%250, (sfx+7)%250)
+	if existingIP == srcIP {
+		srcIP = "198.19.250.250"
+	}
+
+	var hostID int64
+	if err := db.QueryRow(`
+		INSERT INTO hosts (ip, hostname, tenant_id, source)
+		VALUES ($1,'existing-exitip',1,'consul_mgr') RETURNING id`, existingIP).Scan(&hostID); err != nil {
+		t.Fatalf("插入存量主机失败: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM agents WHERE host_id=$1`, hostID)
+		db.Exec(`DELETE FROM hosts WHERE id=$1`, hostID)
+	})
+
+	body := `{"hostname":"existing-exitip","arch":"amd64","exit_ip":"` + existingIP + `"}`
+	req := httptest.NewRequest("POST", "/api/agent/register", strings.NewReader(body))
+	req.RemoteAddr = srcIP + ":12345"
+	rec := httptest.NewRecorder()
+	AgentRegister(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("注册失败 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var total int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM hosts WHERE ip=$1 OR exit_ip=$1`, existingIP).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Fatalf("出口 IP %s 应只对应 1 台主机，实际 %d", existingIP, total)
+	}
+	var gotIP, gotAgentID string
+	if err := db.QueryRow(`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1`, hostID).
+		Scan(&gotIP, &gotAgentID); err != nil {
+		t.Fatal(err)
+	}
+	if gotIP != existingIP {
+		t.Fatalf("存量主机 ip 不应被改写: got %q", gotIP)
+	}
+	if gotAgentID == "" {
+		t.Fatal("存量主机应绑定新注册的 Agent")
+	}
+	var dup int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hosts WHERE ip=$1`, srcIP).Scan(&dup); err != nil {
+		t.Fatal(err)
+	}
+	if dup != 0 {
+		t.Fatalf("不应按来源 IP %s 新建主机", srcIP)
+	}
+}
