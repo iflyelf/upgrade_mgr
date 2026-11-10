@@ -49,13 +49,12 @@ func (d *LocalDirectory) Resolve(ctx context.Context, username, displayName stri
 		return nil, err
 	}
 	if acc != nil {
-		// 本地显示名为空时用 Casdoor 显示名补齐（只补空值，不覆盖手工维护）。
-		if strings.TrimSpace(acc.DisplayName) == "" && strings.TrimSpace(displayName) != "" {
+		// 显示名以 Casdoor/FlyIAM 为准：每次登录同步，避免本地旧值长期覆盖。
+		if dn := strings.TrimSpace(displayName); dn != "" && dn != strings.TrimSpace(acc.DisplayName) {
 			if _, err := d.db.ExecContext(ctx,
-				`UPDATE local_users SET display_name=$2, updated_at=NOW()
-				 WHERE username=$1 AND COALESCE(display_name,'')=''`,
-				username, displayName); err == nil {
-				acc.DisplayName = displayName
+				`UPDATE local_users SET display_name=$2, updated_at=NOW() WHERE username=$1`,
+				username, dn); err == nil {
+				acc.DisplayName = dn
 			}
 		}
 		return acc, nil

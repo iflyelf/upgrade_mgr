@@ -3,14 +3,17 @@ package handler
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/fielddef"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/userfieldsync"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/flyiam"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -51,84 +54,103 @@ func flyiamClient(s *svc.ServiceContext) *flyiam.Client {
 // SyncUserFieldsFromFlyIAM 从 FlyIAM 同步用户字段定义（管理员）。
 //
 // 语义：按 field_key 幂等 upsert；本地新增的字段不会被删除（避免误删自定义字段）。
-// 内置字段只更新展示属性（保留 builtin 标记与字段键）。
+// 只同步「定义」，不写回字段值：人事属性由 FlyIAM 同步到 Casdoor properties。
 func SyncUserFieldsFromFlyIAM(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		client := flyiamClient(s)
-		if client == nil {
-			httpx.Fail(w, http.StatusServiceUnavailable,
-				"未配置 FlyIAM 地址与服务令牌，请先到「设置 → FlyIAM」填写")
+		if s.UserFieldSync == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable, "字段同步服务未初始化")
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-
-		remote, err := client.FetchUserFields(ctx)
+		res, err := s.UserFieldSync.Run(r.Context(), "manual")
 		if err != nil {
 			auditOp(s, r, audit.ActionFlyIAMSync, "user_field", "", "", err)
-			httpx.Fail(w, http.StatusBadGateway, "从 FlyIAM 拉取字段失败: "+err.Error())
+			if errors.Is(err, userfieldsync.ErrRunning) {
+				httpx.Fail(w, http.StatusConflict, err.Error())
+				return
+			}
+			httpx.Fail(w, http.StatusBadGateway, err.Error())
 			return
 		}
+		auditOpDetails(s, r, audit.ActionFlyIAMSync, "user_field", "",
+			fmt.Sprintf("added=%d updated=%d total=%d", res.Added, res.Updated, res.Total), nil,
+			map[string]any{"added": res.Added, "updated": res.Updated, "total": res.Total}, nil)
+		httpx.OK(w, res)
+	}
+}
 
-		repo, repoErr := fielddef.NewRepo(s.DB, fielddef.KindUser)
-		if repoErr != nil {
-			httpx.FailErr(w, http.StatusInternalServerError, repoErr)
+// GetUserFieldSyncConfig 读取用户字段自动同步配置（管理员）。
+func GetUserFieldSyncConfig(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.UserFieldSync == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable, "字段同步服务未初始化")
 			return
 		}
-		local, err := repo.List(ctx)
+		cfg, err := s.UserFieldSync.GetConfig(r.Context())
 		if err != nil {
 			httpx.FailErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		byKey := make(map[string]fielddef.Def, len(local))
-		for _, d := range local {
-			byKey[d.FieldKey] = d
-		}
+		httpx.OK(w, cfg)
+	}
+}
 
-		added, updated := 0, 0
-		for _, rf := range remote {
-			def := fielddef.Def{
-				FieldKey:   strings.TrimSpace(rf.FieldKey),
-				Label:      rf.Label,
-				FieldType:  normalizeFieldType(rf.FieldType),
-				Options:    rf.Options,
-				ShowInList: rf.ShowInList,
-				ShowInForm: rf.ShowInForm,
-				Editable:   rf.Editable,
-				SortOrder:  rf.SortOrder,
-			}
-			if def.FieldKey == "" {
-				continue
-			}
-			if old, ok := byKey[def.FieldKey]; ok {
-				// 本地存在：只更新远端提供的展示属性；内置标记保留本地值。
-				def.ID = old.ID
-				def.Builtin = old.Builtin
-				if sameFieldDef(old, def) {
-					continue
-				}
-				if err := repo.Update(ctx, &def); err != nil {
-					httpx.Fail(w, http.StatusBadRequest,
-						fmt.Sprintf("更新字段 %s 失败: %v", def.FieldKey, err))
-					return
-				}
-				updated++
-			} else {
-				if _, err := repo.Create(ctx, &def); err != nil {
-					httpx.Fail(w, http.StatusBadRequest,
-						fmt.Sprintf("新增字段 %s 失败: %v", def.FieldKey, err))
-					return
-				}
-				added++
+// UpdateUserFieldSyncConfig 保存用户字段自动同步配置（superadmin）。
+func UpdateUserFieldSyncConfig(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.UserFieldSync == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable, "字段同步服务未初始化")
+			return
+		}
+		var req struct {
+			Enabled       bool   `json:"enabled"`
+			Interval      string `json:"interval"`
+			SyncOnStartup bool   `json:"sync_on_startup"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		cfg := &userfieldsync.Config{
+			ID: 1, Enabled: req.Enabled, Interval: req.Interval, SyncOnStartup: req.SyncOnStartup,
+		}
+		if err := s.UserFieldSync.UpdateConfig(r.Context(), cfg); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpx.OK(w, cfg)
+	}
+}
+
+// UserFieldSyncProgress 当前同步进度（管理员，供页面轮询）。
+func UserFieldSyncProgress(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.UserFieldSync == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable, "字段同步服务未初始化")
+			return
+		}
+		httpx.OK(w, s.UserFieldSync.Progress())
+	}
+}
+
+// UserFieldSyncLogs 最近同步日志（管理员）。
+func UserFieldSyncLogs(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.UserFieldSync == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable, "字段同步服务未初始化")
+			return
+		}
+		limit := 20
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				limit = n
 			}
 		}
-
-		auditOpDetails(s, r, audit.ActionFlyIAMSync, "user_field", "",
-			fmt.Sprintf("added=%d updated=%d total=%d", added, updated, len(remote)), nil,
-			map[string]any{"added": added, "updated": updated, "total": len(remote)}, nil)
-		httpx.OK(w, map[string]any{
-			"added": added, "updated": updated, "total": len(remote),
-		})
+		list, err := s.UserFieldSync.Logs(r.Context(), limit)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		httpx.OK(w, list)
 	}
 }
 
@@ -162,33 +184,6 @@ func TestFlyIAM(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		httpx.OK(w, resp)
 	}
-}
-
-// normalizeFieldType 把 FlyIAM 的字段类型映射到本地允许值。
-func normalizeFieldType(t string) string {
-	switch strings.ToLower(strings.TrimSpace(t)) {
-	case fielddef.TypeTextarea:
-		return fielddef.TypeTextarea
-	case fielddef.TypeNumber:
-		return fielddef.TypeNumber
-	case fielddef.TypeSelect:
-		return fielddef.TypeSelect
-	case fielddef.TypeDate:
-		return fielddef.TypeDate
-	default:
-		return fielddef.TypeText
-	}
-}
-
-// sameFieldDef 判断两个定义的展示属性是否一致（键不同不算差异）。
-func sameFieldDef(a, b fielddef.Def) bool {
-	return a.Label == b.Label &&
-		a.FieldType == b.FieldType &&
-		a.Options == b.Options &&
-		a.ShowInList == b.ShowInList &&
-		a.ShowInForm == b.ShowInForm &&
-		a.Editable == b.Editable &&
-		a.SortOrder == b.SortOrder
 }
 
 // FlyIAMUsers 从 FlyIAM 读取用户列表（只读展示）。

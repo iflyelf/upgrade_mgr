@@ -223,7 +223,7 @@ func casdoorDirectory(s *svc.ServiceContext) *casdoor.Directory {
 		snap := s.Settings.Snapshot()
 		cfg = snap.Casdoor
 	}
-	return casdoor.NewDirectory(cfg.Endpoint, cfg.ClientId, cfg.ClientSecret, cfg.OrganizationName)
+	return casdoor.NewDirectory(cfg.Endpoint, cfg.ClientId, cfg.ClientSecret, cfg.OrganizationName, cfg.ApplicationName)
 }
 
 // UserDirectory 返回 Casdoor 用户目录（服务端分页 + 搜索），并合并本地租户/角色。
@@ -235,7 +235,23 @@ func UserDirectory(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dir := casdoorDirectory(s)
 		if !dir.Valid() {
-			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法读取用户目录")
+			// 纯内置账号部署（未配置 Casdoor）：退回本地用户表，保持页面可用。
+			list, lerr := s.RBAC.List(r.Context(), actorOf(r))
+			if lerr != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, lerr)
+				return
+			}
+			out := make([]map[string]any, 0, len(list))
+			for _, u := range list {
+				out = append(out, map[string]any{
+					"username": u.Username, "name": u.Username, "display_name": u.Display,
+					"local": true, "tenant_id": u.TenantID, "roles": u.Roles,
+					"is_admin": u.IsAdmin, "disabled": u.Disabled,
+					"casdoor": false, "casdoor_admin": false, "is_forbidden": false,
+					"properties": map[string]string{},
+				})
+			}
+			httpx.OK(w, map[string]any{"list": out, "total": len(out), "page": 1, "size": len(out)})
 			return
 		}
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -308,7 +324,7 @@ func UserDirectory(s *svc.ServiceContext) http.HandlerFunc {
 				"email": u.Email, "phone": u.Phone, "avatar": u.Avatar, "owner": u.Owner,
 				"casdoor_admin": u.IsAdmin, "is_forbidden": u.IsForbidden,
 				"properties": u.Properties, "created_time": u.CreatedTime,
-				"local": false, "tenant_id": 0, "roles": []string{},
+				"casdoor": true, "local": false, "tenant_id": 0, "roles": []string{},
 				"is_admin": false, "disabled": false,
 			}
 			if lr, ok := locals[u.Name]; ok {
@@ -317,7 +333,8 @@ func UserDirectory(s *svc.ServiceContext) http.HandlerFunc {
 				row["roles"] = []string(lr.roles)
 				row["is_admin"] = lr.isAdmin
 				row["disabled"] = lr.disabled
-				if strings.TrimSpace(lr.display) != "" {
+				// 显示名以 Casdoor 为准；仅当 Casdoor 为空时回退本地旧值。
+				if strings.TrimSpace(display) == "" && strings.TrimSpace(lr.display) != "" {
 					row["display_name"] = lr.display
 				}
 			}
@@ -376,5 +393,195 @@ func UserEnableLocal(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		httpx.OK(w, map[string]any{"id": id, "username": username})
+	}
+}
+
+// UserCasdoorCreate 在 Casdoor 创建用户，并同步开通本地授权。
+//
+// 扩展字段（properties）不在本接口写入：人事属性只从 FlyIAM 同步，
+// 避免两个系统互相覆盖。
+func UserCasdoorCreate(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name        string   `json:"name"`
+			DisplayName string   `json:"display_name"`
+			Email       string   `json:"email"`
+			Phone       string   `json:"phone"`
+			Avatar      string   `json:"avatar"`
+			Password    string   `json:"password"`
+			Roles       []string `json:"roles"`
+			TenantID    int64    `json:"tenant_id"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		req.Name = strings.TrimSpace(req.Name)
+		if req.Name == "" || len(req.Name) > 100 {
+			httpx.Fail(w, http.StatusBadRequest, "域账号必填且不超过 100 字符")
+			return
+		}
+		dir := casdoorDirectory(s)
+		if !dir.Valid() {
+			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法创建用户")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+
+		existing, err := dir.Get(ctx, req.Name)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "校验 Casdoor 用户失败: "+err.Error())
+			return
+		}
+		if existing != nil {
+			httpx.Fail(w, http.StatusConflict, "Casdoor 已存在用户 "+req.Name)
+			return
+		}
+
+		generated := false
+		if strings.TrimSpace(req.Password) == "" {
+			req.Password, _ = generatePassword(16)
+			generated = true
+		}
+		if len(req.Password) < 8 {
+			httpx.Fail(w, http.StatusBadRequest, "密码长度不能少于 8 个字符")
+			return
+		}
+
+		if err := dir.CreateUser(ctx, casdoor.CreateUserInput{
+			Name: req.Name, DisplayName: req.DisplayName, Email: req.Email,
+			Phone: req.Phone, Avatar: req.Avatar, Password: req.Password,
+		}); err != nil {
+			auditOp(s, r, audit.ActionUserCreate, "user", req.Name, req.Name, err)
+			httpx.Fail(w, http.StatusBadGateway, "创建 Casdoor 用户失败: "+err.Error())
+			return
+		}
+
+		// 同时开通本地授权（角色默认 user），避免创建后还要再点一次「开通」。
+		id, localErr := s.RBAC.EnableSSOUser(ctx, actorOf(r), req.Name, req.DisplayName, req.TenantID, req.Roles)
+		auditOp(s, r, audit.ActionUserCreate, "user", req.Name, req.Name, localErr)
+		resp := map[string]any{"id": id, "username": req.Name}
+		if generated {
+			resp["initial_password"] = req.Password
+		}
+		if localErr != nil {
+			resp["warning"] = "Casdoor 用户已创建，但本地授权失败: " + localErr.Error()
+		}
+		httpx.OK(w, resp)
+	}
+}
+
+// UserCasdoorUpdate 更新 Casdoor 用户基础资料（不含 properties）。
+func UserCasdoorUpdate(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := strings.TrimSpace(r.PathValue("username"))
+		if username == "" {
+			httpx.Fail(w, http.StatusBadRequest, "用户名为空")
+			return
+		}
+		var req struct {
+			DisplayName string `json:"display_name"`
+			Email       string `json:"email"`
+			Phone       string `json:"phone"`
+			Avatar      string `json:"avatar"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		dir := casdoorDirectory(s)
+		if !dir.Valid() {
+			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法更新用户")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		err := dir.UpdateProfile(ctx, username, req.DisplayName, req.Email, req.Phone, req.Avatar)
+		auditOp(s, r, audit.ActionUserUpdate, "user", username, username, err)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "更新 Casdoor 用户失败: "+err.Error())
+			return
+		}
+		httpx.OK(w, nil)
+	}
+}
+
+// UserCasdoorResetPassword 重置 Casdoor 用户密码（留空则生成一次性随机密码）。
+func UserCasdoorResetPassword(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := strings.TrimSpace(r.PathValue("username"))
+		if username == "" {
+			httpx.Fail(w, http.StatusBadRequest, "用户名为空")
+			return
+		}
+		var req struct {
+			Password string `json:"password"`
+		}
+		if r.ContentLength != 0 {
+			if err := httpx.DecodeJSON(r, &req); err != nil {
+				httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+				return
+			}
+		}
+		generated := false
+		if strings.TrimSpace(req.Password) == "" {
+			req.Password, _ = generatePassword(16)
+			generated = true
+		}
+		if len(req.Password) < 8 {
+			httpx.Fail(w, http.StatusBadRequest, "密码长度不能少于 8 个字符")
+			return
+		}
+		dir := casdoorDirectory(s)
+		if !dir.Valid() {
+			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法重置密码")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		err := dir.SetPassword(ctx, username, req.Password)
+		auditOp(s, r, audit.ActionPasswordChange, "user", username, username, err)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "重置 Casdoor 密码失败: "+err.Error())
+			return
+		}
+		resp := map[string]any{"username": username}
+		if generated {
+			resp["password"] = req.Password
+		}
+		httpx.OK(w, resp)
+	}
+}
+
+// UserCasdoorSetAdmin 设置/取消 Casdoor 管理员标记（FlyIAM 全局管理员）。
+func UserCasdoorSetAdmin(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := strings.TrimSpace(r.PathValue("username"))
+		if username == "" {
+			httpx.Fail(w, http.StatusBadRequest, "用户名为空")
+			return
+		}
+		var req struct {
+			IsAdmin bool `json:"is_admin"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		dir := casdoorDirectory(s)
+		if !dir.Valid() {
+			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法修改管理员标记")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		err := dir.SetAdmin(ctx, username, req.IsAdmin)
+		auditOp(s, r, audit.ActionUserUpdate, "user", username, username, err)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "修改 Casdoor 管理员标记失败: "+err.Error())
+			return
+		}
+		httpx.OK(w, nil)
 	}
 }
