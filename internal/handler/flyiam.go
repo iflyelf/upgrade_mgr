@@ -132,6 +132,31 @@ func UserFieldSyncProgress(s *svc.ServiceContext) http.HandlerFunc {
 	}
 }
 
+// DeleteUserFieldSyncLogs 批量删除/清空同步日志（superadmin）。
+func DeleteUserFieldSyncLogs(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.UserFieldSync == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable, "字段同步服务未初始化")
+			return
+		}
+		var req struct {
+			IDs []int64 `json:"ids"`
+			All bool    `json:"all"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+		n, err := s.UserFieldSync.DeleteLogs(r.Context(), req.IDs, req.All)
+		auditOp(s, r, audit.ActionFlyIAMSync, "user_field_log", "", "", err)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpx.OK(w, map[string]any{"deleted": n})
+	}
+}
+
 // UserFieldSyncLogs 最近同步日志（管理员）。
 func UserFieldSyncLogs(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

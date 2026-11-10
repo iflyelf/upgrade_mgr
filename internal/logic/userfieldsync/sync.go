@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/fielddef"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/flyiam"
@@ -198,6 +200,31 @@ func (s *Service) Logs(ctx context.Context, limit int) ([]*LogEntry, error) {
 		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+// DeleteLogs 删除同步日志：all=true 清空全部，否则按 ID 批量删除。
+func (s *Service) DeleteLogs(ctx context.Context, ids []int64, all bool) (int64, error) {
+	var (
+		res sql.Result
+		err error
+	)
+	if all {
+		res, err = s.db.ExecContext(ctx, `DELETE FROM userfield_sync_logs`)
+	} else {
+		if len(ids) == 0 {
+			return 0, fmt.Errorf("未选择要删除的日志")
+		}
+		if len(ids) > 500 {
+			return 0, fmt.Errorf("一次最多删除 500 条日志")
+		}
+		res, err = s.db.ExecContext(ctx,
+			`DELETE FROM userfield_sync_logs WHERE id = ANY($1)`, pq.Array(ids))
+	}
+	if err != nil {
+		return 0, fmt.Errorf("删除同步日志失败: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // Run 执行一次同步。trigger: manual / schedule / startup。

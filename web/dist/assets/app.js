@@ -138,9 +138,11 @@
     orgUserDir: null, orgUserDirErr: '', orgUserDirLoading: false, orgUserField: 'name',
     // Casdoor 用户新增/资料编辑/详情（扩展字段只读，来自 FlyIAM 同步）
     orgUserCasdoorForm: null, orgUserDetail: null,
+    // 团队成员添加：直接搜索 Casdoor 用户（不再要求本地已开通）
+    teamUserQuery: '', teamUserField: 'name', teamUserResults: null, teamUserBusy: false,
     // 用户字段定义自动同步（从 FlyIAM 拉取定义；不写回）
     ufSync: null, ufSyncLoading: false, ufSyncErr: '', ufSyncBusy: false,
-    ufSyncProgress: null, ufSyncLogs: null, ufSyncTimer: null,
+    ufSyncProgress: null, ufSyncLogs: null, ufSyncTimer: null, ufSyncLogSel: {},
     orgSelTeam: null, orgTeamMembers: null, orgTeamPerms: null, orgNewField: null,
     flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
     hostFacets: null, hostListFacets: null,
@@ -3119,7 +3121,8 @@
   // 用户管理：列表来自 Casdoor（服务端分页 + 搜索），租户/角色来自本地授权。
   //
   // 30k+ 人员不能全量拉取：每次只请求当前页，关键字交给 Casdoor 过滤；
-  // local=true 表示本地已建档（可分配租户/角色），false 则显示「开通本地账号」。
+  // local=true 表示本地已有授权记录；false 表示按默认 user/租户 1 展示，
+  // 编辑角色或禁用时后端自动建档（不再有单独的「开通」步骤）。
   function orgUsers(o) {
     if (state.orgUserDir === null && !state.orgUserDirLoading && !state.orgUserDirErr) {
       loadUserDir();
@@ -3144,11 +3147,9 @@
       var nameTags = [];
       if (u.casdoor_admin) nameTags.push(h('span', { class: 'tag status-running' }, ['Casdoor 管理员']));
       if (u.is_forbidden) nameTags.push(h('span', { class: 'tag status-failed' }, ['Casdoor 禁用']));
-      if (!u.local) nameTags.push(h('span', { class: 'tag' }, ['未接入']));
 
       var status;
       if (u.is_forbidden) status = h('span', { class: 'tag status-failed' }, ['Casdoor 禁用']);
-      else if (!u.local) status = h('span', { class: 'muted' }, ['-']);
       else if (u.disabled) status = h('span', { class: 'tag status-failed' }, ['本地禁用']);
       else status = h('span', { class: 'tag status-success' }, ['正常']);
 
@@ -3162,9 +3163,8 @@
         ]),
         u.email || '-',
         u.phone || '-',
-        u.local ? u.tenant_id : '-',
-        u.local ? h('div', { class: 'row-actions' }, roleTags.length ? roleTags : ['-'])
-                : h('span', { class: 'muted' }, ['未接入']),
+        u.tenant_id || 1,
+        h('div', { class: 'row-actions' }, roleTags.length ? roleTags : ['-']),
         status
       ].concat(listDefs.map(function (d) {
         // 扩展字段只展示 FlyIAM 同步到 Casdoor properties 的值，本系统不回写。
@@ -3187,20 +3187,16 @@
           class: 'btn ghost small', onclick: function () { toggleCasdoorAdmin(u); }
         }, [u.casdoor_admin ? '取消管理员' : '设为管理员']));
       }
+      actions.push(h('button', {
+        class: 'btn ghost small', onclick: function () { openUserForm(u); }
+      }, ['角色']));
+      actions.push(h('button', {
+        class: 'btn ghost small', onclick: function () { toggleUserDisabled(u); }
+      }, [u.disabled ? '启用' : '本地禁用']));
       if (u.local) {
-        actions.push(h('button', {
-          class: 'btn ghost small', onclick: function () { openUserForm(u); }
-        }, ['角色']));
-        actions.push(h('button', {
-          class: 'btn ghost small', onclick: function () { toggleUserDisabled(u); }
-        }, [u.disabled ? '启用' : '本地禁用']));
         actions.push(h('button', {
           class: 'btn danger small', onclick: function () { deleteUser(u); }
         }, ['移除本地账号']));
-      } else {
-        actions.push(h('button', {
-          class: 'btn small', onclick: function () { enableLocalUser(u); }
-        }, ['开通本地账号']));
       }
       cells.push(h('div', { class: 'row-actions' }, actions));
       return cells;
@@ -3289,7 +3285,7 @@
         toolbar,
         h('div', { class: 'muted', style: 'margin:6px 0 10px' }, [
           '账号数据来自 Casdoor（新增/改名请在 FlyIAM 或 Casdoor 完成）；租户/角色为本系统本地授权。' +
-          '未接入的用户首次 SSO 登录会自动建档，也可直接点「开通本地账号」。'
+          '所有用户默认角色 user、租户 1；直接点「角色」分配即可，无需先开通账号。'
         ]),
         state.orgUserDirErr
           ? h('div', { class: 'err field', role: 'alert' }, [state.orgUserDirErr])
@@ -3425,9 +3421,8 @@
       ['所属组织', u.owner || '-'],
       ['Casdoor 管理员', u.casdoor_admin ? '是' : '否'],
       ['Casdoor 禁用', u.is_forbidden ? '是' : '否'],
-      ['本地接入', u.local
-        ? ('是（租户 ' + u.tenant_id + '，角色 ' + ((u.roles || []).join(' / ') || '-') + '）')
-        : '未接入']
+      ['本地授权', '租户 ' + (u.tenant_id || 1) + '，角色 ' + ((u.roles || ['user']).join(' / ') || '-') +
+        (u.local ? '' : '（默认，编辑后自动建档）')]
     ];
     var props = u.properties || {};
     Object.keys(props).sort().forEach(function (k) {
@@ -3579,21 +3574,6 @@
       .catch(function (e) { alert('操作失败: ' + e.message); });
   }
 
-  // enableLocalUser 为 Casdoor 已存在的用户创建本地授权记录（角色默认 user）。
-  //
-  // 只写 local_users，不改动 Casdoor 账号；开通后可再点「编辑角色」分配租户/角色。
-  function enableLocalUser(u) {
-    if (!confirm('为 ' + u.username + ' 开通本地账号（角色 user）？\n\n' +
-      '登录仍由 FlyIAM/Casdoor 认证；开通后可分配租户与角色。')) return;
-    api('/api/users/' + encodeURIComponent(u.username) + '/enable', {
-      method: 'POST',
-      body: JSON.stringify({ display_name: u.display_name || '' })
-    }).then(function () {
-      loadOrg();
-      loadUserDir();
-    }).catch(function (e) { alert('开通失败: ' + e.message); });
-  }
-
   function deleteUser(u) {
     if (!confirm('确定移除本地账号 ' + u.username + '？\n\n只删除本系统的租户/角色与扩展字段，' +
       '不会删除 Casdoor/FlyIAM 用户；审计日志保留。')) return;
@@ -3664,11 +3644,17 @@
     Promise.all([
       api('/api/flyiam/sync-user-fields/config'),
       api('/api/flyiam/sync-user-fields/progress'),
-      api('/api/flyiam/sync-user-fields/logs?limit=10')
+      api('/api/flyiam/sync-user-fields/logs?limit=20')
     ]).then(function (res) {
       state.ufSync = res[0] || { enabled: false, interval: '6h', sync_on_startup: false };
       state.ufSyncProgress = res[1] || null;
       state.ufSyncLogs = res[2] || [];
+      // 仅保留当前仍存在的勾选项，避免删除后残留失效 ID。
+      var keep = {};
+      state.ufSyncLogs.forEach(function (l) {
+        if (state.ufSyncLogSel && state.ufSyncLogSel[l.id]) keep[l.id] = true;
+      });
+      state.ufSyncLogSel = keep;
       state.ufSyncLoading = false;
       render();
       if (state.ufSyncProgress && state.ufSyncProgress.running) pollUserFieldSync();
@@ -3677,6 +3663,25 @@
       state.ufSyncLoading = false;
       render();
     });
+  }
+
+  // deleteUserFieldSyncLogs 批量删除或清空同步日志。
+  function deleteUserFieldSyncLogs(all) {
+    var ids = Object.keys(state.ufSyncLogSel || {})
+      .filter(function (k) { return state.ufSyncLogSel[k]; })
+      .map(function (k) { return parseInt(k, 10); })
+      .filter(function (n) { return !isNaN(n); });
+    if (!all && !ids.length) { alert('请先勾选要删除的日志'); return; }
+    if (!confirm(all ? '清空全部字段同步日志？' : ('删除选中的 ' + ids.length + ' 条日志？'))) return;
+    api('/api/flyiam/sync-user-fields/logs', {
+      method: 'DELETE',
+      body: JSON.stringify(all ? { all: true } : { ids: ids })
+    }).then(function (r) {
+      state.ufSyncLogSel = {};
+      state.ufSyncLogs = null;
+      loadUserFieldSync();
+      alert('已删除 ' + ((r && r.deleted) || 0) + ' 条日志');
+    }).catch(function (e) { alert('删除失败: ' + e.message); });
   }
 
   function pollUserFieldSync() {
@@ -3772,8 +3777,18 @@
           ' · ' + (cfg.lastStatus || '-') + (cfg.lastMessage ? ' · ' + cfg.lastMessage : '')])
       : h('span', { class: 'muted' }, ['尚未执行过自动同步']);
 
-    var logRows = (state.ufSyncLogs || []).map(function (l) {
+    var logs = state.ufSyncLogs || [];
+    var selCount = Object.keys(state.ufSyncLogSel || {}).filter(function (k) {
+      return state.ufSyncLogSel[k];
+    }).length;
+    var logRows = logs.map(function (l) {
+      var cb = h('input', { type: 'checkbox', checked: !!state.ufSyncLogSel[l.id] }, []);
+      cb.onchange = function () {
+        state.ufSyncLogSel[l.id] = cb.checked;
+        render();
+      };
       return [
+        cb,
         fmtTime(l.startedAt),
         l.triggerType === 'manual' ? '手动' : (l.triggerType === 'startup' ? '启动' : '定时'),
         l.status === 'success' ? '成功' : (l.status === 'running' ? '执行中' : '失败'),
@@ -3798,9 +3813,22 @@
         lastRun
       ]),
       progressNode,
-      (state.ufSyncLogs || []).length
-        ? simpleTable(['时间', '触发', '结果', '变更', '说明'], state.ufSyncLogs,
-            function (l, i) { return logRows[i]; })
+      logs.length
+        ? h('div', {}, [
+            h('div', { class: 'toolbar' }, [
+              h('button', {
+                class: 'btn danger', disabled: selCount ? null : 'disabled',
+                onclick: function () { deleteUserFieldSyncLogs(false); }
+              }, ['删除所选' + (selCount ? '（' + selCount + '）' : '')]),
+              h('button', {
+                class: 'btn ghost',
+                onclick: function () { deleteUserFieldSyncLogs(true); }
+              }, ['清空日志']),
+              h('span', { class: 'muted' }, ['共 ' + logs.length + ' 条（最近 20 条）'])
+            ]),
+            simpleTable(['', '时间', '触发', '结果', '变更', '说明'], logs,
+              function (l, i) { return logRows[i]; })
+          ])
         : null
     ]);
   }
@@ -4801,6 +4829,23 @@
     }).catch(function (e) { alert('加载团队详情失败: ' + e.message); });
   }
 
+  // searchTeamUsers 直接搜索 Casdoor 用户（团队成员候选），不依赖本地授权表。
+  function searchTeamUsers() {
+    state.teamUserBusy = true;
+    api('/api/users/directory?page=1&size=20&field=' +
+        encodeURIComponent(state.teamUserField || 'name') +
+        '&keyword=' + encodeURIComponent(state.teamUserQuery || ''))
+      .then(function (d) {
+        state.teamUserResults = (d && d.list) || [];
+        state.teamUserBusy = false;
+        render();
+      }).catch(function (e) {
+        state.teamUserBusy = false;
+        alert('搜索用户失败: ' + e.message);
+        render();
+      });
+  }
+
   function teamDetailCard(o, teamID) {
     var team = o.teams.filter(function (t) { return t.id === teamID; })[0];
     var members = state.orgTeamMembers || [];
@@ -4840,18 +4885,45 @@
     ]);
     if (team && team.owner_only) policyEl.value = team.owner_only;
 
-    // 成员添加：从本地用户中多选（排除已在团队的），避免手填用户名出错。
+    // 成员添加：直接搜索 Casdoor 用户（与 consul_mgr 一致），
+    // 不再要求先「开通本地账号」；加入团队后再按需分配角色/租户。
     var memberSet = {};
     members.forEach(function (m) { memberSet[m.user_id] = true; });
-    var candidates = (o.users || []).filter(function (u) { return !memberSet[u.username]; });
-    var addSel = h('select', {
-      multiple: 'multiple',
-      size: String(Math.min(6, Math.max(3, candidates.length || 3)))
-    }, candidates.map(function (u) {
-      return h('option', { value: u.username }, [
-        u.username + (u.display_name && u.display_name !== u.username ? '（' + u.display_name + '）' : '')
-      ]);
-    }));
+
+    var teamQEl = h('input', {
+      id: 'team-user-q', value: state.teamUserQuery || '',
+      placeholder: '搜索 Casdoor 用户（账号 / 姓名 / 邮箱）',
+      oninput: function () { state.teamUserQuery = teamQEl.value; state.focusId = 'team-user-q'; },
+      onkeydown: function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); searchTeamUsers(); }
+      }
+    }, []);
+    var teamFieldEl = h('select', { value: state.teamUserField || 'name' }, [
+      h('option', { value: 'name' }, ['账号']),
+      h('option', { value: 'displayName' }, ['姓名']),
+      h('option', { value: 'email' }, ['邮箱'])
+    ]);
+    teamFieldEl.onchange = function () { state.teamUserField = teamFieldEl.value; };
+
+    var teamResults = (state.teamUserResults || []).filter(function (u) {
+      return !memberSet[u.username];
+    });
+    var teamResultRows = teamResults.map(function (u) {
+      return [
+        u.username, u.display_name || '-', u.email || '-',
+        h('button', {
+          class: 'btn small', onclick: function () {
+            api('/api/teams/' + teamID + '/members', {
+              method: 'POST', body: JSON.stringify({ members: [u.username] })
+            }).then(function () {
+              state.teamUserResults = null;
+              state.teamUserQuery = '';
+              loadTeamMembers(teamID);
+            }).catch(function (e) { alert('添加失败: ' + e.message); });
+          }
+        }, ['添加'])
+      ];
+    });
 
     return h('div', { class: 'card' }, [
       h('h3', {}, ['团队详情：' + (team ? team.name : teamID)]),
@@ -4876,22 +4948,19 @@
           }, ['保存策略'])
         ])
       ]),
-      candidates.length
-        ? h('div', { class: 'toolbar' }, [
-            h('label', { class: 'muted' }, ['添加成员（可多选）：', addSel]),
-            h('button', {
-              class: 'btn', onclick: function () {
-                var sel = addSel.selectedOptions || [];
-                var names = Array.prototype.slice.call(sel).map(function (o) { return o.value; });
-                if (!names.length) { alert('请先选择要添加的用户'); return; }
-                api('/api/teams/' + teamID + '/members', {
-                  method: 'POST', body: JSON.stringify({ members: names })
-                }).then(function () { loadTeamMembers(teamID); })
-                  .catch(function (e) { alert('添加失败: ' + e.message); });
-              }
-            }, ['添加所选成员'])
-          ])
-        : h('div', { class: 'muted' }, ['所有本地用户都已加入该团队。']),
+      h('div', { class: 'toolbar' }, [
+        teamFieldEl, teamQEl,
+        h('button', {
+          class: 'btn', disabled: state.teamUserBusy ? 'disabled' : null,
+          onclick: function () { searchTeamUsers(); }
+        }, [state.teamUserBusy ? '搜索中…' : '搜索用户'])
+      ]),
+      teamResults.length
+        ? simpleTable(['账号', '姓名', '邮箱', '操作'], teamResults,
+            function (u, i) { return teamResultRows[i]; })
+        : (state.teamUserResults === null
+            ? h('div', { class: 'muted' }, ['输入关键词搜索 Casdoor 用户后添加成员；无需先开通本地账号。'])
+            : h('div', { class: 'muted' }, ['没有匹配的用户'])),
       h('div', { class: 'toolbar' }, [
         h('button', {
           class: 'btn ghost', onclick: function () { state.orgSelTeam = null; render(); }
