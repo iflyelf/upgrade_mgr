@@ -106,6 +106,7 @@ const (
 	ActionComponentCreate = "component.create"
 	ActionComponentUpdate = "component.update"
 	ActionComponentDelete = "component.delete"
+	ActionHostCreate      = "host.create"
 	ActionHostUpdate      = "host.update"
 	ActionHostDelete      = "host.delete"
 	ActionHostTunnelTest  = "host.tunnel_test"
