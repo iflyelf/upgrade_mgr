@@ -40,6 +40,8 @@ type Casdoor struct {
 	stateKey []byte
 	// cookieSecure 是否仅 HTTPS 传输 cookie（影响 nonce cookie）。
 	cookieSecure bool
+	// localUsers 可选：登录成功后解析本地账号（租户/角色/禁用状态）。
+	localUsers LocalAccountResolver
 }
 
 // CasdoorOptions 构造参数。
@@ -57,6 +59,9 @@ type CasdoorOptions struct {
 	SessionSecret string
 	// CookieSecure 是否仅经 HTTPS 传输会话 cookie。
 	CookieSecure bool
+	// LocalUsers 可选：把 SSO 身份与 local_users（租户/角色）合并。
+	// 为 nil 时退回默认映射（tenant=1，角色 admin/user），仅用于测试或精简部署。
+	LocalUsers LocalAccountResolver
 }
 
 // NewCasdoor 创建 Casdoor 认证提供方。
@@ -79,6 +84,7 @@ func NewCasdoor(o CasdoorOptions) *Casdoor {
 		http:           &http.Client{Timeout: 15 * time.Second},
 		stateKey:       key,
 		cookieSecure:   o.CookieSecure,
+		localUsers:     o.LocalUsers,
 	}
 }
 
@@ -298,6 +304,27 @@ func (c *Casdoor) fetchUser(ctx context.Context, accessToken string) (*User, err
 	if display == "" {
 		display = cu.Name
 	}
+
+	// 与本地账号合并：租户/角色/禁用状态以 local_users 为准。
+	// 首次 SSO 登录会自动建档，否则用户管理页永远只有内置 admin。
+	if c.localUsers != nil {
+		acc, err := c.localUsers(ctx, cu.Name, display, cu.IsAdmin)
+		if err != nil {
+			return nil, err
+		}
+		if acc.Disabled {
+			return nil, fmt.Errorf("账号 %s 已被禁用，请联系管理员", cu.Name)
+		}
+		return &User{
+			ID:          cu.Name,
+			Username:    cu.Name,
+			DisplayName: acc.DisplayName,
+			IsAdmin:     acc.IsAdmin,
+			TenantID:    acc.TenantID,
+			Roles:       acc.Roles,
+		}, nil
+	}
+
 	roles := []string{RoleUser}
 	if cu.IsAdmin {
 		roles = []string{RoleAdmin}
