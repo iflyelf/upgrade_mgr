@@ -426,3 +426,123 @@ func deleteHostTx(ctx context.Context, tx *sql.Tx, sc scope.Scope, id int64) (st
 	}
 	return ip, nil
 }
+
+// HostCreate 手工新增主机（管理员，租户隔离）。
+//
+// 用于没有 Agent、也不在 Consul/consul_mgr 中的主机（如临时机器、离线资产）。
+// 同一 IP 已存在时返回 409，引导用户直接编辑，避免重复建档。
+func HostCreate(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IP                string            `json:"ip"`
+			Hostname          string            `json:"hostname"`
+			Account           string            `json:"account"`
+			AppCode           string            `json:"app_code"`
+			BizGroup          string            `json:"biz_group"`
+			Department        string            `json:"department"`
+			Vendor            string            `json:"vendor"`
+			HostType          string            `json:"host_type"`
+			TunnelIP          string            `json:"tunnel_ip"`
+			ServerURLOverride string            `json:"server_url_override"`
+			CustomFields      map[string]string `json:"custom_fields"`
+		}
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+
+		ip := hostnet.NormalizeExitIP(req.IP)
+		if ip == "" {
+			httpx.Fail(w, http.StatusBadRequest, "IP 地址不能为空或格式不正确")
+			return
+		}
+
+		updateReq := &hostUpdateRequest{
+			Hostname: &req.Hostname, Account: &req.Account, AppCode: &req.AppCode,
+			BizGroup: &req.BizGroup, Department: &req.Department, Vendor: &req.Vendor,
+			HostType: &req.HostType,
+		}
+		if err := normalizeHostFields(updateReq.fields()); err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		tunnelIP := hostnet.NormalizeExitIP(req.TunnelIP)
+		if tunnelIP == "" && strings.TrimSpace(req.TunnelIP) != "" {
+			httpx.Fail(w, http.StatusBadRequest, "隧道 IP 不是合法的 IP 地址")
+			return
+		}
+		serverURL, err := hostnet.NormalizeAddr(req.ServerURLOverride)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		cleanCustom, err := normalizeBulkCustomFields(r.Context(), s, req.CustomFields)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		tenantID := reqScope(r).TenantForWrite()
+		var existingTenant int64
+		var existingID int64
+		err = s.DB.QueryRowContext(r.Context(),
+			`SELECT id, tenant_id FROM hosts WHERE ip=$1`, ip).Scan(&existingID, &existingTenant)
+		if err == nil {
+			if existingTenant != tenantID {
+				httpx.Fail(w, http.StatusConflict, "该 IP 已属于其他租户")
+				return
+			}
+			httpx.Fail(w, http.StatusConflict,
+				fmt.Sprintf("主机 %s 已存在（ID %d），请直接在列表中编辑", ip, existingID))
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if tunnelIP != "" {
+			var used int64
+			if err := s.DB.QueryRowContext(r.Context(),
+				`SELECT id FROM hosts WHERE tunnel_ip=$1 LIMIT 1`, tunnelIP).Scan(&used); err == nil {
+				httpx.Fail(w, http.StatusConflict,
+					fmt.Sprintf("隧道 IP %s 已被主机 ID %d 使用", tunnelIP, used))
+				return
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				httpx.FailErr(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+
+		var customJSON any
+		if len(cleanCustom) > 0 {
+			b, _ := json.Marshal(cleanCustom)
+			customJSON = string(b)
+		} else {
+			customJSON = "{}"
+		}
+		var id int64
+		err = s.DB.QueryRowContext(r.Context(), `
+			INSERT INTO hosts
+				(ip, hostname, account, app_code, biz_group, department, vendor, host_type,
+				 tunnel_ip, server_url_override, custom_fields, source, tenant_id, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,'manual',$12,NOW(),NOW())
+			ON CONFLICT (ip) DO NOTHING
+			RETURNING id`,
+			ip, strings.TrimSpace(req.Hostname), strings.TrimSpace(req.Account),
+			strings.TrimSpace(req.AppCode), strings.TrimSpace(req.BizGroup),
+			strings.TrimSpace(req.Department), strings.TrimSpace(req.Vendor),
+			strings.TrimSpace(req.HostType), tunnelIP, serverURL, customJSON, tenantID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			httpx.Fail(w, http.StatusConflict, "主机 "+ip+" 已存在，请直接编辑")
+			return
+		}
+		auditOp(s, r, audit.ActionHostCreate, "host", ip, ip, err)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		httpx.OK(w, map[string]any{"id": id, "ip": ip})
+	}
+}

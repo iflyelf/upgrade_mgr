@@ -214,6 +214,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.HandleFunc("POST /api/consul-mgr/test", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.TestConsulMgr(sc))))
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
 	mux.HandleFunc("DELETE /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostDelete(sc))))
+	mux.HandleFunc("POST /api/hosts", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostCreate(sc))))
 	mux.HandleFunc("POST /api/hosts/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostBatchDelete(sc))))
 	mux.HandleFunc("POST /api/hosts/batch-update", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostBatchUpdate(sc))))
 	mux.HandleFunc("GET /api/hosts/export", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostExportCSV(sc))))

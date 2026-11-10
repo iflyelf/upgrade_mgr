@@ -1544,6 +1544,7 @@
         href: '/api/hosts/export' + (hostFilterQS().length ? '?' + hostFilterQS().join('&') : ''),
         download: ''
       }, ['导出 CSV']) : null,
+      isAdmin() ? h('button', { class: 'btn', onclick: openCreateHost }, ['新增主机']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: openHostImport }, ['导入 CSV']) : null,
       isAdmin() ? h('button', { class: 'btn ghost', onclick: openHostBatchEdit }, ['批量编辑']) : null,
       // 同步会写入/清理全局主机清单，后端要求 superadmin；其他角色不展示入口。
@@ -2101,10 +2102,24 @@
     ]);
   }
 
+  // openCreateHost 手工新增主机（没有 Agent、也不在 Consul/consul_mgr 中的机器）。
+  function openCreateHost() {
+    state.editingHost = {
+      _create: true, ip: '', hostname: '', account: '', app_code: '', biz_group: '',
+      department: '', vendor: '', host_type: '', tunnel_ip: '', server_url_override: '',
+      custom_fields: {}
+    };
+    state.hostErr = '';
+    state.tunnelTest = null;
+    render();
+  }
+
   // hostForm 编辑主机可人工维护字段；IP/OS/ARCH/Agent 状态保持 Agent 上报值。
   function hostForm() {
     var host = state.editingHost;
     if (!host) return null;
+    var isCreate = !!host._create;
+    var ipEl = h('input', { value: host.ip || '', placeholder: '如 10.1.2.3' }, []);
     var nameEl = h('input', { value: host.hostname || '' }, []);
     var accountEl = h('input', { value: host.account || '' }, []);
     var appCodeEl = h('input', { value: host.app_code || '' }, []);
@@ -2192,25 +2207,32 @@
           payload.custom_fields[k] = hostFieldInputs[k].value;
         });
       }
-      api('/api/hosts/' + host.id, { method: 'PUT', body: JSON.stringify(payload) })
-        .then(function () {
-          state.editingHost = null;
-          state.hostErr = '';
-          state.tunnelTest = null;
-          loadHosts();
-          // 保存会触发平台侧拨测 + 主机侧自检，几秒后再刷新一次让结论尽早出现。
-          if (payload.server_url_override) {
-            setTimeout(loadHosts, 3000);
-            setTimeout(loadHosts, 12000);
-          }
-        })
+      if (isCreate) payload.ip = (ipEl.value || '').trim();
+      var req = isCreate
+        ? api('/api/hosts', { method: 'POST', body: JSON.stringify(payload) })
+        : api('/api/hosts/' + host.id, { method: 'PUT', body: JSON.stringify(payload) });
+      req.then(function () {
+        state.editingHost = null;
+        state.hostErr = '';
+        state.tunnelTest = null;
+        loadHosts();
+        // 保存会触发平台侧拨测 + 主机侧自检，几秒后再刷新一次让结论尽早出现。
+        if (payload.server_url_override) {
+          setTimeout(loadHosts, 3000);
+          setTimeout(loadHosts, 12000);
+        }
+      })
         .catch(function (e) { state.hostErr = '保存失败: ' + e.message; render(); });
     };
 
     return h('div', { class: 'card' }, [
-      h('h3', {}, ['编辑主机 ' + (host.exit_ip || host.ip)]),
-      hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。出口 IP 与连接地址覆盖见下方说明。'),
-      (host.exit_ip && host.exit_ip !== host.ip
+      h('h3', {}, [isCreate ? '新增主机' : ('编辑主机 ' + (host.exit_ip || host.ip))]),
+      isCreate
+        ? hint('手工新增的主机来源标记为 manual；OS/ARCH/Agent 状态仍以 Agent 上报为准。' +
+            '同一 IP 已存在时会提示直接编辑，不会重复建档。')
+        : hint('IP、OS、ARCH、Agent 状态由 Agent 上报，不能手工修改。Agent 重新注册会覆盖主机名；Consul 同步时，若 Consul 返回非空的业务字段，会覆盖对应字段。出口 IP 与连接地址覆盖见下方说明。'),
+      isCreate ? field('IP 地址 (ip)', ipEl, '必填；支持 IPv4 / IPv6') : null,
+      (!isCreate && host.exit_ip && host.exit_ip !== host.ip
         ? hint('注册来源 IP：' + host.ip + '（可能是反向代理/隧道地址；主机身份仍以注册来源为准）')
         : null),
       h('div', { class: 'grid2' }, [
@@ -2260,7 +2282,7 @@
       tunnelTestBlock(),
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn', onclick: save }, ['保存']),
-        h('button', { class: 'btn ghost', onclick: testTunnel, disabled: (state.tunnelTest && state.tunnelTest.loading) ? 'disabled' : null },
+        isCreate ? null : h('button', { class: 'btn ghost', onclick: testTunnel, disabled: (state.tunnelTest && state.tunnelTest.loading) ? 'disabled' : null },
           [(state.tunnelTest && state.tunnelTest.loading) ? '拨测中…' : '测试连接地址']),
         h('button', {
           class: 'btn ghost', onclick: function () {

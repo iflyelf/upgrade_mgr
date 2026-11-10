@@ -265,3 +265,55 @@ func TestHostDeleteRejectsActiveTask(t *testing.T) {
 		t.Fatal("被拒绝的删除不应删除主机")
 	}
 }
+
+// TestHostCreate 手工新增主机：成功创建、重复 IP 拒绝、隧道 IP 冲突拒绝。
+func TestHostCreate(t *testing.T) {
+	db, sc := setupHostDB(t)
+	sfx := time.Now().UnixNano()
+	ip := fmt.Sprintf("198.27.%d.%d", (sfx/250)%250, sfx%250)
+	tunnel := fmt.Sprintf("198.28.%d.%d", (sfx/250)%250, (sfx+3)%250)
+	otherTunnel := fmt.Sprintf("198.29.%d.%d", (sfx/250)%250, (sfx+5)%250)
+
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/hosts", strings.NewReader(body))
+		req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+		rec := httptest.NewRecorder()
+		HostCreate(sc)(rec, req)
+		return rec
+	}
+
+	rec := call(fmt.Sprintf(`{"ip":%q,"hostname":"manual-1","app_code":"APP1","biz_group":"G1","tunnel_ip":%q}`,
+		ip, tunnel))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("创建失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM hosts WHERE ip=$1`, ip).Scan(&id); err != nil {
+		t.Fatalf("查询新建主机失败: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE id=$1`, id) })
+
+	var source, appCode, bizGroup, gotTunnel string
+	if err := db.QueryRow(`SELECT source, app_code, biz_group, tunnel_ip FROM hosts WHERE id=$1`, id).
+		Scan(&source, &appCode, &bizGroup, &gotTunnel); err != nil {
+		t.Fatal(err)
+	}
+	if source != "manual" || appCode != "APP1" || bizGroup != "G1" || gotTunnel != tunnel {
+		t.Fatalf("新建主机字段不符: source=%s app_code=%s biz_group=%s tunnel=%s",
+			source, appCode, bizGroup, gotTunnel)
+	}
+
+	// 同一 IP 再次创建应 409。
+	rec = call(fmt.Sprintf(`{"ip":%q,"hostname":"manual-dup"}`, ip))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("重复 IP 应返回 409，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 隧道 IP 已被占用时应 409。
+	rec = call(fmt.Sprintf(`{"ip":%q,"hostname":"manual-2","tunnel_ip":%q}`,
+		fmt.Sprintf("198.30.%d.%d", (sfx/250)%250, (sfx+7)%250), tunnel))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("重复隧道 IP 应返回 409，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	_ = otherTunnel
+}
