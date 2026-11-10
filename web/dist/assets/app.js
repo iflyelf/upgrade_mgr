@@ -6028,6 +6028,21 @@
       } catch (e) {}
     }
 
+    // 清理已不存在列的旧设置（例如移除「OS 详情」列后残留的显隐/宽度键），
+    // 避免 localStorage 长期堆积无效数据。
+    (function pruneStaleColumnSettings() {
+      var titleSet = {};
+      titles.forEach(function (t) { titleSet[t] = true; });
+      var changed = false;
+      Object.keys(hidden).forEach(function (t) {
+        if (!titleSet[t]) { delete hidden[t]; changed = true; }
+      });
+      Object.keys(widths).forEach(function (t) {
+        if (!titleSet[t]) { delete widths[t]; changed = true; }
+      });
+      if (changed) save();
+    })();
+
     function applyCols() {
       ths.forEach(function (th, i) {
         var hide = !!hidden[titles[i]];
