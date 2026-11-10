@@ -1487,6 +1487,16 @@
     return h('div', { class: 'login-wrap' }, [card]);
   }
 
+  // hostOSDetail 展示 OS 数据来源：family / type / version，去重后拼接。
+  function hostOSDetail(x) {
+    var parts = [];
+    [x.os_family, x.os_type, x.os_version].forEach(function (v) {
+      v = String(v || '').trim();
+      if (v && parts.indexOf(v) < 0) parts.push(v);
+    });
+    return parts.join(' / ') || '-';
+  }
+
   function hostsView() {
     var qEl;
     var doSearch = function () {
@@ -1589,7 +1599,7 @@
         loadHosts();
       }
     }) : null;
-    var cols = ['IP', '主机名', 'OS', 'ARCH', '业务组', 'app_code', 'Agent', '来源']
+    var cols = ['IP', '主机名', 'OS', 'OS 详情', 'ARCH', '业务组', 'app_code', 'Agent', '来源']
       .concat(listHostDefs.map(function (d) { return d.label; }));
     if (hostSel) cols.unshift('选择');
     if (isAdmin()) cols.push('操作');
@@ -1598,7 +1608,8 @@
       var cells = [
         hostSel ? h('td', {}, [hostSel.cell(x)]) : null,
         h('td', {}, [ipCell(x)]), h('td', {}, [x.hostname || '-']),
-        h('td', {}, [x.os_family || x.os_type || '-']), h('td', {}, [x.arch || '-']),
+        h('td', {}, [x.os_family || x.os_type || '-']), h('td', {}, [hostOSDetail(x)]),
+        h('td', {}, [x.arch || '-']),
         h('td', {}, [x.biz_group || '-']), h('td', {}, [x.app_code || '-']),
         h('td', {}, [
           h('span', { class: 'tag' }, [agentStatusText(x.agent_status)]),
