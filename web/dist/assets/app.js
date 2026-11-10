@@ -3163,8 +3163,13 @@
       h('div', { class: 'card' }, [
         toolbar,
         h('div', { class: 'muted', style: 'margin:6px 0 10px' }, [
-          '这里只显示本地账号（租户/角色以本地为准）：FlyIAM 用户首次 SSO 登录时会自动建档；' +
-          '查看全部 FlyIAM 用户并一键开通请到「FlyIAM 人员」页签。'
+          '这里只显示本地账号（租户/角色以本地为准）：FlyIAM 用户首次 SSO 登录时会自动建档。' +
+          '需要查看公司全部人员并预先开通账号，请打开 ',
+          h('button', {
+            class: 'btn ghost small',
+            onclick: function () { switchOrgTab('flyiam'); }
+          }, ['FlyIAM 人员目录']),
+          '。'
         ]),
         simpleTable(cols, users, function (u, i) { return rows[i]; }),
         users.length === 0 ? h('div', { class: 'muted empty' }, ['没有匹配的用户']) : null
