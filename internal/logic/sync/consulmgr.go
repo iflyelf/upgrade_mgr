@@ -100,6 +100,7 @@ func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, g
 			Datacenter:  rh.Datacenter,
 			Meta:        mergeMgrMeta(rh),
 			SourceGroup: fmt.Sprintf("%d", gid),
+			Services:    rh.Services,
 		}
 		if err := s.upsert(ctx, row, set, hostfieldmap.SourceConsulMgr, now); err != nil {
 			return res, err
@@ -109,11 +110,17 @@ func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, g
 
 	// 清理该服务组已不存在的主机：必须限定 source_group=当前 group_id，
 	// 避免把其他服务组的主机误删；partial 时清单不完整，本轮跳过清理。
-	if service != "" {
-		res.CleanupSkipped = "按服务名称同步时不做清理（避免误删同组其它服务的主机）"
-	} else if cleanupMissing && groupID > 0 {
+	if cleanupMissing && groupID > 0 {
 		if res.Partial {
 			res.CleanupSkipped = "部分服务组查询失败，本轮跳过清理"
+		} else if service != "" {
+			// 按服务名称同步：只清理「上次属于该服务、本次已不在服务范围」的主机，
+			// 通过 source_services 精确限定，不影响同组其它服务的主机。
+			deleted, err := s.cleanupMissingMgrServiceHosts(ctx, groupID, service, now)
+			if err != nil {
+				return res, err
+			}
+			res.CleanupDeleted = deleted
 		} else {
 			deleted, err := s.cleanupMissingMgrHosts(ctx, groupID, now)
 			if err != nil {
