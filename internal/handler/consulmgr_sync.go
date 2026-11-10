@@ -45,7 +45,8 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 		if s.Settings != nil {
 			cleanup = s.Settings.Snapshot().ConsulMgr.CleanupMissing
 		}
-		res, err := s.Syncer.SyncFromConsulMgr(r.Context(), cli, groupID, cleanup)
+		service := strings.TrimSpace(r.URL.Query().Get("service"))
+		res, err := s.Syncer.SyncFromConsulMgr(r.Context(), cli, groupID, service, cleanup)
 		if errors.Is(err, synclogic.ErrSyncInProgress) {
 			httpx.Fail(w, http.StatusConflict, "已有同步任务正在执行，请稍后重试")
 			return
@@ -63,11 +64,45 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 				"cleanup_deleted": res.CleanupDeleted, "cleanup_skipped": res.CleanupSkipped,
 			}, nil)
 		httpx.OK(w, map[string]any{
-			"groups": res.Groups, "hosts": res.Hosts,
+			"groups": res.Groups, "hosts": res.Hosts, "service": service,
 			"upserted": res.Upserted, "mappings": res.Mappings,
 			"failed_groups": res.FailedGroups, "partial": res.Partial,
 			"cleanup_deleted": res.CleanupDeleted, "cleanup_skipped": res.CleanupSkipped,
 			"duration": res.Duration.String(),
+		})
+	}
+}
+
+// ListConsulMgrServices 列出某服务组内出现过的服务名称（管理员）。
+//
+// 用途：同步主机时可按服务名称过滤（如 selfnode_exporter），
+// 只把运行该服务的主机纳入清单。group_id=0 表示全部启用的服务组。
+func ListConsulMgrServices(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cli := s.ConsulMgr()
+		if cli == nil {
+			httpx.Fail(w, http.StatusServiceUnavailable,
+				"未配置 consul_mgr 地址与服务令牌，请先到「设置 → consul_mgr 对接」填写")
+			return
+		}
+		var groupID int64
+		if v := strings.TrimSpace(r.URL.Query().Get("group_id")); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 0 {
+				httpx.Fail(w, http.StatusBadRequest, "group_id 无效")
+				return
+			}
+			groupID = n
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		services, hosts, err := cli.FetchServices(ctx, groupID)
+		if err != nil {
+			httpx.FailErrf(w, http.StatusBadGateway, "读取 consul_mgr 服务名称失败", err)
+			return
+		}
+		httpx.OK(w, map[string]any{
+			"services": services, "hosts": hosts, "group_id": groupID,
 		})
 	}
 }

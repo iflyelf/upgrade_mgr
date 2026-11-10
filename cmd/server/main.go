@@ -209,6 +209,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.HandleFunc("POST /api/hosts/sync", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SyncHosts(sc))))
 	// 从 consul_mgr 同步（覆盖多个服务组/多套 Consul）；与直连 Consul 同步并存。
 	mux.HandleFunc("GET /api/consul-mgr/groups", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ListConsulMgrGroups(sc))))
+	mux.HandleFunc("GET /api/consul-mgr/services", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.ListConsulMgrServices(sc))))
 	mux.HandleFunc("POST /api/hosts/sync-consul-mgr", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SyncHostsFromConsulMgr(sc))))
 	mux.HandleFunc("POST /api/consul-mgr/test", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.TestConsulMgr(sc))))
 	mux.HandleFunc("PUT /api/hosts/{id}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.HostUpdate(sc))))
