@@ -584,6 +584,24 @@
     return mask;
   }
 
+  // formModal 通用表单弹窗：编辑/新增表单不再插入页面流，避免把列表挤到下面。
+  //
+  // body 通常是一个 .card 表单；弹窗内会去掉卡片边框（见 app.css）。
+  function formModal(body, onClose) {
+    var mask = h('div', {
+      class: 'modal-mask',
+      onclick: function (e) { if (e.target === mask && onClose) onClose(); }
+    }, []);
+    var modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true' }, [
+      h('div', { class: 'modal-head', style: 'justify-content:flex-end' }, [
+        h('button', { class: 'btn ghost small', onclick: onClose }, ['关闭'])
+      ]),
+      body
+    ]);
+    mask.appendChild(modal);
+    return mask;
+  }
+
   // ---------- 内置示例 ----------
   // node_exporter 的 systemd unit 关键配置与 examples/node_exporter/node_exporter.service 保持一致（页面内省略注释）。
   // 注意：ExecStart 中的 web.listen-address 必须在同一行，不能按 -- 断行。
@@ -1620,7 +1638,9 @@
       agentStatsCard(),
       state.hostErr ? h('div', { class: 'card' }, [h('div', { class: 'err', role: 'alert' }, [state.hostErr])]) : null,
       isAdmin() ? agentUpdateCard() : null,
-      isAdmin() ? hostForm() : null,
+      isAdmin() && state.editingHost
+        ? formModal(hostForm(), function () { state.editingHost = null; render(); })
+        : null,
       h('div', { class: 'card' }, [
         toolbar,
         hostSel && (state.hosts.length || hostSel.progress) ? hostSel.bar : null,
@@ -3296,9 +3316,15 @@
           : null,
         pager
       ]),
-      state.orgUserForm ? userAccountForm(o) : null,
-      state.orgUserCasdoorForm ? casdoorUserForm(o) : null,
-      state.orgUserDetail ? userDetailCard() : null
+      state.orgUserForm
+        ? formModal(userAccountForm(o), function () { state.orgUserForm = null; render(); })
+        : null,
+      state.orgUserCasdoorForm
+        ? formModal(casdoorUserForm(o), function () { state.orgUserCasdoorForm = null; render(); })
+        : null,
+      state.orgUserDetail
+        ? formModal(userDetailCard(), function () { state.orgUserDetail = null; render(); })
+        : null
     ]);
   }
 
@@ -3875,7 +3901,9 @@
         simpleTable(['键', '名称', '类型', '列表显示', '表单显示', '来源', '操作'], defs, function (d, i) {
           return rows[i];
         }),
-        state.orgNewField !== undefined && state.orgNewField !== null ? newFieldDefForm('user') : null
+        state.orgNewField !== undefined && state.orgNewField !== null
+          ? formModal(newFieldDefForm('user'), function () { state.orgNewField = null; render(); })
+          : null
       ])
     ]);
   }
@@ -3936,7 +3964,9 @@
         defs.length ? simpleTable(['键', '名称', '类型', '列表显示', '表单显示', '来源', '操作'], defs, function (d, i) {
           return rows[i];
         }) : h('div', { class: 'muted empty' }, ['还没有主机自定义字段，点「新增字段」添加。']),
-        state.orgNewField !== undefined && state.orgNewField !== null ? newFieldDefForm('host') : null
+        state.orgNewField !== undefined && state.orgNewField !== null
+          ? formModal(newFieldDefForm('host'), function () { state.orgNewField = null; render(); })
+          : null
       ])
     ]);
   }
@@ -4738,7 +4768,7 @@
           function (r, i) { return rows[i]; }),
         roles.length === 0 ? h('div', { class: 'muted empty' }, ['没有匹配的角色']) : null
       ]),
-      form
+      form ? formModal(form, function () { state.orgRoleForm = null; render(); }) : null
     ]);
   }
 
@@ -5179,7 +5209,7 @@
           function (g, i) { return rows[i]; }),
         groups.length === 0 ? h('div', { class: 'muted empty' }, ['没有匹配的服务组']) : null
       ]),
-      form
+      form ? formModal(form, function () { state.orgGroupForm = null; render(); }) : null
     ]);
   }
 
@@ -6387,7 +6417,9 @@
       }, ['下一页'])
     ]) : null;
 
-    return h('div', {}, [form, h('div', { class: 'card' }, [toolbar,
+    return h('div', {}, [form
+      ? formModal(form, function () { state.editingComp = null; state.err = ''; render(); })
+      : null, h('div', { class: 'card' }, [toolbar,
       compSel && compItems.length ? compSel.bar : null, table, compPager, empty])]);
   }
 
@@ -8583,7 +8615,7 @@
   // 服务组列表来自 consul_mgr（GET /api/consul-mgr/groups），不在配置文件里写死
   // group_id：哪些组可同步由 consul_mgr 侧的启用状态决定，页面只负责展示与选择。
   function openConsulMgrSync() {
-    state.mgrSync = { loading: true, groups: null, err: '', groupID: 0, running: false };
+    state.mgrSync = { loading: true, groups: null, err: '', groupID: 0, running: false, services: null, service: '', servicesLoading: false, servicesErr: '' };
     render();
     api('/api/consul-mgr/groups')
       .then(function (d) {
@@ -8597,6 +8629,34 @@
         if (!state.mgrSync) return;
         state.mgrSync.loading = false;
         state.mgrSync.err = e.message;
+        render();
+      });
+  }
+
+  // loadMgrServices 读取所选服务组内出现过的服务名称（用于按服务过滤）。
+  function loadMgrServices(groupID) {
+    if (!state.mgrSync) return;
+    state.mgrSync.service = '';
+    state.mgrSync.services = null;
+    state.mgrSync.servicesErr = '';
+    if (!groupID) {
+      state.mgrSync.servicesLoading = false;
+      render();
+      return;
+    }
+    state.mgrSync.servicesLoading = true;
+    render();
+    api('/api/consul-mgr/services?group_id=' + encodeURIComponent(groupID))
+      .then(function (d) {
+        if (!state.mgrSync) return;
+        state.mgrSync.servicesLoading = false;
+        state.mgrSync.services = d.services || [];
+        render();
+      })
+      .catch(function (e) {
+        if (!state.mgrSync) return;
+        state.mgrSync.servicesLoading = false;
+        state.mgrSync.servicesErr = e.message;
         render();
       });
   }
@@ -8634,7 +8694,7 @@
         h('div', { class: 'check-group scroll' }, items.map(function (g) {
           var rb = h('input', {
             type: 'radio', name: 'mgr-group', checked: st.groupID === g.id,
-            onchange: function () { st.groupID = g.id; }
+            onchange: function () { st.groupID = g.id; loadMgrServices(g.id); }
           }, []);
           var sub = [];
           if (g.code) sub.push('编码 ' + g.code);
@@ -8644,7 +8704,28 @@
             h('span', {}, [g.name]),
             sub.length ? h('span', { class: 'muted' }, [sub.join(' · ')]) : null
           ])]);
-        }))
+        })),
+        (function () {
+          var serviceEl = h('select', {
+            disabled: (!st.groupID || st.servicesLoading) ? 'disabled' : null
+          }, [h('option', { value: '' }, ['全部服务'])].concat(
+            (st.services || []).map(function (s) {
+              return h('option', { value: s }, [s]);
+            })
+          ));
+          serviceEl.value = st.service || '';
+          serviceEl.onchange = function () { st.service = serviceEl.value; };
+          return h('div', { class: 'field', style: 'margin-top:12px' }, [
+            h('label', {}, ['服务名称（可选）']),
+            serviceEl,
+            st.servicesLoading ? h('div', { class: 'muted' }, ['正在读取服务名称…']) : null,
+            st.servicesErr ? h('div', { class: 'err' }, [st.servicesErr]) : null,
+            !st.groupID ? h('div', { class: 'muted' }, ['选择具体服务组后，可按服务名称过滤（如 selfnode_exporter）。']) : null,
+            st.groupID && !st.servicesLoading && !st.servicesErr
+              ? hint('只同步运行该服务的主机；按服务名称过滤时不会清理同组其它服务的主机。')
+              : null
+          ]);
+        })()
       ]);
     }
 
@@ -8653,7 +8734,7 @@
       onclick: function () {
         st.running = true;
         render();
-        syncHostsFromMgr(st.groupID, function () {
+        syncHostsFromMgr(st.groupID, st.service, function () {
           state.mgrSync = null;
           render();
         });
@@ -8688,12 +8769,15 @@
   //
   // 与「同步 Consul」并列而非替代：两者来源不同，可按环境选用或同时使用。
   // groupID=0 表示全部启用的服务组；done 在请求结束（成功或失败）后调用。
-  function syncHostsFromMgr(groupID, done) {
-    var url = '/api/hosts/sync-consul-mgr';
-    if (groupID) url += '?group_id=' + encodeURIComponent(groupID);
+  function syncHostsFromMgr(groupID, service, done) {
+    var qs = [];
+    if (groupID) qs.push('group_id=' + encodeURIComponent(groupID));
+    if (service) qs.push('service=' + encodeURIComponent(service));
+    var url = '/api/hosts/sync-consul-mgr' + (qs.length ? '?' + qs.join('&') : '');
     api(url, { method: 'POST' })
       .then(function (d) {
         var msg = '同步完成: 主机 ' + d.upserted + ' 台（服务组 ' + d.groups + ' 个）';
+        if (d.service) msg += '\n服务过滤: ' + d.service;
         if (d.partial) {
           // 部分服务组失败时清单不完整，必须让用户知道，否则会误以为主机变少了。
           msg += '\n\n⚠️ 部分服务组查询失败，清单不完整：' +

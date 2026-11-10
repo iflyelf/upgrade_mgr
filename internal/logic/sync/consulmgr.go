@@ -39,7 +39,7 @@ type MgrResult struct {
 //
 // 字段映射同样完全由 host_field_mappings 驱动（source=consul_mgr），
 // 服务组名/编码等结构信息作为基础值，可被映射规则覆盖。
-func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, groupID int64, cleanupMissing bool) (*MgrResult, error) {
+func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, groupID int64, service string, cleanupMissing bool) (*MgrResult, error) {
 	if cli == nil {
 		return nil, fmt.Errorf("consul_mgr 未配置：请在「设置 → consul_mgr 对接」填写地址与服务令牌")
 	}
@@ -70,6 +70,19 @@ func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, g
 	res.Groups = remote.Groups
 	res.FailedGroups = remote.FailedGroups
 	res.Partial = remote.Partial
+
+	// 按服务名称过滤：只同步运行该服务的主机（如 selfnode_exporter）。
+	// 注意：过滤后绝不能执行「清理不存在主机」，否则会把同组其它服务的主机误删。
+	service = strings.TrimSpace(service)
+	if service != "" {
+		filtered := make([]consulmgr.Host, 0, len(remote.Hosts))
+		for _, h := range remote.Hosts {
+			if hostHasService(h, service) {
+				filtered = append(filtered, h)
+			}
+		}
+		remote.Hosts = filtered
+	}
 	res.Hosts = len(remote.Hosts)
 
 	now := time.Now()
@@ -96,7 +109,9 @@ func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, g
 
 	// 清理该服务组已不存在的主机：必须限定 source_group=当前 group_id，
 	// 避免把其他服务组的主机误删；partial 时清单不完整，本轮跳过清理。
-	if cleanupMissing && groupID > 0 {
+	if service != "" {
+		res.CleanupSkipped = "按服务名称同步时不做清理（避免误删同组其它服务的主机）"
+	} else if cleanupMissing && groupID > 0 {
 		if res.Partial {
 			res.CleanupSkipped = "部分服务组查询失败，本轮跳过清理"
 		} else {
@@ -114,6 +129,17 @@ func (s *Syncer) SyncFromConsulMgr(ctx context.Context, cli *consulmgr.Client, g
 
 	res.Duration = time.Since(res.StartedAt)
 	return res, nil
+}
+
+// hostHasService 判断主机是否运行指定服务（忽略大小写与首尾空白）。
+func hostHasService(h consulmgr.Host, service string) bool {
+	service = strings.TrimSpace(service)
+	for _, s := range h.Services {
+		if strings.EqualFold(strings.TrimSpace(s), service) {
+			return true
+		}
+	}
+	return false
 }
 
 // mgrStructuralKeys consul_mgr 导出中「非 Meta」的结构化信息，

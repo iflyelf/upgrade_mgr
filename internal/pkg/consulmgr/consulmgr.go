@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -113,6 +114,31 @@ func (c *Client) FetchHosts(ctx context.Context, groupID int64) (*ExportResult, 
 		return nil, err
 	}
 	return &out, nil
+}
+
+// FetchServices 列出指定服务组内出现过的服务名（去重排序），
+// 供页面「按服务名称同步」下拉选择。
+//
+// 复用主机导出接口：一次请求同时得到服务名与主机数，避免再新增协议。
+func (c *Client) FetchServices(ctx context.Context, groupID int64) ([]string, int, error) {
+	res, err := c.FetchHosts(ctx, groupID)
+	if err != nil {
+		return nil, 0, err
+	}
+	set := map[string]bool{}
+	for _, h := range res.Hosts {
+		for _, s := range h.Services {
+			if s = strings.TrimSpace(s); s != "" {
+				set[s] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out, len(res.Hosts), nil
 }
 
 // Group consul_mgr 中一个可同步的服务组。

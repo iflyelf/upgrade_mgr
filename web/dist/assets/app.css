@@ -643,3 +643,13 @@ select { max-width: 100%; }
 .tag.source-page { background: color-mix(in srgb, var(--primary-color) 22%, transparent); }
 .tag.source-file_or_env { background: color-mix(in srgb, var(--ok-color) 20%, transparent); }
 .tag.source-default { opacity: .75; }
+
+/* 表单弹窗：复用 .modal，内部卡片去掉边框/阴影，避免双层容器挤压内容 */
+.modal > .card {
+  box-shadow: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+}
+.modal > .card + .card { margin-top: 14px; }
