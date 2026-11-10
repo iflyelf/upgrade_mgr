@@ -21,21 +21,25 @@ func TestSyncDepartmentsFromFlyIAM(t *testing.T) {
 	child := fmt.Sprintf("dept-child-%d", sfx)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Service-Token") != "tok" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		if r.URL.Path != "/api/departments/export" {
+		if r.URL.Path != "/api/get-users" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		u, p, ok := r.BasicAuth()
+		if !ok || u != "cid" || p != "csecret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 0,
-			"data": []map[string]any{
-				{"deptId": root, "deptName": "集团", "level": 0, "fullPath": "集团"},
-				{"deptId": child, "deptName": "研发", "parentId": root,
-					"level": 1, "fullPath": "集团/研发", "userCount": 8},
-			},
+			"status": "ok",
+			"data": []map[string]any{{
+				"name": "u1", "owner": "flyiam",
+				"properties": map[string]string{
+					"deptIdLv0": root, "deptNameLv0": "集团",
+					"deptIdLv1": child, "deptNameLv1": "研发",
+				},
+			}},
+			"data2": 1,
 		})
 	}))
 	t.Cleanup(srv.Close)
@@ -43,8 +47,9 @@ func TestSyncDepartmentsFromFlyIAM(t *testing.T) {
 
 	sc := &svc.ServiceContext{
 		DB: db,
-		Config: &config.Config{FlyIAM: config.FlyIAMConfig{
-			Endpoint: srv.URL, ServiceToken: "tok",
+		Config: &config.Config{Casdoor: config.CasdoorConfig{
+			Endpoint: srv.URL, ClientId: "cid", ClientSecret: "csecret",
+			OrganizationName: "flyiam", ApplicationName: "flyiam",
 		}},
 	}
 
@@ -88,7 +93,7 @@ func TestSyncDepartmentsFromFlyIAM(t *testing.T) {
 		t.Fatalf("应有 2 个部门: %+v", listOut.Data)
 	}
 	if listOut.Data[0].DeptID != root || listOut.Data[1].DeptID != child ||
-		listOut.Data[1].ParentID != root || listOut.Data[1].UserCount != 8 {
+		listOut.Data[1].ParentID != root || listOut.Data[1].UserCount != 1 {
 		t.Fatalf("组织数据不符: %+v", listOut.Data)
 	}
 }
@@ -106,18 +111,20 @@ func TestSyncDepartmentsEmptyGuard(t *testing.T) {
 	t.Cleanup(func() { db.Exec(`DELETE FROM org_departments`) })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Service-Token") != "tok" {
+		u, p, ok := r.BasicAuth()
+		if !ok || u != "cid" || p != "csecret" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": []any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "data": []any{}, "data2": 0})
 	}))
 	t.Cleanup(srv.Close)
 
 	sc := &svc.ServiceContext{
 		DB: db,
-		Config: &config.Config{FlyIAM: config.FlyIAMConfig{
-			Endpoint: srv.URL, ServiceToken: "tok",
+		Config: &config.Config{Casdoor: config.CasdoorConfig{
+			Endpoint: srv.URL, ClientId: "cid", ClientSecret: "csecret",
+			OrganizationName: "flyiam", ApplicationName: "flyiam",
 		}},
 	}
 	req := httptest.NewRequest("POST", "/api/flyiam/sync-departments", nil)
