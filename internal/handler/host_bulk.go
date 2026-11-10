@@ -195,6 +195,9 @@ func hostCSVColumns(ctx context.Context, s *svc.ServiceContext) ([]hostCSVColumn
 		{key: "ip", label: "ip"},
 		{key: "exit_ip", label: "exit_ip"},
 		{key: "hostname", label: "hostname"},
+		{key: "os_family", label: "os_family"},
+		{key: "os_type", label: "os_type"},
+		{key: "os_version", label: "os_version"},
 		{key: "account", label: "account"},
 		{key: "app_code", label: "app_code"},
 		{key: "biz_group", label: "biz_group"},
@@ -230,7 +233,9 @@ func HostExportCSV(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		whereSQL, args, _ := hostListFilter(s, r)
 		rows, err := s.DB.QueryContext(r.Context(), `
-			SELECT h.ip, COALESCE(h.exit_ip,''), COALESCE(h.hostname,''), COALESCE(h.account,''),
+			SELECT h.ip, COALESCE(h.exit_ip,''), COALESCE(h.hostname,''),
+			       COALESCE(h.os_family,''), COALESCE(h.os_type,''), COALESCE(h.os_version,''),
+			       COALESCE(h.account,''),
 			       COALESCE(h.app_code,''), COALESCE(h.biz_group,''), COALESCE(h.department,''),
 			       COALESCE(h.vendor,''), COALESCE(h.host_type,''), COALESCE(h.tunnel_ip,''),
 			       COALESCE(h.server_url_override,''), COALESCE(h.custom_fields,'{}'::jsonb)
@@ -253,17 +258,21 @@ func HostExportCSV(s *svc.ServiceContext) http.HandlerFunc {
 			return out
 		}())
 		for rows.Next() {
-			var ip, exitIP, hostname, account, appCode, bizGroup, department, vendor, hostType string
+			var ip, exitIP, hostname, osFamily, osType, osVersion string
+			var account, appCode, bizGroup, department, vendor, hostType string
 			var tunnelIP, override string
 			var customRaw []byte
-			if err := rows.Scan(&ip, &exitIP, &hostname, &account, &appCode, &bizGroup,
-				&department, &vendor, &hostType, &tunnelIP, &override, &customRaw); err != nil {
+			if err := rows.Scan(&ip, &exitIP, &hostname, &osFamily, &osType, &osVersion,
+				&account, &appCode, &bizGroup, &department, &vendor, &hostType,
+				&tunnelIP, &override, &customRaw); err != nil {
 				return
 			}
 			var custom map[string]string
 			_ = json.Unmarshal(customRaw, &custom)
 			base := map[string]string{
-				"ip": ip, "exit_ip": exitIP, "hostname": hostname, "account": account,
+				"ip": ip, "exit_ip": exitIP, "hostname": hostname,
+				"os_family": osFamily, "os_type": osType, "os_version": osVersion,
+				"account":  account,
 				"app_code": appCode, "biz_group": bizGroup, "department": department,
 				"vendor": vendor, "host_type": hostType, "tunnel_ip": tunnelIP,
 				"server_url_override": override,

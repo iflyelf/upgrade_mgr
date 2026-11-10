@@ -1487,13 +1487,12 @@
     return h('div', { class: 'login-wrap' }, [card]);
   }
 
-  // hostOSDetail 展示 OS 数据来源：family / type / version，去重后拼接。
+  // hostOSDetail 带标签展示 OS 数据来源：family / type / version。
   function hostOSDetail(x) {
     var parts = [];
-    [x.os_family, x.os_type, x.os_version].forEach(function (v) {
-      v = String(v || '').trim();
-      if (v && parts.indexOf(v) < 0) parts.push(v);
-    });
+    if (String(x.os_family || '').trim()) parts.push('family: ' + String(x.os_family).trim());
+    if (String(x.os_type || '').trim()) parts.push('type: ' + String(x.os_type).trim());
+    if (String(x.os_version || '').trim()) parts.push('ver: ' + String(x.os_version).trim());
     return parts.join(' / ') || '-';
   }
 
@@ -1775,7 +1774,7 @@
       h('div', { class: 'modal' }, [
         h('h3', {}, ['导入主机 CSV']),
         hint('以 ip 为唯一键：已存在主机更新非空单元格；不存在且勾选“创建缺失主机”时创建 manual 主机。' +
-          '导出文件可直接修改后导入；exit_ip 等只读列会被忽略。'),
+          '导出文件可直接修改后导入；exit_ip、os_family、os_type、os_version 等只读列会被忽略。'),
         field('选择 CSV 文件', fileEl, '支持 UTF-8；表头可用 ip/hostname/... 或中文列名。'),
         field('或粘贴 CSV 内容', ta, '第一行必须是表头。'),
         h('label', { class: 'check' }, [clearEl, ' 空单元格也覆盖（清空已有值）']),
