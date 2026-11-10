@@ -8,6 +8,7 @@ package rbac
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -144,6 +145,51 @@ func (s *Service) Create(ctx context.Context, actor *auth.User, req CreateReques
 		INSERT INTO local_users (username, password_hash, display_name, is_admin, tenant_id, roles)
 		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
 		req.Username, string(hash), req.Display, isAdmin, tenantID, pq.Array(roles)).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// EnableSSOUser 为已存在于 Casdoor/FlyIAM 的用户创建本地授权记录。
+//
+// 与 Create 的区别：不设置本地密码（password_hash=”），账号只用于 SSO 登录；
+// 已存在时不覆盖其租户/角色（幂等）。用于用户管理页「开通本地账号」。
+func (s *Service) EnableSSOUser(ctx context.Context, actor *auth.User, username, display string, tenantID int64, roles []string) (int64, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return 0, fmt.Errorf("用户名为空")
+	}
+	if len(username) > 100 {
+		return 0, fmt.Errorf("用户名过长（最多 100 字符）")
+	}
+	norm, err := normalizeRoles(roles)
+	if err != nil {
+		return 0, err
+	}
+	target, err := s.resolveTarget(actor, tenantID, norm)
+	if err != nil {
+		return 0, err
+	}
+	isAdmin := containsRole(norm, auth.RoleAdmin) || containsRole(norm, auth.RoleSuperAdmin)
+	if len(display) > 200 {
+		display = display[:200]
+	}
+
+	var id int64
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO local_users (username, password_hash, display_name, is_admin, tenant_id, roles)
+		VALUES ($1,'',$2,$3,$4,$5)
+		ON CONFLICT (username) DO NOTHING
+		RETURNING id`, username, display, isAdmin, target, pq.Array(norm)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		// 已存在：直接返回已有 ID，绝不覆盖密码/角色/租户。
+		if e := s.db.QueryRowContext(ctx,
+			`SELECT id FROM local_users WHERE username=$1`, username).Scan(&id); e != nil {
+			return 0, e
+		}
+		return id, nil
+	}
 	if err != nil {
 		return 0, err
 	}

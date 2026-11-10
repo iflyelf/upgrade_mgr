@@ -5,11 +5,17 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
+
+	"github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
+	"github.com/iflyelf/upgrade_mgr/internal/pkg/casdoor"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/rbac"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
@@ -205,5 +211,170 @@ func UserResetPassword(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		httpx.OK(w, nil)
+	}
+}
+
+// casdoorDirectory 按当前配置构造 Casdoor 目录客户端。
+//
+// Casdoor 连接配置属于「需重启」项，但仍通过设置快照读取，避免与设置页并发写冲突。
+func casdoorDirectory(s *svc.ServiceContext) *casdoor.Directory {
+	cfg := s.Config.Casdoor
+	if s.Settings != nil {
+		snap := s.Settings.Snapshot()
+		cfg = snap.Casdoor
+	}
+	return casdoor.NewDirectory(cfg.Endpoint, cfg.ClientId, cfg.ClientSecret, cfg.OrganizationName)
+}
+
+// UserDirectory 返回 Casdoor 用户目录（服务端分页 + 搜索），并合并本地租户/角色。
+//
+// 与 /api/users（本地授权表）的区别：这是「人员目录」，用于用户管理页展示
+// Casdoor 中的真实用户；local=true 表示已在本系统建档（可分配租户/角色）。
+// 直接使用 Casdoor 服务端分页，避免 FlyIAM 全量导出 3 万用户时的超时。
+func UserDirectory(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		dir := casdoorDirectory(s)
+		if !dir.Valid() {
+			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法读取用户目录")
+			return
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		size, _ := strconv.Atoi(r.URL.Query().Get("size"))
+		if page < 1 {
+			page = 1
+		}
+		if size < 1 {
+			size = 20
+		}
+		if size > 200 {
+			size = 200
+		}
+		field := strings.TrimSpace(r.URL.Query().Get("field"))
+		keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		users, total, err := dir.List(ctx, page, size, field, keyword)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "读取 Casdoor 用户失败: "+err.Error())
+			return
+		}
+
+		// 一次 SQL 批量取本页用户的本地授权信息，避免 N+1 查询。
+		names := make([]string, 0, len(users))
+		for _, u := range users {
+			names = append(names, u.Name)
+		}
+		type localRow struct {
+			display  string
+			tenant   int64
+			roles    pq.StringArray
+			isAdmin  bool
+			disabled bool
+		}
+		locals := make(map[string]localRow, len(names))
+		if len(names) > 0 {
+			rows, qerr := s.DB.QueryContext(ctx, `
+				SELECT username, COALESCE(display_name,''), COALESCE(tenant_id,1),
+				       COALESCE(roles, ARRAY['user']::text[]), is_admin, disabled
+				FROM local_users WHERE username = ANY($1)`, pq.Array(names))
+			if qerr != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, qerr)
+				return
+			}
+			for rows.Next() {
+				var name string
+				var lr localRow
+				if scanErr := rows.Scan(&name, &lr.display, &lr.tenant, &lr.roles,
+					&lr.isAdmin, &lr.disabled); scanErr != nil {
+					rows.Close()
+					httpx.FailErr(w, http.StatusInternalServerError, scanErr)
+					return
+				}
+				locals[name] = lr
+			}
+			rows.Close()
+			if rowsErr := rows.Err(); rowsErr != nil {
+				httpx.FailErr(w, http.StatusInternalServerError, rowsErr)
+				return
+			}
+		}
+
+		out := make([]map[string]any, 0, len(users))
+		for _, u := range users {
+			display := u.DisplayName
+			row := map[string]any{
+				"username": u.Name, "name": u.Name, "display_name": display,
+				"email": u.Email, "phone": u.Phone, "avatar": u.Avatar, "owner": u.Owner,
+				"casdoor_admin": u.IsAdmin, "is_forbidden": u.IsForbidden,
+				"properties": u.Properties, "created_time": u.CreatedTime,
+				"local": false, "tenant_id": 0, "roles": []string{},
+				"is_admin": false, "disabled": false,
+			}
+			if lr, ok := locals[u.Name]; ok {
+				row["local"] = true
+				row["tenant_id"] = lr.tenant
+				row["roles"] = []string(lr.roles)
+				row["is_admin"] = lr.isAdmin
+				row["disabled"] = lr.disabled
+				if strings.TrimSpace(lr.display) != "" {
+					row["display_name"] = lr.display
+				}
+			}
+			out = append(out, row)
+		}
+		httpx.OK(w, map[string]any{"list": out, "total": total, "page": page, "size": size})
+	}
+}
+
+// UserEnableLocal 为 Casdoor 中已存在的用户创建本地授权记录（角色默认 user）。
+//
+// 只创建本地租户/角色记录，不改动 Casdoor 用户本身；已存在时幂等返回。
+func UserEnableLocal(s *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := strings.TrimSpace(r.PathValue("username"))
+		if username == "" {
+			httpx.Fail(w, http.StatusBadRequest, "用户名为空")
+			return
+		}
+		var req struct {
+			DisplayName string   `json:"display_name"`
+			TenantID    int64    `json:"tenant_id"`
+			Roles       []string `json:"roles"`
+		}
+		if r.ContentLength != 0 {
+			if err := httpx.DecodeJSON(r, &req); err != nil {
+				httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
+				return
+			}
+		}
+
+		dir := casdoorDirectory(s)
+		if !dir.Valid() {
+			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法校验用户")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		remote, err := dir.Get(ctx, username)
+		if err != nil {
+			httpx.Fail(w, http.StatusBadGateway, "校验 Casdoor 用户失败: "+err.Error())
+			return
+		}
+		if remote == nil {
+			httpx.Fail(w, http.StatusNotFound, "Casdoor 中不存在用户 "+username)
+			return
+		}
+		if strings.TrimSpace(req.DisplayName) == "" {
+			req.DisplayName = remote.DisplayName
+		}
+
+		id, err := s.RBAC.EnableSSOUser(r.Context(), actorOf(r), username, req.DisplayName, req.TenantID, req.Roles)
+		auditOp(s, r, audit.ActionUserCreate, "user", username, username, err)
+		if err != nil {
+			httpx.FailErr(w, http.StatusBadRequest, err)
+			return
+		}
+		httpx.OK(w, map[string]any{"id": id, "username": username})
 	}
 }
