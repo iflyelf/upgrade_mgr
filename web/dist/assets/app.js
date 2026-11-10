@@ -8619,6 +8619,7 @@
       .then(function (d) {
         var msg = '同步完成: 主机 ' + d.upserted + ' 台';
         if (d.deleted) msg += '，清理已移除主机 ' + d.deleted + ' 台';
+        if (d.merged_hosts) msg += '\n已自动合并重复主机：' + d.merged_hosts + ' 台';
         if (d.cleanup_skipped && d.cleanup_skipped !== '未开启自动清理') {
           msg += '\n未清理: ' + d.cleanup_skipped;
         }
@@ -8801,6 +8802,7 @@
       .then(function (d) {
         var msg = '同步完成: 主机 ' + d.upserted + ' 台（服务组 ' + d.groups + ' 个）';
         if (d.service) msg += '\n服务过滤: ' + d.service;
+        if (d.merged_hosts) msg += '\n已自动合并重复主机：' + d.merged_hosts + ' 台';
         if (d.partial) {
           // 部分服务组失败时清单不完整，必须让用户知道，否则会误以为主机变少了。
           msg += '\n\n⚠️ 部分服务组查询失败，清单不完整：' +

@@ -20,6 +20,7 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/hostmerge"
 	"github.com/iflyelf/upgrade_mgr/internal/middleware"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/hostnet"
@@ -136,7 +137,7 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 		//    来源 IP 或出口 IP 命中它时直接绑定该主机（保留手工值）。
 		if ip != "" || exitIP != "" {
 			rows, qerr := tx.QueryContext(ctx, `
-				SELECT id, tenant_id, (tunnel_ip=$1) AS exact
+				SELECT id, tenant_id, COALESCE(hostname,''), (tunnel_ip=$1) AS exact
 				FROM hosts
 				WHERE tunnel_ip <> ''
 				  AND (tunnel_ip=$1 OR ($2 <> '' AND tunnel_ip=$2))
@@ -148,10 +149,12 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				return
 			}
 			var ids, tenants []int64
+			var candHostnames []string
 			for rows.Next() {
 				var id, tenant int64
+				var hn string
 				var isExact bool
-				if scanErr := rows.Scan(&id, &tenant, &isExact); scanErr != nil {
+				if scanErr := rows.Scan(&id, &tenant, &hn, &isExact); scanErr != nil {
 					rows.Close()
 					auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, scanErr)
 					httpx.Fail(w, http.StatusInternalServerError, "注册失败")
@@ -159,6 +162,7 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				}
 				ids = append(ids, id)
 				tenants = append(tenants, tenant)
+				candHostnames = append(candHostnames, hn)
 				if isExact {
 					hostID, hostTenant = id, tenant
 				}
@@ -173,18 +177,22 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				hostID, hostTenant = ids[0], tenants[0]
 			}
 			if hostID == 0 && len(ids) > 1 {
-				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip,
-					fmt.Errorf("隧道 IP 匹配到 %d 台主机", len(ids)))
-				httpx.Fail(w, http.StatusConflict,
-					"存在多台主机填写了相同的隧道 IP，请先在主机列表中清理重复记录后再接入")
-				return
+				// 隧道 IP 是唯一地址：自动合并重复记录后继续注册。
+				target, tenant, mergeErr := mergeRegisterCandidates(ctx, tx, ids, exitIP)
+				if mergeErr != nil {
+					auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, mergeErr)
+					httpx.Fail(w, http.StatusInternalServerError, "合并重复主机失败")
+					return
+				}
+				hostID, hostTenant = target, tenant
 			}
+			_ = candHostnames
 		}
 
 		// 1) 出口 IP 优先。
 		if hostID == 0 && exitIP != "" {
 			rows, qerr := tx.QueryContext(ctx, `
-				SELECT id, tenant_id, (ip=$1) AS exact
+				SELECT id, tenant_id, COALESCE(hostname,''), (ip=$1) AS exact
 				FROM hosts
 				WHERE (ip=$1 OR exit_ip=$1)
 				  AND (ip=$1 OR COALESCE(agent_id,'')='' OR hostname=$2)
@@ -196,10 +204,12 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				return
 			}
 			var ids, tenants []int64
+			var candHostnames []string
 			for rows.Next() {
 				var id, tenant int64
+				var hn string
 				var isExact bool
-				if scanErr := rows.Scan(&id, &tenant, &isExact); scanErr != nil {
+				if scanErr := rows.Scan(&id, &tenant, &hn, &isExact); scanErr != nil {
 					rows.Close()
 					auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, scanErr)
 					httpx.Fail(w, http.StatusInternalServerError, "注册失败")
@@ -207,6 +217,7 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				}
 				ids = append(ids, id)
 				tenants = append(tenants, tenant)
+				candHostnames = append(candHostnames, hn)
 				if isExact {
 					hostID, hostTenant = id, tenant
 				}
@@ -221,11 +232,29 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				hostID, hostTenant = ids[0], tenants[0]
 			}
 			if hostID == 0 && len(ids) > 1 {
-				auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip,
-					fmt.Errorf("出口 IP %s 匹配到 %d 台主机", exitIP, len(ids)))
-				httpx.Fail(w, http.StatusConflict,
-					"存在多台主机使用同一出口 IP，请先在主机列表中清理重复记录后再接入")
-				return
+				// 出口 IP 可能被 NAT 后的多台机器共享：只有所有候选主机名
+				// 都与本次注册一致时才自动合并，避免把不同机器合并。
+				sameHost := hostname != ""
+				for _, hn := range candHostnames {
+					if !strings.EqualFold(strings.TrimSpace(hn), hostname) {
+						sameHost = false
+						break
+					}
+				}
+				if !sameHost {
+					auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip,
+						fmt.Errorf("出口 IP %s 匹配到 %d 台主机且主机名不一致", exitIP, len(ids)))
+					httpx.Fail(w, http.StatusConflict,
+						"存在多台主机使用同一出口 IP 且主机名不一致，请先清理重复记录后再接入")
+					return
+				}
+				target, tenant, mergeErr := mergeRegisterCandidates(ctx, tx, ids, exitIP)
+				if mergeErr != nil {
+					auditAnon(s, r, audit.ActionAgentRegister, hostname, "agent", ip, mergeErr)
+					httpx.Fail(w, http.StatusInternalServerError, "合并重复主机失败")
+					return
+				}
+				hostID, hostTenant = target, tenant
 			}
 		}
 
@@ -1079,4 +1108,20 @@ func AgentBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 		w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 		http.ServeContent(w, r, filename, info.ModTime(), f)
 	}
+}
+
+// mergeRegisterCandidates 在注册事务内合并重复主机，返回主记录 ID 与租户。
+func mergeRegisterCandidates(ctx context.Context, tx *sql.Tx, ids []int64, key string) (int64, int64, error) {
+	target, err := hostmerge.PickTarget(ctx, tx, ids, key)
+	if err != nil {
+		return 0, 0, err
+	}
+	if _, err := hostmerge.MergeCandidates(ctx, tx, target, ids); err != nil {
+		return 0, 0, err
+	}
+	var tenant int64
+	if err := tx.QueryRowContext(ctx, `SELECT tenant_id FROM hosts WHERE id=$1`, target).Scan(&tenant); err != nil {
+		return 0, 0, err
+	}
+	return target, tenant, nil
 }

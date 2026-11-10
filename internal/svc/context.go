@@ -25,6 +25,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/logic/aitoken"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/hostmerge"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
 	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/task"
@@ -805,4 +806,23 @@ func (s *ServiceContext) StartUserFieldSync(ctx context.Context) {
 	if s.UserFieldSync != nil {
 		s.UserFieldSync.Start(ctx)
 	}
+}
+
+// StartHostMerge 启动后自动合并一次重复主机（按隧道 IP / 出口 IP+主机名）。
+// 后续 Agent 注册、Consul/consul_mgr 同步也会触发自动合并。
+func (s *ServiceContext) StartHostMerge(ctx context.Context) {
+	if s == nil || s.DB == nil {
+		return
+	}
+	go func() {
+		time.Sleep(10 * time.Second)
+		n, err := hostmerge.AutoMergeAll(ctx, s.DB)
+		if err != nil {
+			log.Printf("⚠️ 自动合并重复主机失败: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("🧹 启动时自动合并重复主机：%d 台", n)
+		}
+	}()
 }

@@ -64,6 +64,7 @@ func main() {
 	sc.StartArtifactSettingsWatcher(ctx, 5*time.Second)
 	sc.StartAISettingsWatcher(ctx)
 	sc.StartUserFieldSync(ctx)
+	sc.StartHostMerge(ctx)
 
 	mux := http.NewServeMux()
 	limiters := registerRoutes(mux, sc)
