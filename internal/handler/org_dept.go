@@ -6,35 +6,56 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
 
-// SyncDepartmentsFromFlyIAM 从 FlyIAM 同步组织树（管理员）。
+// SyncDepartmentsFromFlyIAM 同步组织架构（管理员）。
 //
-// 上游由用户部门属性推导部门；本接口整体替换本地快照（事务）。
+// 数据源自 FlyIAM，但**不再调用 FlyIAM 的 /api/departments/export**：
+// 该接口内部要串行遍历 3 万用户，通常超过反向代理超时并返回 503。
+// 这里直接按 Casdoor 分页（应用凭据 Basic 认证）拉取用户，逐页用
+// deptIdLv0/1/2、deptNameLv0/1/2 推导部门树，每次 HTTP 请求都很短。
 func SyncDepartmentsFromFlyIAM(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		client := flyiamClient(s)
-		if client == nil {
+		dir := casdoorDirectory(s)
+		if !dir.Valid() {
 			httpx.Fail(w, http.StatusServiceUnavailable,
-				"未配置 FlyIAM 地址与服务令牌，请先到「设置 → FlyIAM」填写")
+				"Casdoor 未配置，无法同步组织架构；请先在「设置 → Casdoor」补齐地址与应用凭据")
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+
+		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 		defer cancel()
 
-		deps, err := client.FetchDepartments(ctx)
-		if err != nil {
-			auditOp(s, r, audit.ActionFlyIAMSync, "department", "", "", err)
-			httpx.Fail(w, http.StatusBadGateway, "从 FlyIAM 拉取组织架构失败: "+err.Error())
-			return
+		const pageSize = 1000
+		const maxUsers = 200000
+		builder := org.NewDeptBuilder()
+		seen := 0
+		for page := 1; page <= maxUsers/pageSize; page++ {
+			users, total, err := dir.List(ctx, page, pageSize, "", "")
+			if err != nil {
+				auditOp(s, r, audit.ActionFlyIAMSync, "department", "", "", err)
+				httpx.Fail(w, http.StatusBadGateway, "从 Casdoor 拉取用户失败: "+err.Error())
+				return
+			}
+			for _, u := range users {
+				builder.AddUser(u.Properties)
+			}
+			seen += len(users)
+			// 本页不足 pageSize，或已达到总数：结束翻页。
+			if len(users) < pageSize || (total > 0 && seen >= total) {
+				break
+			}
 		}
+
+		deps := builder.List()
 		// 上游返回空组织时不清空本地快照：常见于数据源部门字段映射缺失，
 		// 直接替换会让页面突然变空，排查期间保留旧数据更安全。
 		if len(deps) == 0 {
-			err := errors.New("FlyIAM 未返回组织数据，已保留本地快照；请检查数据源的部门字段映射")
+			err := errors.New("Casdoor 用户未返回部门属性，已保留本地快照；请检查 FlyIAM 数据源的部门字段映射")
 			auditOp(s, r, audit.ActionFlyIAMSync, "department", "", "", err)
 			httpx.Fail(w, http.StatusBadGateway, err.Error())
 			return

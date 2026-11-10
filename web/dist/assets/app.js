@@ -4546,12 +4546,13 @@
 
     return h('div', { class: 'card' }, [
       h('h3', {}, ['组织架构']),
-      hint('组织数据来自 FlyIAM，由其用户属性（deptIdLv0/1/2、deptNameLv0/1/2）推导。' +
-        '每次同步整体替换本地快照；人数按用户最深一级部门统计。'),
+      hint('组织数据源自 FlyIAM：用户同步时写入 Casdoor properties（deptIdLv0/1/2、deptNameLv0/1/2）。' +
+        '本系统按 Casdoor 分页拉取后本地推导部门树，避免 FlyIAM 全量导出超时；' +
+        '每次同步整体替换本地快照，人数按用户最深一级部门统计。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
           class: 'btn', onclick: function () {
-            if (!confirm('从 FlyIAM 拉取最新组织架构并整体替换本地快照？')) return;
+            if (!confirm('从 Casdoor（数据源自 FlyIAM）拉取最新部门属性并整体替换本地组织快照？')) return;
             api('/api/flyiam/sync-departments', { method: 'POST', body: '{}' })
               .then(function (r) { alert('同步完成：' + r.total + ' 个部门'); loadOrg(); })
               .catch(function (e) { alert('同步失败: ' + e.message); });
