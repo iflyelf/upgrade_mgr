@@ -324,7 +324,9 @@ func UserDirectory(s *svc.ServiceContext) http.HandlerFunc {
 				"email": u.Email, "phone": u.Phone, "avatar": u.Avatar, "owner": u.Owner,
 				"casdoor_admin": u.IsAdmin, "is_forbidden": u.IsForbidden,
 				"properties": u.Properties, "created_time": u.CreatedTime,
-				"casdoor": true, "local": false, "tenant_id": 0, "roles": []string{},
+				// 未分配过本地授权的用户按默认 user/租户 1 展示；
+				// 编辑角色/禁用时后端会隐式建档，无需单独的「开通」步骤。
+				"casdoor": true, "local": false, "tenant_id": 1, "roles": []string{"user"},
 				"is_admin": false, "disabled": false,
 			}
 			if lr, ok := locals[u.Name]; ok {
@@ -341,58 +343,6 @@ func UserDirectory(s *svc.ServiceContext) http.HandlerFunc {
 			out = append(out, row)
 		}
 		httpx.OK(w, map[string]any{"list": out, "total": total, "page": page, "size": size})
-	}
-}
-
-// UserEnableLocal 为 Casdoor 中已存在的用户创建本地授权记录（角色默认 user）。
-//
-// 只创建本地租户/角色记录，不改动 Casdoor 用户本身；已存在时幂等返回。
-func UserEnableLocal(s *svc.ServiceContext) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		username := strings.TrimSpace(r.PathValue("username"))
-		if username == "" {
-			httpx.Fail(w, http.StatusBadRequest, "用户名为空")
-			return
-		}
-		var req struct {
-			DisplayName string   `json:"display_name"`
-			TenantID    int64    `json:"tenant_id"`
-			Roles       []string `json:"roles"`
-		}
-		if r.ContentLength != 0 {
-			if err := httpx.DecodeJSON(r, &req); err != nil {
-				httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
-				return
-			}
-		}
-
-		dir := casdoorDirectory(s)
-		if !dir.Valid() {
-			httpx.Fail(w, http.StatusServiceUnavailable, "Casdoor 未配置，无法校验用户")
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		remote, err := dir.Get(ctx, username)
-		if err != nil {
-			httpx.Fail(w, http.StatusBadGateway, "校验 Casdoor 用户失败: "+err.Error())
-			return
-		}
-		if remote == nil {
-			httpx.Fail(w, http.StatusNotFound, "Casdoor 中不存在用户 "+username)
-			return
-		}
-		if strings.TrimSpace(req.DisplayName) == "" {
-			req.DisplayName = remote.DisplayName
-		}
-
-		id, err := s.RBAC.EnableSSOUser(r.Context(), actorOf(r), username, req.DisplayName, req.TenantID, req.Roles)
-		auditOp(s, r, audit.ActionUserCreate, "user", username, username, err)
-		if err != nil {
-			httpx.FailErr(w, http.StatusBadRequest, err)
-			return
-		}
-		httpx.OK(w, map[string]any{"id": id, "username": username})
 	}
 }
 

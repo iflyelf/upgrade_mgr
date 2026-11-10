@@ -338,7 +338,6 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.HandleFunc("POST /api/cache/flush", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CacheFlush(sc))))
 	mux.HandleFunc("GET /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserList(sc))))
 	mux.HandleFunc("GET /api/users/directory", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserDirectory(sc))))
-	mux.HandleFunc("POST /api/users/{username}/enable", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserEnableLocal(sc))))
 	// Casdoor 用户写操作（主数据在 Casdoor；扩展字段只读，不回写 properties）
 	mux.HandleFunc("POST /api/casdoor/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCasdoorCreate(sc))))
 	mux.HandleFunc("PUT /api/casdoor/users/{username}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCasdoorUpdate(sc))))
@@ -375,6 +374,7 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.HandleFunc("PUT /api/flyiam/sync-user-fields/config", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.UpdateUserFieldSyncConfig(sc))))
 	mux.HandleFunc("GET /api/flyiam/sync-user-fields/progress", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserFieldSyncProgress(sc))))
 	mux.HandleFunc("GET /api/flyiam/sync-user-fields/logs", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserFieldSyncLogs(sc))))
+	mux.HandleFunc("DELETE /api/flyiam/sync-user-fields/logs", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.DeleteUserFieldSyncLogs(sc))))
 	mux.HandleFunc("POST /api/flyiam/sync-departments", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncDepartmentsFromFlyIAM(sc))))
 	mux.HandleFunc("GET /api/flyiam/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMUsers(sc))))
 	mux.HandleFunc("POST /api/flyiam/users/{username}/provision", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMProvisionLocalUser(sc))))
