@@ -38,18 +38,25 @@ type Directory struct {
 	clientID     string
 	clientSecret string
 	organization string
+	application  string
 	http         *http.Client
 }
 
 // NewDirectory 创建目录客户端。
 //
 // endpoint 为服务端可达的 Casdoor 地址（如 http://flysso.iflytek.com）。
-func NewDirectory(endpoint, clientID, clientSecret, organization string) *Directory {
+// application 可选：创建用户时写入 signupApplication，留空则沿用 Casdoor 默认值。
+func NewDirectory(endpoint, clientID, clientSecret, organization string, application ...string) *Directory {
+	app := ""
+	if len(application) > 0 {
+		app = strings.TrimSpace(application[0])
+	}
 	return &Directory{
 		endpoint:     strings.TrimRight(strings.TrimSpace(endpoint), "/"),
 		clientID:     strings.TrimSpace(clientID),
 		clientSecret: strings.TrimSpace(clientSecret),
 		organization: strings.TrimSpace(organization),
+		application:  app,
 		http:         &http.Client{Timeout: 20 * time.Second},
 	}
 }

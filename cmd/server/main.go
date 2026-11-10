@@ -63,6 +63,7 @@ func main() {
 	// 其他副本通过 5 秒轮询同步，无需重启。
 	sc.StartArtifactSettingsWatcher(ctx, 5*time.Second)
 	sc.StartAISettingsWatcher(ctx)
+	sc.StartUserFieldSync(ctx)
 
 	mux := http.NewServeMux()
 	limiters := registerRoutes(mux, sc)
@@ -338,6 +339,11 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.HandleFunc("GET /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserList(sc))))
 	mux.HandleFunc("GET /api/users/directory", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserDirectory(sc))))
 	mux.HandleFunc("POST /api/users/{username}/enable", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserEnableLocal(sc))))
+	// Casdoor 用户写操作（主数据在 Casdoor；扩展字段只读，不回写 properties）
+	mux.HandleFunc("POST /api/users/casdoor", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCasdoorCreate(sc))))
+	mux.HandleFunc("PUT /api/users/casdoor/{username}", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCasdoorUpdate(sc))))
+	mux.HandleFunc("POST /api/users/casdoor/{username}/reset-password", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCasdoorResetPassword(sc))))
+	mux.HandleFunc("POST /api/users/casdoor/{username}/admin", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCasdoorSetAdmin(sc))))
 	mux.HandleFunc("POST /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCreate(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/tenant-roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetTenantRoles(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/disabled", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetDisabled(sc))))
@@ -365,6 +371,10 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	// FlyIAM 集成：连通性测试 + 用户字段定义同步
 	mux.HandleFunc("POST /api/flyiam/test", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.TestFlyIAM(sc))))
 	mux.HandleFunc("POST /api/flyiam/sync-user-fields", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.SyncUserFieldsFromFlyIAM(sc))))
+	mux.HandleFunc("GET /api/flyiam/sync-user-fields/config", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.GetUserFieldSyncConfig(sc))))
+	mux.HandleFunc("PUT /api/flyiam/sync-user-fields/config", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.UpdateUserFieldSyncConfig(sc))))
+	mux.HandleFunc("GET /api/flyiam/sync-user-fields/progress", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserFieldSyncProgress(sc))))
+	mux.HandleFunc("GET /api/flyiam/sync-user-fields/logs", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserFieldSyncLogs(sc))))
 	mux.HandleFunc("POST /api/flyiam/sync-departments", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.SyncDepartmentsFromFlyIAM(sc))))
 	mux.HandleFunc("GET /api/flyiam/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMUsers(sc))))
 	mux.HandleFunc("POST /api/flyiam/users/{username}/provision", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.FlyIAMProvisionLocalUser(sc))))

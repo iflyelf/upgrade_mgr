@@ -28,6 +28,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/logic/org"
 	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/task"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/userfieldsync"
 	"github.com/iflyelf/upgrade_mgr/internal/maintenance"
 	"github.com/iflyelf/upgrade_mgr/internal/metrics"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
@@ -59,6 +60,8 @@ type ServiceContext struct {
 	RBAC       *rbac.Service
 	Audit      *audit.Logger // 审计日志
 	AIToken    *aitoken.Repo // AI 访问令牌
+	// UserFieldSync 用户字段定义自动同步（从 FlyIAM 拉取定义；不写回）。
+	UserFieldSync *userfieldsync.Service
 	// cacheRef 可选 Redis 缓存（单点/集群/哨兵）；未启用时所有读写自动降级。
 	// 用原子指针保存，设置页保存后热替换不会与请求读取产生数据竞争。
 	cacheRef atomic.Pointer[cache.Cache]
@@ -166,19 +169,23 @@ func New(c *config.Config) *ServiceContext {
 	taskSvc.SetOwnerShareChecker(orgSvc.CanShareTasks)
 	taskSvc.SetTeamMateChecker(orgSvc.SharesTeam)
 	svc := &ServiceContext{
-		Config:        c,
-		DB:            db,
-		Settings:      settings,
-		Syncer:        synclogic.NewSyncer(db),
-		Component:     compRepo,
-		Artifact:      artRepo,
-		Task:          taskSvc,
-		AgentGW:       gw,
-		Metrics:       metrics.NewCollector(db),
-		Maintainer:    newMaintainer(c, db, settings),
-		RBAC:          rbac.NewService(db),
-		Audit:         audit.NewLogger(db), // 审计日志
-		AIToken:       aitoken.NewRepo(db),
+		Config:     c,
+		DB:         db,
+		Settings:   settings,
+		Syncer:     synclogic.NewSyncer(db),
+		Component:  compRepo,
+		Artifact:   artRepo,
+		Task:       taskSvc,
+		AgentGW:    gw,
+		Metrics:    metrics.NewCollector(db),
+		Maintainer: newMaintainer(c, db, settings),
+		RBAC:       rbac.NewService(db),
+		Audit:      audit.NewLogger(db), // 审计日志
+		AIToken:    aitoken.NewRepo(db),
+		UserFieldSync: userfieldsync.New(db, func() *config.Config {
+			snap := settings.Snapshot()
+			return &snap
+		}),
 		dbMaxOpenBase: c.Database.MaxOpenConns,
 		dbMaxIdleBase: c.Database.MaxIdleConns,
 	}
@@ -790,5 +797,12 @@ func initArtifactRepo(db *sql.DB, cfg *config.ArtifactConfig) *artifact.Repo {
 	default:
 		log.Printf("⚠️ 未知 storage_type=%q，使用 local", stype)
 		return artifact.NewRepo(db, cfg.Dir)
+	}
+}
+
+// StartUserFieldSync 启动用户字段定义的自动同步调度（对齐 consul_mgr）。
+func (s *ServiceContext) StartUserFieldSync(ctx context.Context) {
+	if s.UserFieldSync != nil {
+		s.UserFieldSync.Start(ctx)
 	}
 }
