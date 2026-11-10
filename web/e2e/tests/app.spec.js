@@ -208,6 +208,8 @@ test('审计日志与人员组织（下拉菜单）可打开', async ({ page }) 
   await page.getByRole('button', { name: '新增角色' }).click();
   await expect(page.getByRole('textbox', { name: '角色名称' })).toBeVisible();
   await expect(page.getByRole('checkbox', { name: /只读（read）/ })).toBeChecked();
+  // 角色表单已改为弹窗：先关闭，避免遮罩拦截后续顶栏点击。
+  await page.locator('.modal').getByRole('button', { name: '关闭' }).click();
 
   await openNavMenu(page, '人员组织');
   await page.getByRole('menuitem', { name: '服务组' }).click();
