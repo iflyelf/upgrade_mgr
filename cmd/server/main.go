@@ -336,6 +336,8 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.HandleFunc("POST /api/cache/test", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CacheTest(sc))))
 	mux.HandleFunc("POST /api/cache/flush", middleware.RequireAuth(auth, middleware.RequireSuperAdmin(handler.CacheFlush(sc))))
 	mux.HandleFunc("GET /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserList(sc))))
+	mux.HandleFunc("GET /api/users/directory", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserDirectory(sc))))
+	mux.HandleFunc("POST /api/users/{username}/enable", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserEnableLocal(sc))))
 	mux.HandleFunc("POST /api/users", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserCreate(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/tenant-roles", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetTenantRoles(sc))))
 	mux.HandleFunc("PUT /api/users/{username}/disabled", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.UserSetDisabled(sc))))

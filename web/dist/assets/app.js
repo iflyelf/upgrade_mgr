@@ -133,6 +133,9 @@
     // 外部文件白名单表格（页面增删行）
     extbin: null, extbinErr: '', extbinBusy: false, extbinTest: null,
     orgTab: 'users', org: null, orgErr: '', orgBusy: false, orgSel: null,
+    // 用户管理：Casdoor 目录（服务端分页 + 搜索），local 为本地授权信息。
+    orgUserPage: 1, orgUserSize: 20, orgUserTotal: 0, orgUserPages: 1,
+    orgUserDir: null, orgUserDirErr: '', orgUserDirLoading: false, orgUserField: 'name',
     orgSelTeam: null, orgTeamMembers: null, orgTeamPerms: null, orgNewField: null,
     flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
     hostFacets: null, hostListFacets: null,
@@ -384,7 +387,7 @@
       ['users', '用户管理'], ['fields', '用户字段'], ['hostfields', '主机字段'],
       ['hostmaps', '主机字段映射'],
       ['teams', '团队管理'], ['roles', '角色管理'], ['groups', '服务组'],
-      ['depts', '组织架构'], ['flyiam', 'FlyIAM 人员']
+      ['depts', '组织架构']
     ];
     var orgActive = state.view === 'org';
     var opsItems = [];
@@ -3016,6 +3019,36 @@
     });
   }
 
+  // loadUserDir 加载 Casdoor 用户目录（服务端分页 + 搜索）。
+  //
+  // 数据量 3 万+：只请求当前页，绝不全量拉取；关键字交给 Casdoor 过滤。
+  function loadUserDir(resetPage) {
+    if (resetPage) state.orgUserPage = 1;
+    state.orgUserDirLoading = true;
+    state.orgUserDirErr = '';
+    var qs = 'page=' + state.orgUserPage + '&size=' + state.orgUserSize +
+      '&field=' + encodeURIComponent(state.orgUserField || 'name') +
+      '&keyword=' + encodeURIComponent(state.orgUserQ || '');
+    api('/api/users/directory?' + qs).then(function (d) {
+      state.orgUserDir = (d && d.list) || [];
+      state.orgUserTotal = (d && d.total) || 0;
+      state.orgUserPages = Math.max(1, Math.ceil(state.orgUserTotal / state.orgUserSize));
+      state.orgUserDirLoading = false;
+      render();
+    }).catch(function (e) {
+      state.orgUserDir = null;
+      state.orgUserDirErr = e.message;
+      state.orgUserDirLoading = false;
+      render();
+    });
+  }
+
+  var userDirTimer = null;
+  function scheduleUserDirSearch() {
+    if (userDirTimer) clearTimeout(userDirTimer);
+    userDirTimer = setTimeout(function () { loadUserDir(true); }, 300);
+  }
+
   // switchOrgTab 切换人员组织子页签，并清空所有子表单状态。
   //
   // 「用户字段」与「主机字段」共用 state.orgNewField，必须在切换时清空，
@@ -3037,7 +3070,7 @@
     var tabs = [['users', '用户管理'], ['fields', '用户字段'], ['hostfields', '主机字段'],
       ['hostmaps', '主机字段映射'],
       ['teams', '团队管理'], ['roles', '角色管理'], ['groups', '服务组'],
-      ['depts', '组织架构'], ['flyiam', 'FlyIAM 人员']];
+      ['depts', '组织架构']];
     return h('div', { class: 'tabs', role: 'tablist', style: 'margin-bottom:12px' }, tabs.map(function (t) {
       return h('div', {
         class: 'tab' + (state.orgTab === t[0] ? ' active' : ''),
@@ -3055,6 +3088,8 @@
   }
 
   function orgView() {
+    // 旧链接可能带 tab=flyiam（该页签已合并进用户管理），回退到用户管理。
+    if (state.orgTab === 'flyiam') state.orgTab = 'users';
     var o = state.org;
     if (!o && !state.orgErr) {
       return h('div', { class: 'card' }, [h('h3', {}, ['人员组织']), h('div', { class: 'muted' }, ['加载中…'])]);
@@ -3067,7 +3102,6 @@
     else if (state.orgTab === 'hostmaps') body = orgHostMaps(o);
     else if (state.orgTab === 'roles') body = orgRoles(o);
     else if (state.orgTab === 'teams') body = orgTeams(o);
-    else if (state.orgTab === 'flyiam') body = orgFlyIAMUsers(o);
     else body = orgGroups(o);
 
     return h('div', {}, [
@@ -3077,102 +3111,172 @@
     ]);
   }
 
-  // 人员信息：账号管理（新增/编辑/删除/重置密码/禁用）+ 人事扩展字段。
-  // 与 consul_mgr 的「用户管理」布局对齐：工具栏（搜索/新增/刷新）+ 表格 + 弹窗表单。
+  // 用户管理：列表来自 Casdoor（服务端分页 + 搜索），租户/角色来自本地授权。
+  //
+  // 30k+ 人员不能全量拉取：每次只请求当前页，关键字交给 Casdoor 过滤；
+  // local=true 表示本地已建档（可分配租户/角色），false 则显示「开通本地账号」。
   function orgUsers(o) {
-    var q = (state.orgUserQ || '').trim().toLowerCase();
-    var users = o.users.filter(function (u) {
-      if (!q) return true;
-      return (u.username || '').toLowerCase().indexOf(q) >= 0 ||
-        (u.display_name || '').toLowerCase().indexOf(q) >= 0 ||
-        (u.roles || []).join(',').toLowerCase().indexOf(q) >= 0;
-    });
+    if (state.orgUserDir === null && !state.orgUserDirLoading && !state.orgUserDirErr) {
+      loadUserDir();
+      return h('div', { class: 'card' }, [
+        h('h3', {}, ['用户管理']),
+        h('div', { class: 'muted' }, ['正在加载 Casdoor 用户…'])
+      ]);
+    }
+
+    var users = state.orgUserDir || [];
     var listDefs = o.userDefs.filter(function (d) { return d.showInList; })
       .sort(function (a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
-    var cols = ['用户', '租户', '角色', '状态']
+    var cols = ['用户', '邮箱', '电话', '租户', '角色', '状态']
       .concat(listDefs.map(function (d) { return d.label; }))
       .concat(['操作']);
 
     var rows = users.map(function (u) {
       var vals = o.userValues[u.username] || {};
+      var props = u.properties || {};
       var roleTags = (u.roles || []).map(function (r) {
         return h('span', { class: 'tag' + (r === 'superadmin' ? ' status-failed' : (r === 'admin' ? ' status-running' : '')) }, [r]);
       });
+      var nameTags = [];
+      if (u.casdoor_admin) nameTags.push(h('span', { class: 'tag status-running' }, ['Casdoor 管理员']));
+      if (u.is_forbidden) nameTags.push(h('span', { class: 'tag status-failed' }, ['Casdoor 禁用']));
+      if (!u.local) nameTags.push(h('span', { class: 'tag' }, ['未接入']));
+
+      var status;
+      if (u.is_forbidden) status = h('span', { class: 'tag status-failed' }, ['Casdoor 禁用']);
+      else if (!u.local) status = h('span', { class: 'muted' }, ['-']);
+      else if (u.disabled) status = h('span', { class: 'tag status-failed' }, ['本地禁用']);
+      else status = h('span', { class: 'tag status-success' }, ['正常']);
+
       var cells = [
         h('div', { class: 'user-cell' }, [
           h('span', { class: 'avatar sm' }, [avatarInitial(u.display_name || u.username)]),
           h('div', {}, [
-            h('div', { class: 'user-cell-name' }, [u.display_name || u.username]),
+            h('div', { class: 'user-cell-name' }, [u.display_name || u.username].concat(nameTags)),
             h('div', { class: 'muted user-cell-sub' }, [u.username])
           ])
         ]),
-        u.tenant_id,
-        h('div', { class: 'row-actions' }, roleTags.length ? roleTags : ['-']),
-        u.disabled
-          ? h('span', { class: 'tag status-failed' }, ['已禁用'])
-          : h('span', { class: 'tag status-success' }, ['正常'])
-      ].concat(listDefs.map(function (d) { return vals[d.fieldKey] || '-'; }));
+        u.email || '-',
+        u.phone || '-',
+        u.local ? u.tenant_id : '-',
+        u.local ? h('div', { class: 'row-actions' }, roleTags.length ? roleTags : ['-'])
+                : h('span', { class: 'muted' }, ['未接入']),
+        status
+      ].concat(listDefs.map(function (d) {
+        return vals[d.fieldKey] || props[d.fieldKey] || '-';
+      }));
 
-      var actions = [
-        h('button', {
-          class: 'btn ghost small', onclick: function () { state.orgSel = u.username; state.orgUserForm = null; render(); }
-        }, ['扩展字段']),
-        h('button', {
-          class: 'btn ghost small', onclick: function () { openUserForm(u); }
-        }, ['编辑']),
-        h('button', {
-          class: 'btn ghost small', onclick: function () { resetUserPassword(u); }
-        }, ['重置密码']),
-        h('button', {
-          class: 'btn ghost small', onclick: function () { toggleUserDisabled(u); }
-        }, [u.disabled ? '启用' : '禁用']),
-        h('button', {
-          class: 'btn danger small', onclick: function () { deleteUser(u); }
-        }, ['删除'])
-      ];
+      var actions;
+      if (u.local) {
+        actions = [
+          h('button', {
+            class: 'btn ghost small', onclick: function () { openUserForm(u); }
+          }, ['编辑角色']),
+          h('button', {
+            class: 'btn ghost small', onclick: function () { state.orgSel = u.username; state.orgUserForm = null; render(); }
+          }, ['扩展字段']),
+          h('button', {
+            class: 'btn ghost small', onclick: function () { toggleUserDisabled(u); }
+          }, [u.disabled ? '启用' : '禁用']),
+          h('button', {
+            class: 'btn danger small', onclick: function () { deleteUser(u); }
+          }, ['移除本地账号'])
+        ];
+      } else {
+        actions = [
+          h('button', {
+            class: 'btn small', onclick: function () { enableLocalUser(u); }
+          }, ['开通本地账号'])
+        ];
+      }
       cells.push(h('div', { class: 'row-actions' }, actions));
       return cells;
     });
 
     var qEl = h('input', {
-      id: 'org-user-q', value: state.orgUserQ || '', placeholder: '用户名 / 显示名称 / 角色',
+      id: 'org-user-q', value: state.orgUserQ || '', placeholder: '账号 / 姓名 / 邮箱 / 手机（回车搜索）',
       oninput: function () {
         state.orgUserQ = qEl.value;
         state.focusId = 'org-user-q';
-        render();
+        scheduleUserDirSearch();
       }
     }, []);
+    qEl.onkeydown = function (ev) {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        if (userDirTimer) clearTimeout(userDirTimer);
+        loadUserDir(true);
+      }
+    };
+    var fieldEl = h('select', { value: state.orgUserField || 'name', 'aria-label': '搜索字段' },
+      [['name', '账号'], ['displayName', '姓名'], ['email', '邮箱'], ['phone', '手机']].map(function (x) {
+        return h('option', { value: x[0] }, [x[1]]);
+      }));
+    fieldEl.onchange = function () {
+      state.orgUserField = fieldEl.value;
+      state.focusId = 'org-user-q';
+      loadUserDir(true);
+    };
 
     var toolbar = h('div', { class: 'toolbar' }, [
-      qEl,
+      fieldEl, qEl,
+      h('button', { class: 'btn', onclick: function () { loadUserDir(true); } }, ['搜索']),
       h('button', {
-        class: 'btn', onclick: function () {
-          state.orgUserForm = { mode: 'create', username: '', display_name: '', password: '', tenant_id: 1, roles: ['user'], disabled: false };
+        class: 'btn ghost',
+        onclick: function () {
+          state.orgUserQ = '';
+          state.orgUserField = 'name';
           state.orgSel = null;
-          render();
+          state.orgUserForm = null;
+          loadOrg();
+          loadUserDir(true);
         }
-      }, ['新增用户']),
-      h('button', { class: 'btn ghost', onclick: function () { state.orgUserForm = null; loadOrg(); } }, ['刷新']),
-      h('span', { class: 'muted' }, ['共 ' + users.length + ' 个用户' +
-        (q ? '（全部 ' + o.users.length + '）' : '')])
+      }, ['刷新']),
+      h('span', { class: 'muted' }, [
+        state.orgUserDirLoading ? '加载中…' : ('共 ' + state.orgUserTotal + ' 人（数据来源：Casdoor）')
+      ])
     ]);
 
-    var editing = o.users.filter(function (u) { return u.username === state.orgSel; })[0];
+    var sizeEl = h('select', { value: String(state.orgUserSize), 'aria-label': '每页条数' },
+      [10, 20, 50, 100, 200].map(function (n) {
+        return h('option', { value: String(n) }, [n + ' 条/页']);
+      }));
+    sizeEl.onchange = function () {
+      state.orgUserSize = parseInt(sizeEl.value, 10) || 20;
+      loadUserDir(true);
+    };
+    var pager = h('div', { class: 'pager' }, [
+      h('span', { class: 'muted' }, ['第 ' + state.orgUserPage + ' / ' + state.orgUserPages + ' 页 · 共 ' +
+        state.orgUserTotal + ' 人']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.orgUserPage <= 1 ? '' : null,
+        onclick: function () { state.orgUserPage--; loadUserDir(); }
+      }, ['上一页']),
+      h('button', {
+        class: 'btn ghost small', disabled: state.orgUserPage >= state.orgUserPages ? '' : null,
+        onclick: function () { state.orgUserPage++; loadUserDir(); }
+      }, ['下一页']),
+      h('span', { class: 'spacer' }, []),
+      sizeEl
+    ]);
+
+    var editing = (o.users || []).filter(function (u) { return u.username === state.orgSel; })[0];
     var form = editing ? userFieldForm(o, editing) : null;
     return h('div', {}, [
       h('div', { class: 'card' }, [
         toolbar,
         h('div', { class: 'muted', style: 'margin:6px 0 10px' }, [
-          '这里只显示本地账号（租户/角色以本地为准）：FlyIAM 用户首次 SSO 登录时会自动建档。' +
-          '需要查看公司全部人员并预先开通账号，请打开 ',
-          h('button', {
-            class: 'btn ghost small',
-            onclick: function () { switchOrgTab('flyiam'); }
-          }, ['FlyIAM 人员目录']),
-          '。'
+          '账号数据来自 Casdoor（新增/改名请在 FlyIAM 或 Casdoor 完成）；租户/角色为本系统本地授权。' +
+          '未接入的用户首次 SSO 登录会自动建档，也可直接点「开通本地账号」。'
         ]),
+        state.orgUserDirErr
+          ? h('div', { class: 'err field', role: 'alert' }, [state.orgUserDirErr])
+          : null,
         simpleTable(cols, users, function (u, i) { return rows[i]; }),
-        users.length === 0 ? h('div', { class: 'muted empty' }, ['没有匹配的用户']) : null
+        users.length === 0 && !state.orgUserDirLoading
+          ? h('div', { class: 'muted empty' }, [state.orgUserQ ? '没有匹配的用户' : 'Casdoor 暂无用户'])
+          : null,
+        pager
       ]),
       state.orgUserForm ? userAccountForm(o) : null,
       form
@@ -3233,6 +3337,7 @@
             var pwd = pwdEl.value;
             state.orgUserForm = null;
             loadOrg();
+            loadUserDir();
             if (!pwd && r && r.initial_password) {
               alert('用户已创建。初始密码（仅显示一次）：' + r.initial_password);
             }
@@ -3257,6 +3362,7 @@
       }).then(function () {
         state.orgUserForm = null;
         loadOrg();
+        loadUserDir();
       }).catch(function (e) { alert('保存失败: ' + e.message); });
     }
 
@@ -3305,14 +3411,30 @@
     if (next && !confirm('确定禁用 ' + u.username + '？禁用后该账号无法登录。')) return;
     api('/api/users/' + encodeURIComponent(u.username) + '/disabled', {
       method: 'PUT', body: JSON.stringify({ disabled: next })
-    }).then(function () { loadOrg(); })
+    }).then(function () { loadOrg(); loadUserDir(); })
       .catch(function (e) { alert('操作失败: ' + e.message); });
   }
 
+  // enableLocalUser 为 Casdoor 已存在的用户创建本地授权记录（角色默认 user）。
+  //
+  // 只写 local_users，不改动 Casdoor 账号；开通后可再点「编辑角色」分配租户/角色。
+  function enableLocalUser(u) {
+    if (!confirm('为 ' + u.username + ' 开通本地账号（角色 user）？\n\n' +
+      '登录仍由 FlyIAM/Casdoor 认证；开通后可分配租户与角色。')) return;
+    api('/api/users/' + encodeURIComponent(u.username) + '/enable', {
+      method: 'POST',
+      body: JSON.stringify({ display_name: u.display_name || '' })
+    }).then(function () {
+      loadOrg();
+      loadUserDir();
+    }).catch(function (e) { alert('开通失败: ' + e.message); });
+  }
+
   function deleteUser(u) {
-    if (!confirm('确定删除用户 ' + u.username + '？\n\n将同时移除其团队成员关系与扩展字段值；审计日志保留。')) return;
+    if (!confirm('确定移除本地账号 ' + u.username + '？\n\n只删除本系统的租户/角色与扩展字段，' +
+      '不会删除 Casdoor/FlyIAM 用户；审计日志保留。')) return;
     api('/api/users/' + encodeURIComponent(u.username), { method: 'DELETE' })
-      .then(function () { state.orgSel = null; loadOrg(); })
+      .then(function () { state.orgSel = null; loadOrg(); loadUserDir(); })
       .catch(function (e) { alert('删除失败: ' + e.message); });
   }
 
