@@ -1396,17 +1396,34 @@
   // casdoor 模式下后端不接受账号密码，必须走 OAuth 跳转，因此这里不再渲染
   // 用户名/密码表单，避免用户输入后被拒（audit 里会留下「casdoor 模式请使用 SSO 登录」）。
   function ssoLoginView() {
+    var busy = state.ssoBusy;
     var card = h('div', { class: 'card login-card' }, [
-      h('h2', {}, ['登录']),
+      h('div', { class: 'login-header' }, [
+        h('h2', {}, ['升级控制平台']),
+        h('p', {}, ['统一升级与运维管理平台'])
+      ]),
       state.ssoErr ? h('div', { class: 'err field', role: 'alert' }, [state.ssoErr]) : null,
-      h('p', { class: 'muted' }, ['本系统已接入 FlyIAM 统一身份认证，请使用统一账号登录。']),
-      h('div', { class: 'toolbar' }, [
+      h('button', {
+        class: 'btn login-primary', disabled: busy ? 'disabled' : null,
+        onclick: ssoLogin
+      }, [busy ? '正在跳转到 Casdoor 登录页…' : '使用 Casdoor 登录']),
+      h('div', { class: 'login-alert' }, [
+        h('span', { class: 'dot' }, ['ℹ️']),
+        h('span', {}, ['首次登录将自动创建本地账号；如需权限请联系管理员分配角色。'])
+      ]),
+      h('div', { class: 'login-divider' }, []),
+      h('div', { class: 'login-info' }, [
+        h('p', {}, [h('span', { class: 'dot' }, ['🔐']), '使用 Casdoor 统一认证平台登录']),
+        h('p', {}, [h('span', { class: 'dot' }, ['🔗']), '支持 SSO 单点登录']),
+        h('p', {}, [h('span', { class: 'dot' }, ['➡️']), '点击后将跳转到统一登录页'])
+      ]),
+      h('div', { class: 'login-redirect' }, [
+        busy ? '正在跳转，请稍候…' : '点击登录后会跳转到 Casdoor 统一认证页'
+      ]),
+      h('div', { class: 'login-foot' }, [
+        h('span', { class: 'muted', style: 'font-size:12px' }, ['升级控制平台']),
         h('button', {
-          class: 'btn', disabled: state.ssoBusy ? 'disabled' : null,
-          onclick: ssoLogin
-        }, [state.ssoBusy ? '正在跳转…' : '使用 FlyIAM 登录']),
-        h('button', {
-          class: 'btn ghost', title: 'Switch language',
+          class: 'btn ghost small', title: 'Switch language',
           onclick: function () { toggleLang(); }
         }, [state.lang === 'en' ? '中文' : 'EN'])
       ])
@@ -1456,19 +1473,23 @@
       }
     };
     var card = h('div', { class: 'card login-card' }, [
-      h('h2', {}, ['登录']),
+      h('div', { class: 'login-header' }, [
+        h('h2', {}, ['升级控制平台']),
+        h('p', {}, ['统一升级与运维管理平台'])
+      ]),
       state.err ? h('div', { class: 'err field', role: 'alert' }, [state.err]) : null,
       h('div', { class: 'field' }, [h('label', {}, ['用户名']),
         (uEl = h('input', { value: state.loginName || '', autocomplete: 'username' }, []))]),
       h('div', { class: 'field' }, [h('label', {}, ['密码']),
         (pEl = h('input', { type: 'password', autocomplete: 'current-password' }, []))]),
-      h('div', { class: 'toolbar' }, [
+      h('button', {
+        class: 'btn login-primary', disabled: state.loginBusy ? 'disabled' : null,
+        onclick: doLogin
+      }, [state.loginBusy ? '登录中…' : '登录']),
+      h('div', { class: 'login-foot' }, [
+        h('span', { class: 'muted', style: 'font-size:12px' }, ['内置账号登录']),
         h('button', {
-          class: 'btn', disabled: state.loginBusy ? 'disabled' : null,
-          onclick: doLogin
-        }, [state.loginBusy ? '登录中…' : '登录']),
-        h('button', {
-          class: 'btn ghost', title: 'Switch language',
+          class: 'btn ghost small', title: 'Switch language',
           onclick: function () { toggleLang(); }
         }, [state.lang === 'en' ? '中文' : 'EN'])
       ])
@@ -5612,6 +5633,14 @@
     '团队管理': 'Team management', '角色管理': 'Role management',
     '服务组': 'Service groups', '服务组管理': 'Service group management', '组织架构': 'Org structure', 'FlyIAM 人员': 'FlyIAM users',
     '登录': 'Sign in', '用户名': 'Username', '密码': 'Password', '正在登录…': 'Signing in…',
+    '升级控制平台': 'Upgrade Manager', '统一升级与运维管理平台': 'Unified upgrade & operations platform',
+    '使用 Casdoor 登录': 'Sign in with Casdoor', '正在跳转到 Casdoor 登录页…': 'Redirecting to Casdoor…',
+    '首次登录将自动创建本地账号；如需权限请联系管理员分配角色。': 'A local account is created on first sign-in; contact an administrator for roles.',
+    '使用 Casdoor 统一认证平台登录': 'Sign in with Casdoor SSO', '支持 SSO 单点登录': 'Supports SSO',
+    '点击后将跳转到统一登录页': 'You will be redirected to the SSO page',
+    '正在跳转，请稍候…': 'Redirecting, please wait…',
+    '点击登录后会跳转到 Casdoor 统一认证页': 'Click sign-in to open the Casdoor SSO page',
+    '内置账号登录': 'Built-in account sign-in',
     '创建任务': 'Create task', '上传制品': 'Upload artifact', '新建组件': 'New component',
     '新增团队': 'Add team', '新增角色': 'Add role', '新增服务组': 'Add service group',
     '编辑角色': 'Edit role', '编辑服务组': 'Edit service group', '被引用': 'Referenced by',
