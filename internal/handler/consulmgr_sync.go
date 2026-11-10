@@ -3,11 +3,13 @@ package handler
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/iflyelf/upgrade_mgr/internal/logic/hostmerge"
 	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -57,6 +59,11 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 
+		// 同步完成后自动合并重复主机（同一台机器的清单行与 Agent 行）。
+		merged, mergeErr := hostmerge.AutoMergeAll(r.Context(), s.DB)
+		if mergeErr != nil {
+			log.Printf("⚠️ consul_mgr 同步后自动合并重复主机失败: %v", mergeErr)
+		}
 		auditOpDetails(s, r, audit.ActionConsulMgrSync, "host", "", cli.Endpoint(), nil,
 			map[string]any{
 				"groups": res.Groups, "hosts": res.Hosts,
@@ -68,7 +75,7 @@ func SyncHostsFromConsulMgr(s *svc.ServiceContext) http.HandlerFunc {
 			"upserted": res.Upserted, "mappings": res.Mappings,
 			"failed_groups": res.FailedGroups, "partial": res.Partial,
 			"cleanup_deleted": res.CleanupDeleted, "cleanup_skipped": res.CleanupSkipped,
-			"duration": res.Duration.String(),
+			"merged_hosts": merged, "duration": res.Duration.String(),
 		})
 	}
 }

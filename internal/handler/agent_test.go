@@ -547,3 +547,60 @@ func TestAgentRegisterTunnelIPPrecedesExitIP(t *testing.T) {
 		t.Fatal("出口 IP 命中的主机不应被绑定")
 	}
 }
+
+// TestAgentRegisterAutoMergesTunnelDuplicates 注册命中多条同隧道 IP 的重复主机时，
+// 应自动合并为一条并继续注册，而不是返回 409。
+func TestAgentRegisterAutoMergesTunnelDuplicates(t *testing.T) {
+	db, sc := setupHostDB(t)
+	sc.Config = config.Default()
+	sc.Config.Agent.RequireEnrollToken = false
+
+	sfx := time.Now().UnixNano()
+	srcIP := fmt.Sprintf("198.35.%d.%d", (sfx/250)%250, sfx%250)
+	tunnel := fmt.Sprintf("198.36.%d.%d", (sfx/250)%250, (sfx+3)%250)
+	ip1 := fmt.Sprintf("198.37.%d.%d", (sfx/250)%250, (sfx+5)%250)
+	ip2 := fmt.Sprintf("198.38.%d.%d", (sfx/250)%250, (sfx+7)%250)
+
+	var id1, id2 int64
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, tunnel_ip, app_code, tenant_id, source)
+		VALUES ($1,'dup-tunnel','`+tunnel+`','APP1',1,'consul_mgr') RETURNING id`, ip1).Scan(&id1); err != nil {
+		t.Fatalf("插入重复主机1失败: %v", err)
+	}
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, tunnel_ip, biz_group, tenant_id, source)
+		VALUES ($1,'dup-tunnel',$2,'G1',1,'manual') RETURNING id`, ip2, tunnel).Scan(&id2); err != nil {
+		t.Fatalf("插入重复主机2失败: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM agents WHERE host_id IN ($1,$2)`, id1, id2)
+		db.Exec(`DELETE FROM hosts WHERE id IN ($1,$2)`, id1, id2)
+	})
+
+	body := `{"hostname":"dup-tunnel","arch":"amd64","exit_ip":"` + tunnel + `"}`
+	req := httptest.NewRequest("POST", "/api/agent/register", strings.NewReader(body))
+	req.RemoteAddr = srcIP + ":12345"
+	rec := httptest.NewRecorder()
+	AgentRegister(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("注册失败 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hosts WHERE tunnel_ip=$1`, tunnel).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Fatalf("重复主机应自动合并为 1 条，实际 %d", total)
+	}
+	var targetID int64
+	var agentID, appCode, bizGroup string
+	if err := db.QueryRow(`SELECT id, COALESCE(agent_id,''), app_code, biz_group
+		FROM hosts WHERE tunnel_ip=$1`, tunnel).Scan(&targetID, &agentID, &appCode, &bizGroup); err != nil {
+		t.Fatal(err)
+	}
+	if agentID == "" {
+		t.Fatal("合并后的主机应绑定 Agent")
+	}
+	if appCode != "APP1" || bizGroup != "G1" {
+		t.Fatalf("合并后业务字段应保留: app=%s group=%s", appCode, bizGroup)
+	}
+}

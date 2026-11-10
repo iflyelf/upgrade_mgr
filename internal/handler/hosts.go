@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/iflyelf/upgrade_mgr/internal/logic/hostmerge"
 	synclogic "github.com/iflyelf/upgrade_mgr/internal/logic/sync"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -328,6 +330,11 @@ func SyncHosts(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.FailErr(w, http.StatusBadGateway, fmt.Errorf("同步失败: %w", err))
 			return
 		}
+		// 同步完成后自动合并重复主机。
+		merged, mergeErr := hostmerge.AutoMergeAll(r.Context(), s.DB)
+		if mergeErr != nil {
+			log.Printf("⚠️ Consul 同步后自动合并重复主机失败: %v", mergeErr)
+		}
 		auditOpDetails(s, r, audit.ActionHostSync, "host", "", "consul", nil,
 			map[string]any{
 				"services": res.Services, "instances": res.Instances,
@@ -338,7 +345,7 @@ func SyncHosts(s *svc.ServiceContext) http.HandlerFunc {
 			"services": res.Services, "instances": res.Instances,
 			"upserted": res.Upserted, "deleted": res.Deleted,
 			"partial": res.Partial, "cleanup_skipped": res.CleanupSkipped,
-			"duration": res.Duration.String(),
+			"merged_hosts": merged, "duration": res.Duration.String(),
 		})
 	}
 }
