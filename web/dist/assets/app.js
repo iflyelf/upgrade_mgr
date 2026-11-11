@@ -1612,7 +1612,8 @@
       url: '/api/hosts/batch-delete',
       // 支持「按筛选条件全选」，删除走服务端后台作业（刷新页面不中断）。
       async: HOST_DELETE_JOB,
-      confirmText: '删除后将级联删除这些主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n存在未完成任务或指令的主机会被跳过。',
+      allowForce: true,
+      confirmText: '删除后将级联删除这些主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n存在未完成任务或指令的主机会被跳过。\n在线/维护中的主机默认受保护，需勾选「强制删除在线主机」。',
       label: function (x) { return x.exit_ip || x.ip; },
       onDone: function (wholePage) {
         if (wholePage && state.hostPage > 1) state.hostPage--;
@@ -2339,17 +2340,35 @@
   }
 
   function deleteHost(host) {
+    var online = String(host.agent_status || '').toLowerCase() === 'online';
     var msg = '确定删除主机 ' + (host.exit_ip || host.ip) + ' 吗？\n\n' +
       '删除后将级联删除该主机的任务/指令历史，并撤销 Agent 凭据，无法恢复。\n' +
       '如果主机存在未完成任务或指令，删除会被拒绝。';
+    if (online) {
+      msg += '\n\n⚠️ 该主机当前在线，普通删除会被拒绝；确认后将执行强制删除。';
+    }
     if (!confirm(msg)) return;
-    api('/api/hosts/' + host.id, { method: 'DELETE' })
+    doDeleteHost(host, online);
+  }
+
+  function doDeleteHost(host, force) {
+    var url = '/api/hosts/' + host.id + (force ? '?force=1' : '');
+    api(url, { method: 'DELETE' })
       .then(function () {
         state.hostErr = '';
         if (state.hosts.length === 1 && state.hostPage > 1) state.hostPage--;
         loadHosts();
       })
-      .catch(function (e) { state.hostErr = '删除失败: ' + e.message; render(); });
+      .catch(function (e) {
+        var m = String(e.message || '');
+        if (!force && (m.indexOf('在线') >= 0 || m.indexOf('维护') >= 0) &&
+          confirm('该主机在线或维护中，普通删除被拒绝。\n\n是否强制删除？')) {
+          doDeleteHost(host, true);
+          return;
+        }
+        state.hostErr = '删除失败: ' + e.message;
+        render();
+      });
   }
 
   var AGENT_OS = [
@@ -5766,6 +5785,7 @@
     var allSel = as ? state[allKey] : null;
     var job = as ? state[as.jobKey] : null;
     var jobRunning = batchJobActive(job);
+    var force = !!state[opts.stateKey + 'Force'];
     if (jobRunning) busy = true;
     var ids = allSel
       ? Object.keys(allSel.ids).map(Number)
@@ -5783,6 +5803,8 @@
     }
     function selectAllByFilter() {
       var qs = as.filterQS();
+      // 勾选「强制删除在线主机」时，按筛选全选也要包含在线/维护中的主机。
+      if (state[opts.stateKey + 'Force']) qs.push('force=1');
       api(as.idsURL + (qs.length ? '?' + qs.join('&') : ''))
         .then(function (d) {
           d = d || {};
@@ -5797,11 +5819,15 @@
     function run() {
       if (!ids.length || busy) return;
       var scopeText = allSel ? '当前筛选结果中的 ' : '选中的 ';
-      if (!confirm('确定删除' + scopeText + ids.length + ' ' + opts.unit + opts.noun + '吗？\n' + opts.confirmText)) return;
+      var forceTip = (opts.allowForce && force)
+        ? '\n\n⚠️ 已勾选强制删除：在线/维护中的主机也会被删除。' : '';
+      if (!confirm('确定删除' + scopeText + ids.length + ' ' + opts.unit + opts.noun + '吗？\n' + opts.confirmText + forceTip)) return;
       if (as) {
         // 服务端后台按批删除：刷新页面/切换页签不会中断，回到本页继续显示进度。
         state[as.jobKey + 'Trunc'] = !!(allSel && allSel.truncated);
-        api(as.jobsURL, { method: 'POST', body: JSON.stringify({ ids: ids }) })
+        var jobBody = { ids: ids };
+        if (opts.allowForce) jobBody.force = force;
+        api(as.jobsURL, { method: 'POST', body: JSON.stringify(jobBody) })
           .then(function (j) {
             state[opts.stateKey] = {};
             state[allKey] = null;
@@ -5813,7 +5839,9 @@
       state[busyKey] = true;
       render();
       var deletedCount = 0;
-      api(opts.url, { method: 'POST', body: JSON.stringify({ ids: ids }) })
+      var batchBody = { ids: ids };
+      if (opts.allowForce) batchBody.force = force;
+      api(opts.url, { method: 'POST', body: JSON.stringify(batchBody) })
         .then(function (res) {
           res = res || {};
           var deleted = res.deleted || [];
@@ -5891,6 +5919,19 @@
           }, []),
           ' 全选本页'
         ]),
+        opts.allowForce ? h('label', { class: 'check' }, [
+          h('input', {
+            type: 'checkbox', class: 'task-check', checked: force,
+            disabled: busy ? '' : null,
+            onchange: function (e) {
+              state[opts.stateKey + 'Force'] = e.target.checked;
+              // 已按筛选全选时，强制开关变化需要重新拉取可删除 ID。
+              if (allSel) { state[allKey] = null; selectAllByFilter(); }
+              render();
+            }
+          }, []),
+          ' 强制删除在线主机'
+        ]) : null,
         as ? h('button', {
           class: 'btn ghost small', type: 'button', onclick: selectAllByFilter,
           disabled: busy ? '' : null,

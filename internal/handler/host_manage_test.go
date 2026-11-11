@@ -317,3 +317,39 @@ func TestHostCreate(t *testing.T) {
 	}
 	_ = otherTunnel
 }
+
+// TestHostDeleteProtectsOnlineAndForce 在线主机普通删除被拒绝，强制删除可删除。
+func TestHostDeleteProtectsOnlineAndForce(t *testing.T) {
+	db, sc := setupHostDB(t)
+	hostID, _ := insertTestHost(t, db, 1)
+	idStr := strconv.FormatInt(hostID, 10)
+	agentID := fmt.Sprintf("online-agent-%d", time.Now().UnixNano())
+	if _, err := db.Exec(`UPDATE hosts SET agent_id=$1, agent_status='online', last_seen=NOW() WHERE id=$2`,
+		agentID, hostID); err != nil {
+		t.Fatalf("标记在线主机失败: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE id=$1`, hostID) })
+
+	rec := callHostHandler(t, HostDelete(sc), http.MethodDelete, idStr, "", hostTestUser(1))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("在线主机普通删除应 409，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	var cnt int
+	db.QueryRow(`SELECT COUNT(*) FROM hosts WHERE id=$1`, hostID).Scan(&cnt)
+	if cnt != 1 {
+		t.Fatal("在线主机不应被普通删除")
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/hosts/"+idStr+"?force=1", nil)
+	req.SetPathValue("id", idStr)
+	req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+	rec = httptest.NewRecorder()
+	HostDelete(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("强制删除应成功，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	db.QueryRow(`SELECT COUNT(*) FROM hosts WHERE id=$1`, hostID).Scan(&cnt)
+	if cnt != 0 {
+		t.Fatal("强制删除后主机应不存在")
+	}
+}

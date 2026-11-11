@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/fielddef"
@@ -221,7 +222,8 @@ func HostDelete(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "主机 ID 无效")
 			return
 		}
-		ip, derr := deleteHost(r.Context(), s, reqScope(r), id)
+		force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
+		ip, derr := deleteHost(r.Context(), s, reqScope(r), id, force)
 		auditOp(s, r, audit.ActionHostDelete, "host", strconv.FormatInt(id, 10), ip, errOrNil(derr))
 		if derr != nil {
 			if derr.internal {
@@ -245,7 +247,8 @@ const maxHostBatchDelete = 500
 func HostBatchDelete(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			IDs []int64 `json:"ids"`
+			IDs   []int64 `json:"ids"`
+			Force bool    `json:"force"`
 		}
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
@@ -273,7 +276,7 @@ func HostBatchDelete(s *svc.ServiceContext) http.HandlerFunc {
 				failed = append(failed, failure{ID: id, Error: "请求已取消"})
 				continue
 			}
-			ip, derr := deleteHost(r.Context(), s, sc, id)
+			ip, derr := deleteHost(r.Context(), s, sc, id, req.Force)
 			auditOp(s, r, audit.ActionHostDelete, "host", strconv.FormatInt(id, 10), ip, errOrNil(derr))
 			if derr != nil {
 				failed = append(failed, failure{ID: id, IP: ip, Error: derr.msg})
@@ -326,13 +329,13 @@ func hostInternalErr(err error) *deleteError {
 }
 
 // deleteHost 在单个事务内删除一台主机，返回主机 IP（查不到时为空）。
-func deleteHost(ctx context.Context, s *svc.ServiceContext, sc scope.Scope, id int64) (string, *deleteError) {
+func deleteHost(ctx context.Context, s *svc.ServiceContext, sc scope.Scope, id int64, force bool) (string, *deleteError) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return "", hostInternalErr(err)
 	}
 	defer tx.Rollback()
-	ip, derr := deleteHostTx(ctx, tx, sc, id)
+	ip, derr := deleteHostTx(ctx, tx, sc, id, force, hostOfflineAfter(s))
 	if derr != nil {
 		return ip, derr
 	}
@@ -346,7 +349,7 @@ func deleteHost(ctx context.Context, s *svc.ServiceContext, sc scope.Scope, id i
 //
 // 异步删除作业用它把「删除本批主机」与「记录作业进度」放进同一事务，
 // 每台主机前设 SAVEPOINT，单台失败只回滚该台。
-func deleteHostTx(ctx context.Context, tx *sql.Tx, sc scope.Scope, id int64) (string, *deleteError) {
+func deleteHostTx(ctx context.Context, tx *sql.Tx, sc scope.Scope, id int64, force bool, offlineAfter time.Duration) (string, *deleteError) {
 	var ip, agentID string
 	var err error
 	cond, condArgs := sc.Where("", 2)
@@ -380,14 +383,34 @@ func deleteHostTx(ctx context.Context, tx *sql.Tx, sc scope.Scope, id int64) (st
 	}
 
 	// 最后锁主机行并复查，防止检查后被重新注册/改租户。
+	var agentStatus string
+	var lastSeen, maintenance sql.NullTime
 	err = tx.QueryRowContext(ctx,
-		`SELECT ip, COALESCE(agent_id,'') FROM hosts WHERE id=$1 AND `+cond+` FOR UPDATE`,
-		append([]any{id}, condArgs...)...).Scan(&ip, &agentID)
+		`SELECT ip, COALESCE(agent_id,''), COALESCE(agent_status,''), last_seen, maintenance_until
+		   FROM hosts WHERE id=$1 AND `+cond+` FOR UPDATE`,
+		append([]any{id}, condArgs...)...).Scan(&ip, &agentID, &agentStatus, &lastSeen, &maintenance)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", hostNotFound(err)
 	}
 	if err != nil {
 		return ip, hostInternalErr(err)
+	}
+
+	// 有效在线/维护中的主机默认拒绝删除，必须显式强制删除。
+	// 与列表一致：有 Agent、状态 online 且心跳新鲜才算在线；心跳超时视为离线。
+	protected := maintenance.Valid && maintenance.Time.After(time.Now())
+	if !protected && strings.EqualFold(strings.TrimSpace(agentStatus), "online") {
+		// 无 agent_id 的 online 视为在线（与列表展示一致）；有 agent_id 时要求心跳新鲜。
+		if agentID == "" || (lastSeen.Valid && lastSeen.Time.After(time.Now().Add(-offlineAfter))) {
+			protected = true
+		}
+	}
+	if protected && !force {
+		return ip, &deleteError{
+			status: http.StatusConflict,
+			msg:    "主机当前在线或处于维护中，普通删除已拒绝；请确认后使用「强制删除」",
+			err:    fmt.Errorf("主机在线或维护中，受删除保护（agent_status=%s）", agentStatus),
+		}
 	}
 
 	var activeTasks, activeCommands int
