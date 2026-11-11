@@ -218,14 +218,16 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 				} `json:"data"`
 			}
 			_ = json.Unmarshal(call(HostDeletableIDs(sc), "/api/hosts/deletable-ids", v), &del)
+			// 可删除 = 列表结果 - 有未完成任务的主机 - 有效在线/维护中的主机。
 			wantDel := []int64{}
 			for _, id := range listIDs {
-				if id != busy {
-					wantDel = append(wantDel, id)
+				if id == busy || id == online {
+					continue
 				}
+				wantDel = append(wantDel, id)
 			}
 			if fmt.Sprint(sortedIDs(del.Data.IDs)) != fmt.Sprint(sortedIDs(wantDel)) {
-				t.Fatalf("按筛选全选与列表不一致: deletable %v, 列表减去忙碌主机 %v",
+				t.Fatalf("按筛选全选与列表不一致: deletable %v, 列表减去忙碌/在线主机 %v",
 					sortedIDs(del.Data.IDs), sortedIDs(wantDel))
 			}
 		})

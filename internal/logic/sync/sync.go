@@ -350,6 +350,7 @@ const maxCleanupBatches = 20
 func missingHostCond(syncedAtParam string) string {
 	return `
 		h.source='consul'
+		AND COALESCE(h.agent_status,'') <> 'online'
 		AND (h.agent_id IS NULL OR h.agent_id='')
 		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
 		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
@@ -470,6 +471,7 @@ func missingMgrHostCond(groupParam, syncedAtParam string) string {
 	return `
 		h.source='consul_mgr'
 		AND h.source_group=` + groupParam + `
+		AND COALESCE(h.agent_status,'') <> 'online'
 		AND (h.agent_id IS NULL OR h.agent_id='')
 		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
 		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
@@ -574,6 +576,7 @@ func missingMgrServiceHostCond(groupParam, serviceParam, syncedAtParam string) s
 		h.source='consul_mgr'
 		AND h.source_group=` + groupParam + `
 		AND h.source_services @> ARRAY[` + serviceParam + `]::text[]
+		AND COALESCE(h.agent_status,'') <> 'online'
 		AND (h.agent_id IS NULL OR h.agent_id='')
 		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
 		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)

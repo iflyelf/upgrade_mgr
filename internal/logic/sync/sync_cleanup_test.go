@@ -67,6 +67,10 @@ func TestCleanupMissingHosts(t *testing.T) {
 	manualID := insertHost("manual", "manual", "", &old)
 	taskHostID := insertHost("task", "consul", "", &old)
 	commandHostID := insertHost("command", "consul", "", &old)
+	onlineID := insertHost("online", "consul", "", &old)
+	if _, err := db.Exec(`UPDATE hosts SET agent_status='online' WHERE id=$1`, onlineID); err != nil {
+		t.Fatalf("标记在线主机失败: %v", err)
+	}
 
 	// 有 agents 记录（即使 hosts.agent_id 为空）也应保留。
 	if _, err := db.Exec(`
@@ -137,6 +141,7 @@ func TestCleanupMissingHosts(t *testing.T) {
 	check(manualID, 1, "手工主机")
 	check(taskHostID, 1, "有未完成任务的主机")
 	check(commandHostID, 1, "有未完成指令的主机")
+	check(onlineID, 1, "在线主机")
 }
 
 // TestCleanupMissingMgrHosts 验证 consul_mgr 清理只影响当前服务组。
@@ -183,6 +188,10 @@ func TestCleanupMissingMgrHosts(t *testing.T) {
 	g1Fresh := insert("g1-fresh", "consul_mgr", groupStr, now)
 	g2Stale := insert("g2-stale", "consul_mgr", groupStr+"-other", old)
 	manual := insert("manual", "manual", "", old)
+	g1Online := insert("g1-online", "consul_mgr", groupStr, old)
+	if _, err := db.Exec(`UPDATE hosts SET agent_status='online' WHERE id=$1`, g1Online); err != nil {
+		t.Fatalf("标记在线主机失败: %v", err)
+	}
 	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip LIKE $1`, prefix+"%") })
 
 	deleted, err := syncer.cleanupMissingMgrHosts(ctx, groupID, now)
@@ -200,7 +209,7 @@ func TestCleanupMissingMgrHosts(t *testing.T) {
 	if exists(g1Stale) {
 		t.Fatal("当前服务组过期主机应被删除")
 	}
-	for name, id := range map[string]int64{"fresh": g1Fresh, "other-group": g2Stale, "manual": manual} {
+	for name, id := range map[string]int64{"fresh": g1Fresh, "other-group": g2Stale, "manual": manual, "online": g1Online} {
 		if !exists(id) {
 			t.Fatalf("%s 主机不应被清理", name)
 		}
@@ -252,6 +261,10 @@ func TestCleanupMissingMgrServiceHosts(t *testing.T) {
 	otherSvc := insert("other-svc", groupStr, []string{"snmp_exporter"}, old)
 	otherGroup := insert("other-group", groupStr+"-other", []string{"selfnode_exporter"}, old)
 	legacy := insert("legacy", groupStr, []string{}, old)
+	svcOnline := insert("svc-online", groupStr, []string{"selfnode_exporter"}, old)
+	if _, err := db.Exec(`UPDATE hosts SET agent_status='online' WHERE id=$1`, svcOnline); err != nil {
+		t.Fatalf("标记在线主机失败: %v", err)
+	}
 
 	deleted, err := syncer.cleanupMissingMgrServiceHosts(ctx, groupID, "selfnode_exporter", now)
 	if err != nil {
@@ -270,7 +283,7 @@ func TestCleanupMissingMgrServiceHosts(t *testing.T) {
 	}
 	for name, id := range map[string]int64{
 		"fresh": svcFresh, "other-service": otherSvc,
-		"other-group": otherGroup, "legacy-no-services": legacy,
+		"other-group": otherGroup, "legacy-no-services": legacy, "online": svcOnline,
 	} {
 		if !exists(id) {
 			t.Fatalf("%s 主机不应被清理", name)

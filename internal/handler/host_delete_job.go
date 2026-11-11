@@ -50,20 +50,21 @@ type hostDeleteJob struct {
 	FailedCount     int                 `json:"failed_count"`
 	Failed          []hostDeleteFailure `json:"failed"`
 	CancelRequested bool                `json:"cancel_requested"`
+	Force           bool                `json:"force"`
 	CreatedBy       string              `json:"created_by"`
 	CreatedAt       time.Time           `json:"created_at"`
 	FinishedAt      *time.Time          `json:"finished_at,omitempty"`
 }
 
 const hostDeleteJobColumns = `id, status, total, processed, deleted, failed_count, failed,
-	cancel_requested, created_by, created_at, finished_at`
+	cancel_requested, force, created_by, created_at, finished_at`
 
 func scanHostDeleteJob(row interface{ Scan(...any) error }) (*hostDeleteJob, error) {
 	var j hostDeleteJob
 	var failed []byte
 	var finished sql.NullTime
 	if err := row.Scan(&j.ID, &j.Status, &j.Total, &j.Processed, &j.Deleted, &j.FailedCount,
-		&failed, &j.CancelRequested, &j.CreatedBy, &j.CreatedAt, &finished); err != nil {
+		&failed, &j.CancelRequested, &j.Force, &j.CreatedBy, &j.CreatedAt, &finished); err != nil {
 		return nil, err
 	}
 	j.Failed = []hostDeleteFailure{}
@@ -112,6 +113,16 @@ func getHostDeleteJob(r *http.Request, s *svc.ServiceContext, id int64) (*hostDe
 func HostDeletableIDs(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		whereSQL, args, i := hostListFilter(s, r)
+		force := r.URL.Query().Get("force") == "1"
+		if !force {
+			offline := fmt.Sprintf("'%.0f seconds'", hostOfflineAfter(s).Seconds())
+			whereSQL += ` AND NOT (
+				(h.maintenance_until IS NOT NULL AND h.maintenance_until > NOW())
+				OR (COALESCE(h.agent_status,'')='online'
+				    AND (COALESCE(h.agent_id,'')=''
+				         OR (h.last_seen IS NOT NULL AND h.last_seen >= NOW() - INTERVAL ` + offline + `)))
+			)`
+		}
 		args = append(args, maxHostDeleteJob+1)
 		rows, err := s.DB.QueryContext(r.Context(), `
 			SELECT h.id FROM hosts h`+whereSQL+`
@@ -153,7 +164,8 @@ func HostDeletableIDs(s *svc.ServiceContext) http.HandlerFunc {
 func HostDeleteJobCreate(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			IDs []int64 `json:"ids"`
+			IDs   []int64 `json:"ids"`
+			Force bool    `json:"force"`
 		}
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.Fail(w, http.StatusBadRequest, "请求格式错误")
@@ -174,10 +186,10 @@ func HostDeleteJobCreate(s *svc.ServiceContext) http.HandlerFunc {
 		actorID, username := actorName(r)
 		var id int64
 		err := s.DB.QueryRowContext(r.Context(), `
-			INSERT INTO host_delete_jobs (tenant_id, cross_tenant, created_by, actor_id, actor_ip, ids, total)
-			VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+			INSERT INTO host_delete_jobs (tenant_id, cross_tenant, created_by, actor_id, actor_ip, ids, total, force)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
 			sc.TenantForWrite(), sc.CrossTenant, username, actorID, clientIP(s, r),
-			pq.Array(ids), len(ids)).Scan(&id)
+			pq.Array(ids), len(ids), req.Force).Scan(&id)
 		if err != nil {
 			var pqErr *pq.Error
 			if errors.As(err, &pqErr) && pqErr.Code == "23505" {
@@ -301,18 +313,18 @@ func runHostDeleteJobOnce(ctx context.Context, s *svc.ServiceContext) (bool, err
 
 	var (
 		jobID, tenantID        int64
-		cross, cancel          bool
+		cross, cancel, force   bool
 		createdBy, actorID, ip string
 		ids                    []int64
 		processed              int
 		failedRaw              []byte
 	)
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, tenant_id, cross_tenant, created_by, actor_id, actor_ip, ids, processed, failed, cancel_requested
+		SELECT id, tenant_id, cross_tenant, created_by, actor_id, actor_ip, ids, processed, failed, cancel_requested, force
 		  FROM host_delete_jobs
 		 WHERE status IN ('pending','running')
 		 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(
-		&jobID, &tenantID, &cross, &createdBy, &actorID, &ip, pq.Array(&ids), &processed, &failedRaw, &cancel)
+		&jobID, &tenantID, &cross, &createdBy, &actorID, &ip, pq.Array(&ids), &processed, &failedRaw, &cancel, &force)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -353,7 +365,7 @@ func runHostDeleteJobOnce(ctx context.Context, s *svc.ServiceContext) (bool, err
 		if _, err := tx.ExecContext(ctx, `SAVEPOINT host_del`); err != nil {
 			return false, err
 		}
-		hip, derr := deleteHostTx(ctx, tx, sc, id)
+		hip, derr := deleteHostTx(ctx, tx, sc, id, force, hostOfflineAfter(s))
 		if derr != nil {
 			if ctx.Err() != nil {
 				return false, ctx.Err() // 服务退出：整批回滚，重启后重试本批
