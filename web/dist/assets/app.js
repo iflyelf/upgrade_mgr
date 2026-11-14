@@ -4982,7 +4982,10 @@
       return [
         p.group_name || p.group_id,
         (p.permissions || []).join(', ') || '-',
-        (p.role_ids || []).join(', ') || '-',
+        (p.role_ids || []).map(function (id) {
+          var r = (o.roles || []).filter(function (x) { return String(x.id) === String(id); })[0];
+          return r ? r.name : ('#' + id);
+        }).join(', ') || '-',
         (p.services || []).join(', ') || '-',
         (p.host_groups || []).join(', ') || '不限',
         h('button', {
@@ -5097,19 +5100,48 @@
     var groupEl = h('select', {}, o.groups.map(function (g) {
       return h('option', { value: g.id }, [g.name]);
     }));
-    var permEl = h('input', { value: 'read', placeholder: 'read,write,delete,deploy' }, []);
-    var roleEl = h('input', { placeholder: '角色 ID，逗号分隔（可空）' }, []);
+    // 直接权限：勾选多选，默认 read，避免手填权限字符串出错。
+    var permEls = {};
+    var permBoxes = ROLE_PERMS.map(function (p) {
+      var cb = h('input', { type: 'checkbox', checked: p[0] === 'read' }, []);
+      permEls[p[0]] = cb;
+      return h('label', { class: 'check check-row' }, [cb, h('span', {}, [
+        h('strong', {}, [p[1] + '（' + p[0] + '）']),
+        h('span', { class: 'muted' }, [' — ' + p[2]])
+      ])]);
+    });
+    // 引用角色：按角色名称勾选（可多选），提交时换算成角色 ID。
+    var roles = o.roles || [];
+    var roleEls = {};
+    var roleBoxes = roles.map(function (r) {
+      var cb = h('input', { type: 'checkbox' }, []);
+      roleEls[r.id] = cb;
+      return h('label', { class: 'check check-row' }, [cb, h('span', {}, [
+        h('strong', {}, [r.name + (r.code ? '（' + r.code + '）' : '')]),
+        h('span', { class: 'muted' }, [
+          (r.permissions || []).length ? (r.permissions || []).join(', ') : '无权限'
+        ])
+      ])]);
+    });
     var svcEl = h('input', { value: '*', placeholder: '* 表示组内全部组件' }, []);
     var hgPicker = tagPicker(state.hostGroupOptions || [], '选择或输入 app_code / biz_group 后回车');
     return h('div', { class: 'card' }, [
       h('h3', {}, ['设置授权']),
       h('div', { class: 'grid2' }, [
         field('服务组', groupEl, ''),
-        field('直接权限', permEl, '逗号分隔')
-      ]),
-      h('div', { class: 'grid2' }, [
-        field('引用角色', roleEl, '角色 ID，可空'),
         field('授权服务', svcEl, '* 或组件名，逗号分隔')
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['直接权限']),
+        h('div', { class: 'check-group' }, permBoxes),
+        hint('勾选需要的权限（可多选）；与引用角色的权限取并集。')
+      ]),
+      h('div', { class: 'field' }, [
+        h('label', {}, ['引用角色']),
+        roles.length
+          ? h('div', { class: 'check-group scroll' }, roleBoxes)
+          : h('div', { class: 'muted' }, ['还没有角色，可先到「角色管理」创建后再引用。']),
+        hint('勾选要引用的角色（可多选，也可只选一个）；角色权限与直接权限取并集。')
       ]),
       field('主机分组范围', hgPicker.el, '限定可操作的主机（按 app_code / biz_group 匹配；留空表示不限）。超出范围的主机会拒绝创建任务。'),
       h('div', { class: 'toolbar' }, [
@@ -5118,13 +5150,19 @@
             var split = function (v) {
               return v.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
             };
+            var perms = Object.keys(permEls).filter(function (k) { return permEls[k].checked; });
+            var roleIDs = roles.filter(function (r) { return roleEls[r.id].checked; })
+              .map(function (r) { return r.id; });
+            if (!perms.length && !roleIDs.length) {
+              alert('请至少勾选一个直接权限，或引用一个角色');
+              return;
+            }
             api('/api/teams/' + teamID + '/permissions', {
               method: 'PUT',
               body: JSON.stringify({
                 group_id: parseInt(groupEl.value, 10),
-                permissions: split(permEl.value),
-                role_ids: split(roleEl.value).map(function (x) { return parseInt(x, 10); })
-                  .filter(function (x) { return !isNaN(x); }),
+                permissions: perms,
+                role_ids: roleIDs,
                 services: split(svcEl.value),
                 host_groups: hgPicker.getValues()
               })
