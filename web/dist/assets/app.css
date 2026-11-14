@@ -211,6 +211,15 @@ pre.code-inline {
   padding-right: 14px; overflow: visible;
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
+/* 超长代码默认折叠一部分：底部渐隐 + 「展开/收起」，不是截断首行 */
+.code-inline-wrap { position: relative; }
+.code-inline-wrap.collapsed pre.code-inline { max-height: 180px; overflow: hidden; }
+.code-inline-wrap.collapsed::after {
+  content: ''; position: absolute; left: 1px; right: 1px; bottom: 1px; height: 64px;
+  background: linear-gradient(to bottom, transparent, var(--panel-bg) 78%);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  pointer-events: none;
+}
 pre.code {
   margin: 0; padding: 14px; padding-right: 68px; overflow: auto;
   background: var(--panel-bg); border: 1px solid var(--border-color);
