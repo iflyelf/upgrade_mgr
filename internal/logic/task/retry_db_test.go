@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/lib/pq"
+	pq "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
@@ -96,9 +96,12 @@ func TestRetryFailedAndStuckHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		// 先删引用主机/任务的子表，再删任务与主机：commands 不会随任务级联删除，
+		// 顺序不对会让 hosts 删除因外键失败而静默留下测试数据。
+		db.Exec(`DELETE FROM commands WHERE task_id=$1`, taskID)
 		db.Exec(`DELETE FROM upgrade_tasks WHERE id=$1`, taskID)
 		db.Exec(`DELETE FROM components WHERE id=$1`, compID)
-		db.Exec(`DELETE FROM hosts WHERE id = ANY($1)`, hostIDs[:])
+		db.Exec(`DELETE FROM hosts WHERE id = ANY($1)`, pq.Array(hostIDs[:]))
 	})
 
 	svc := NewService(db, nil, nil, nil)
