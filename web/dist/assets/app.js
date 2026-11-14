@@ -265,7 +265,10 @@
         class: 'btn ghost small', type: 'button',
         onclick: function () {
           var next = !state.codeBlockOpen[key];
-          state.codeBlockOpen[key] = next;
+          // 只记录「已展开」；收起即回到默认折叠状态，避免 localStorage 长期膨胀。
+          if (next) state.codeBlockOpen[key] = true;
+          else delete state.codeBlockOpen[key];
+          saveCodeBlockOpen();
           wrap.classList.toggle('collapsed', !next);
           toggle.textContent = next ? collapseLabel : expandLabel;
           toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
@@ -293,12 +296,35 @@
     return body.split('\n').length > 10 || body.length > 800;
   }
 
-  // codeBlockKey 为代码块生成稳定键，页面重绘后仍能保持展开/收起状态。
+  // codeBlockKey 为代码块生成稳定键：优先用标题（如「主机接入命令」「自动化令牌」），
+  // 这样重新生成的命令仍沿用展开状态；无标题时用首行兜底。
   function codeBlockKey(title, body) {
-    var h = 5381;
-    for (var i = 0; i < body.length; i++) h = ((h << 5) + h + body.charCodeAt(i)) | 0;
-    return (title || '') + ':' + body.length + ':' + h;
+    var t = String(title || '').trim();
+    if (t) return t;
+    var first = String(body || '').split('\n')[0].slice(0, 60);
+    return 'code:' + first;
   }
+
+  // 代码块展开状态持久化：只保存已展开的标题，刷新后继续展开。
+  var CB_OPEN_KEY = 'upgrade_mgr_code_block_open_v1';
+  function loadCodeBlockOpen() {
+    try {
+      var p = JSON.parse(localStorage.getItem(CB_OPEN_KEY) || '{}') || {};
+      Object.keys(p).forEach(function (k) {
+        if (p[k]) state.codeBlockOpen[k] = true;
+      });
+    } catch (e) {}
+  }
+  function saveCodeBlockOpen() {
+    try {
+      var out = {};
+      Object.keys(state.codeBlockOpen).forEach(function (k) {
+        if (state.codeBlockOpen[k]) out[k] = true;
+      });
+      localStorage.setItem(CB_OPEN_KEY, JSON.stringify(out));
+    } catch (e) {}
+  }
+  loadCodeBlockOpen();
   // copyTextBtn 通用复制按钮：复制完整文本，按钮文字短暂提示结果。
   function copyTextBtn(text, label) {
     var l = label || (state.lang === 'en' ? 'Copy' : '复制');
