@@ -247,18 +247,20 @@
       done(fallbackCopy(text));
     }
   }
-  // codeBlock 把长代码/命令收进内容查看弹窗，页面只保留首行预览与查看/复制按钮，
-  // 避免整段命令把卡片撑高；完整内容可在弹窗中切换自动换行与字号。
+  // codeBlock 完整展示代码/命令：自动换行、自适应宽度，不截断内容。
+  // 超长内容在页面内纵向滚动；需要更大阅读区域时可点「弹窗查看」。
   function codeBlock(text, title) {
-    var first = String(text || '').split('\n')[0];
-    if (first.length > 96) first = first.slice(0, 96) + '…';
-    return h('div', { class: 'code-actions' }, [
-      h('code', { class: 'code-preview', title: first }, [first || '（空）']),
-      h('button', {
-        class: 'btn ghost small', type: 'button',
-        onclick: function () { openContentViewer(title || '代码', text); }
-      }, ['查看']),
-      copyTextBtn(text)
+    var body = String(text || '');
+    return h('div', { class: 'code-block' }, [
+      h('div', { class: 'code-actions' }, [
+        h('span', { class: 'code-actions-title' }, [title || '代码']),
+        h('button', {
+          class: 'btn ghost small', type: 'button',
+          onclick: function () { openContentViewer(title || '代码', body); }
+        }, ['弹窗查看']),
+        copyTextBtn(body)
+      ]),
+      h('pre', { class: 'code code-inline' }, [body || '（空）'])
     ]);
   }
   // copyTextBtn 通用复制按钮：复制完整文本，按钮文字短暂提示结果。
@@ -5750,7 +5752,9 @@
     '直接权限': 'Direct permissions', '引用角色': 'Referenced roles',
     '查看详情': 'View details', '查看参数': 'View parameters',
     '查看结果': 'View result', '查看命令脚本': 'View command script',
-    '查看': 'View', '自动换行': 'Wrap lines', '字号': 'Font size',
+    '查看': 'View', '弹窗查看': 'View in dialog', '自动换行': 'Wrap lines', '字号': 'Font size',
+    '代码': 'Code', '主机接入命令': 'Host enrollment command',
+    '自动化令牌': 'Automation token', '安装命令示例': 'Install command example',
     '新增字段': 'Add field', '保存': 'Save', '取消': 'Cancel', '删除': 'Delete',
     '编辑': 'Edit', '关闭': 'Close', '刷新': 'Refresh', '上传': 'Upload',
     '查询': 'Search', '重置': 'Reset', '上一页': 'Previous', '下一页': 'Next',
