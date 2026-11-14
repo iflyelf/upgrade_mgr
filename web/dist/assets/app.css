@@ -200,7 +200,14 @@ details.help summary { cursor: pointer; font-weight: 600; }
   color: var(--primary-color);
 }
 .guide-step ul { margin: 8px 0 0 30px; padding: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
-.code-wrap { position: relative; margin-top: 10px; }
+/* 代码/命令：页面只显示首行预览，完整内容在内容查看弹窗中展示 */
+.code-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.code-preview {
+  flex: 1 1 220px; min-width: 0; box-sizing: border-box;
+  padding: 6px 8px; border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); background: var(--panel-bg);
+  font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 pre.code {
   margin: 0; padding: 14px; padding-right: 68px; overflow: auto;
   background: var(--panel-bg); border: 1px solid var(--border-color);
@@ -208,7 +215,6 @@ pre.code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px; line-height: 1.7;
 }
-.copy-btn { position: absolute; right: 8px; top: 8px; z-index: 1; }
 .preview {
   margin: 6px 0 14px; padding: 12px 14px;
   border: 1px solid var(--border-color); border-radius: var(--radius-sm);
@@ -262,8 +268,17 @@ pre.code {
   font-size: 12.5px; line-height: 1.7;
 }
 /* 非代码文本（错误信息等）用正文字体，行高更易读 */
-.content-viewer-text { font-family: inherit; font-size: 13.5px; line-height: 1.75; }
+.content-viewer-text { font-family: inherit; line-height: 1.75; }
 .content-viewer-meta { font-size: 12px; white-space: nowrap; }
+/* 工具栏：自动换行开关与字号选择 */
+.content-viewer-tools { align-items: center; gap: 8px; }
+.content-viewer-wrap { align-items: center; white-space: nowrap; font-size: 12px; }
+.content-viewer-font-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+.content-viewer-font { min-height: 30px; padding: 2px 6px; font-size: 12px; }
+/* 关闭自动换行：保持原始对齐，长行横向滚动 */
+.content-viewer-pre.nowrap {
+  white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto;
+}
 .log-open-btn { white-space: nowrap; }
 .tag.status-running { background: color-mix(in srgb, var(--primary-color) 22%, transparent); }
 .tag.status-success { background: color-mix(in srgb, #22c55e 20%, transparent); }
@@ -633,9 +648,8 @@ button, .tab, .nav-link, .nav-menu-item, .theme-btn, .user-chip {
   h2 { font-size: 20px; }
   h3 { font-size: 16px; }
   .detail-summary { grid-template-columns: 1fr; }
-  /* 长命令优先换行而不是横向滚动；复制按钮独占一行，避免遮挡内容 */
+  /* 长命令优先换行而不是横向滚动 */
   pre.code { padding-right: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .copy-btn { position: static; display: block; margin: 0 0 6px auto; }
 }
 
 /* ============================================================

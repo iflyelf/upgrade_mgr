@@ -120,7 +120,7 @@
     hostImport: null, hostBatchEdit: null,
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
-    contentViewer: null, contentViewerScroll: 0,
+    contentViewer: null, contentViewerScroll: 0, contentViewerWrap: true, contentViewerFont: 12.5,
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
     // 认证方式：casdoor 时登录页只展示 SSO 按钮（authLoginURL 由 /api/auth/config 提供）。
@@ -247,11 +247,19 @@
       done(fallbackCopy(text));
     }
   }
-  function codeBlock(text) {
-    var label = copyBaseLabel();
-    var btn = h('button', { type: 'button', class: 'btn ghost small copy-btn', 'aria-label': label }, [label]);
-    btn.onclick = function () { copyText(text, btn); };
-    return h('div', { class: 'code-wrap' }, [btn, h('pre', { class: 'code' }, [text])]);
+  // codeBlock 把长代码/命令收进内容查看弹窗，页面只保留首行预览与查看/复制按钮，
+  // 避免整段命令把卡片撑高；完整内容可在弹窗中切换自动换行与字号。
+  function codeBlock(text, title) {
+    var first = String(text || '').split('\n')[0];
+    if (first.length > 96) first = first.slice(0, 96) + '…';
+    return h('div', { class: 'code-actions' }, [
+      h('code', { class: 'code-preview', title: first }, [first || '（空）']),
+      h('button', {
+        class: 'btn ghost small', type: 'button',
+        onclick: function () { openContentViewer(title || '代码', text); }
+      }, ['查看']),
+      copyTextBtn(text)
+    ]);
   }
   // copyTextBtn 通用复制按钮：复制完整文本，按钮文字短暂提示结果。
   function copyTextBtn(text, label) {
@@ -265,6 +273,26 @@
     };
     return btn;
   }
+
+  // 内容查看弹窗的显示偏好（自动换行 / 字号）保存在浏览器本地，
+  // 下次打开日志、脚本、JSON 时沿用。
+  var CV_PREFS_KEY = 'upgrade_mgr_content_viewer_prefs_v1';
+  function loadContentViewerPrefs() {
+    try {
+      var p = JSON.parse(localStorage.getItem(CV_PREFS_KEY) || '{}') || {};
+      if (typeof p.wrap === 'boolean') state.contentViewerWrap = p.wrap;
+      var f = parseFloat(p.font);
+      if (isFinite(f) && f >= 9 && f <= 24) state.contentViewerFont = f;
+    } catch (e) {}
+  }
+  function saveContentViewerPrefs() {
+    try {
+      localStorage.setItem(CV_PREFS_KEY, JSON.stringify({
+        wrap: !!state.contentViewerWrap, font: state.contentViewerFont
+      }));
+    } catch (e) {}
+  }
+  loadContentViewerPrefs();
   function isAdmin() { return !!(state.user && state.user.IsAdmin); }
   function isSuperAdmin() {
     return !!(state.user && (state.user.Roles || []).indexOf('superadmin') >= 0);
@@ -1261,7 +1289,7 @@
       var code = pick(st.code);
       return step(
         st.no, pick(st.title), st.view, pickList(st.lines),
-        code && code.trim() ? codeBlock(code) : null,
+        code && code.trim() ? codeBlock(code, '快速上手 · ' + (pick(st.title) || '示例命令')) : null,
         pick(st.jump)
       );
     });
@@ -2470,7 +2498,7 @@
       e && e.cmd ? h('div', {}, [
         e.base ? hint('安装命令使用地址：' + e.base + '。可在“设置”页修改 server.external_url，保存后立即生效；Nginx 域名场景填 https://your-domain。') : null,
         hint(((e.os === 'windows') ? '在目标机器用“管理员 PowerShell”执行（令牌一次性使用，' : '在目标机器用 root 执行（令牌一次性使用，') + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）：'),
-        codeBlock(e.cmd),
+        codeBlock(e.cmd, '主机接入命令'),
         e.os === 'windows' ? hint('Windows 安装使用 PowerShell + System.Net.WebClient，兼容 Server 2008 R2 自带的 PowerShell 2.0。cmd 可先执行 powershell -NoProfile -ExecutionPolicy Bypass 再粘贴命令。服务以 LocalSystem 运行，重启后自动恢复。') : null,
         e.force ? hint('当前为强制重新注册命令（含 --force）：会覆盖目标机现有 Agent 身份，旧 Agent 记录将不再被该主机使用。') : null,
         hint('执行完成后点上方“搜索”刷新列表。如果 IP 显示成了代理地址，检查服务端 server.trust_proxy 配置。'),
@@ -2513,9 +2541,9 @@
 
     var createdBlock = created ? h('div', { class: 'field' }, [
       hint('自动化令牌已生成（仅显示一次，请立即复制到自动化平台）：'),
-      codeBlock(created.token),
+      codeBlock(created.token, '自动化令牌'),
       created.install_command ? hint('安装命令示例（token 已嵌入）：') : null,
-      created.install_command ? codeBlock(created.install_command) : null,
+      created.install_command ? codeBlock(created.install_command, '安装命令示例') : null,
       created.expires_at ? hint('到期时间：' + fmtTime(created.expires_at)) : hint('永久有效：不会自动过期，请妥善保管并定期轮换。'),
       h('button', { type: 'button', class: 'btn ghost small', onclick: function () { state.automationCreated = null; render(); } }, ['关闭提示'])
     ]) : null;
@@ -5722,6 +5750,7 @@
     '直接权限': 'Direct permissions', '引用角色': 'Referenced roles',
     '查看详情': 'View details', '查看参数': 'View parameters',
     '查看结果': 'View result', '查看命令脚本': 'View command script',
+    '查看': 'View', '自动换行': 'Wrap lines', '字号': 'Font size',
     '新增字段': 'Add field', '保存': 'Save', '取消': 'Cancel', '删除': 'Delete',
     '编辑': 'Edit', '关闭': 'Close', '刷新': 'Refresh', '上传': 'Upload',
     '查询': 'Search', '重置': 'Reset', '上一页': 'Previous', '下一页': 'Next',
@@ -6850,9 +6879,39 @@
     var v = state.contentViewer;
     var opts = v.opts || {};
     var text = typeof v.text === 'function' ? (v.text() || '') : (v.text || '');
+    var wrap = state.contentViewerWrap !== false;
+    var font = state.contentViewerFont || 12.5;
     var meta = text
       ? (text.split('\n').length + ' 行 · ' + text.length + ' 字符')
       : '';
+    // 自动换行开关：关闭后长行横向滚动，便于查看对齐的代码/JSON。
+    var wrapEl = h('input', {
+      type: 'checkbox', checked: wrap,
+      onchange: function (e) {
+        state.contentViewerWrap = !!e.target.checked;
+        saveContentViewerPrefs();
+        var pre = document.getElementById('content-viewer-pre');
+        if (pre) pre.classList.toggle('nowrap', !state.contentViewerWrap);
+      }
+    }, []);
+    // 字号选择：立即生效并记住偏好。
+    var fontEl = h('select', {
+      class: 'content-viewer-font', 'aria-label': '字号',
+      onchange: function (e) {
+        var n = parseFloat(e.target.value);
+        if (!isFinite(n)) return;
+        state.contentViewerFont = n;
+        saveContentViewerPrefs();
+        var pre = document.getElementById('content-viewer-pre');
+        if (pre) pre.style.fontSize = n + 'px';
+      }
+    }, [
+      h('option', { value: '11' }, ['11 px']),
+      h('option', { value: '12.5' }, ['12.5 px']),
+      h('option', { value: '14' }, ['14 px']),
+      h('option', { value: '16' }, ['16 px'])
+    ]);
+    fontEl.value = String(font);
     var mask = h('div', {
       id: 'content-viewer-mask',
       class: 'modal-mask content-viewer-mask',
@@ -6861,15 +6920,23 @@
     var modal = h('div', { class: 'modal content-viewer', role: 'dialog', 'aria-modal': 'true' }, [
       h('div', { class: 'modal-head' }, [
         h('h3', {}, [v.title || '详情']),
-        h('div', { class: 'row-actions' }, [
+        h('div', { class: 'row-actions content-viewer-tools' }, [
           meta ? h('span', { class: 'muted content-viewer-meta' }, [meta]) : null,
+          h('label', {
+            class: 'check content-viewer-wrap',
+            title: '关闭后长行横向滚动，便于查看对齐的代码/JSON'
+          }, [wrapEl, ' 自动换行']),
+          h('label', { class: 'content-viewer-font-wrap' }, ['字号 ', fontEl]),
           text ? copyTextBtn(text) : null,
           h('button', { class: 'btn ghost small', type: 'button', onclick: closeContentViewer }, ['关闭'])
         ])
       ]),
       h('pre', {
         id: 'content-viewer-pre',
-        class: 'code content-viewer-pre' + (opts.mono === false ? ' content-viewer-text' : ''),
+        class: 'code content-viewer-pre' +
+          (opts.mono === false ? ' content-viewer-text' : '') +
+          (wrap ? '' : ' nowrap'),
+        style: 'font-size:' + font + 'px',
         // 任务日志会自动刷新，保存滚动位置，避免每次刷新都跳回顶部。
         onscroll: function (e) { state.contentViewerScroll = e.target.scrollTop; }
       }, [text || opts.empty || '暂无内容'])
@@ -8362,7 +8429,7 @@
       h('ol', { class: 'ai-steps' }, (d.snippets || []).map(function (s) {
         return h('li', {}, [
           h('div', { class: 'ai-step-title' }, [s.title]),
-          codeBlock(s.content),
+          codeBlock(s.content, '接入命令 · ' + (s.title || '')),
           s.note ? hint(s.note) : null
         ]);
       })),
