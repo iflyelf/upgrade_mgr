@@ -200,13 +200,16 @@ details.help summary { cursor: pointer; font-weight: 600; }
   color: var(--primary-color);
 }
 .guide-step ul { margin: 8px 0 0 30px; padding: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
-/* 代码/命令：页面只显示首行预览，完整内容在内容查看弹窗中展示 */
-.code-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.code-preview {
-  flex: 1 1 220px; min-width: 0; box-sizing: border-box;
-  padding: 6px 8px; border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm); background: var(--panel-bg);
-  font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+/* 代码/命令：完整展示并自动换行，超长内容纵向滚动；仍可弹窗查看 */
+.code-block { margin-top: 10px; }
+.code-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.code-actions-title {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--text-secondary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+pre.code-inline {
+  padding-right: 14px; overflow: visible;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
 pre.code {
   margin: 0; padding: 14px; padding-right: 68px; overflow: auto;
