@@ -270,7 +270,7 @@ test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {
   await expect(g.locator('.guide-title', { hasText: '主机 接入 Linux Agent' })).toBeVisible();
   await expect(g.locator('.guide-title', { hasText: '组件 选择 Linux 示例' })).toBeVisible();
   await expect(g.getByText('linux-amd64', { exact: false }).first()).toBeVisible();
-  const copyBtn = g.getByRole('button', { name: '复制命令' }).first();
+  const copyBtn = g.getByRole('button', { name: '复制', exact: true }).first();
   await expect(copyBtn).toBeVisible();
   await copyBtn.click();
   await expect(copyBtn).toHaveText('已复制');
