@@ -120,7 +120,7 @@
     hostImport: null, hostBatchEdit: null,
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
-    taskDetailOpenLogs: {},
+    logViewer: null,
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
     // 认证方式：casdoor 时登录页只展示 SSO 按钮（authLoginURL 由 /api/auth/config 提供）。
@@ -1639,10 +1639,12 @@
             (x.agent_update_stage ? ' / ' + stageText(x.agent_update_stage) : '') +
             (x.agent_update_at ? ' · ' + fmtTime(x.agent_update_at) : '')
           ]) : null,
-          x.agent_update_log ? h('details', { class: 'log-details' }, [
-            h('summary', {}, ['自升级日志']),
-            h('pre', { class: 'code log-pre' }, [x.agent_update_log])
-          ]) : null
+          x.agent_update_log ? h('button', {
+            class: 'btn ghost small', type: 'button',
+            onclick: function () {
+              openLogViewer('Agent 自升级日志 · ' + (x.exit_ip || x.ip), x.agent_update_log);
+            }
+          }, ['自升级日志']) : null
         ]),
         h('td', {}, [x.source])
       ];
@@ -6758,6 +6760,55 @@
     return h('div', {}, [uploadForm, table]);
   }
 
+  // taskHostLogText 汇总某台主机在当前页的指令日志与任务主机日志。
+  function taskHostLogText(d, hostId) {
+    if (!d) return '';
+    var text = '';
+    (d.commands || []).forEach(function (c) {
+      if (c.task_host_id === hostId && c.log) text += c.log;
+    });
+    if (!text) {
+      (d.hosts || []).forEach(function (x) {
+        if (x.id === hostId && x.log) text = x.log;
+      });
+    }
+    return text;
+  }
+
+  // openLogViewer 在独立宽弹窗中展示日志。
+  // 表格列太窄时，行内 <pre> 会被挤成细长条、内容难以阅读；
+  // text 可以是字符串或函数（函数用于任务执行日志随自动刷新实时更新）。
+  function openLogViewer(title, text) {
+    state.logViewer = { title: title, text: text };
+    render();
+  }
+  function closeLogViewer() {
+    if (!state.logViewer) return;
+    state.logViewer = null;
+    render();
+  }
+  function logViewerModal() {
+    var v = state.logViewer;
+    var text = typeof v.text === 'function' ? (v.text() || '') : (v.text || '');
+    var mask = h('div', {
+      id: 'log-viewer-mask',
+      class: 'modal-mask log-viewer-mask',
+      onclick: function (e) { if (e.target === mask) closeLogViewer(); }
+    }, []);
+    var modal = h('div', { class: 'modal log-viewer', role: 'dialog', 'aria-modal': 'true' }, [
+      h('div', { class: 'modal-head' }, [
+        h('h3', {}, [v.title || '执行日志']),
+        h('div', { class: 'row-actions' }, [
+          copyLogBtn(text),
+          h('button', { class: 'btn ghost small', type: 'button', onclick: closeLogViewer }, ['关闭'])
+        ])
+      ]),
+      h('pre', { class: 'code log-viewer-pre' }, [text || '暂无日志'])
+    ]);
+    mask.appendChild(modal);
+    return mask;
+  }
+
   function taskDetailModal() {
     var d = state.taskDetail;
     var mask = h('div', {
@@ -6847,27 +6898,16 @@
       function (x) {
         var cmds = cmdByHost[x.id] || [];
         var latest = cmds.length ? cmds[cmds.length - 1] : null;
-        var logText = '';
-        cmds.forEach(function (c) { if (c.log) logText += c.log; });
-        if (!logText) logText = x.log || '';
-        // 命令任务默认展开执行中/失败主机的日志，轮询刷新时用户无需反复点击。
-        var expanded = state.taskDetailOpenLogs[x.id];
-        if (expanded === undefined) {
-          expanded = d.kind === 'command' &&
-            (x.status === 'running' || x.status === 'failed' || x.status === 'timeout');
-        }
+        var logText = taskHostLogText(d, x.id);
+        // 日志放在独立宽弹窗中查看：表格列太窄会把 pre 挤成长条。
         var logEl = logText
-          ? h('details', {
-              class: 'log-details',
-              open: expanded ? 'open' : null,
-              ontoggle: function (e) {
-                state.taskDetailOpenLogs[x.id] = !!e.target.open;
+          ? h('button', {
+              class: 'btn ghost small log-open-btn', type: 'button',
+              onclick: function () {
+                openLogViewer('执行日志 · ' + x.ip + (x.hostname ? ' · ' + x.hostname : ''),
+                  function () { return taskHostLogText(state.taskDetail, x.id); });
               }
-            }, [
-              h('summary', {}, ['查看日志' + (latest ? '（' + cmdStatusText(latest.status) + '）' : '')]),
-              h('div', { class: 'log-toolbar' }, [copyLogBtn(logText)]),
-              h('pre', { class: 'code log-pre' }, [logText])
-            ])
+            }, ['查看日志' + (latest ? '（' + cmdStatusText(latest.status) + '）' : '')])
           : h('span', { class: 'muted' }, ['暂无日志']);
         var ver = (x.from_version || '-') + ' → ' + (x.to_version || '-');
         var stage = stageText(x.stage);
@@ -7372,8 +7412,14 @@
           '任务系统：' + (p.target_os === 'windows' ? 'Windows' : p.target_os === 'linux' ? 'Linux' : '未识别（不按系统过滤）') +
           (p.skipped_os ? '；已跳过 ' + p.skipped_os + ' 台系统不匹配的主机' : '')
         ]),
+        h('div', { class: 'hint' }, [
+          '仅在线主机参与任务' +
+          (p.skipped_offline
+            ? '：已自动跳过 ' + p.skipped_offline + ' 台不在线主机（Agent 心跳超时或未接入）'
+            : '；离线主机自动跳过')
+        ]),
         h('div', { class: 'hint' }, ['每批台数：' + (batches.length ? batches.join(' / ') : '-')]),
-        h('div', { class: 'hint' }, ['示例 IP：' + (sample.join(', ') || '-') + (sample.length >= 20 ? ' …' : '')])
+        h('div', { class: 'hint' }, ['示例 IP（仅在线主机）：' + (sample.join(', ') || '-') + (sample.length >= 20 ? ' …' : '')])
       ]);
     }
 
@@ -7384,11 +7430,11 @@
       h('div', { class: 'grid2' }, [
         field('任务名', nameEl, '留空会自动生成。'),
         f.kind === 'command'
-          ? field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。同时匹配主机注册地址与 Agent 上报的出口 IP（多网卡主机按实际出口网段选）。')
+          ? field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有在线主机。同时匹配主机注册地址与 Agent 上报的出口 IP（多网卡主机按实际出口网段选）。仅在线主机参与任务，离线主机自动跳过。')
           : field('组件', compEl, state.components.length ? '' : '还没有组件，请先到“组件”页创建。')
       ]),
       f.kind === 'command' ? null : h('div', { class: 'grid2' }, [
-        field('目标版本', verEl, '使用制品时从已上传制品中选择；使用 script_url 时可填 latest（仅作记录）。'),        field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有主机。')
+        field('目标版本', verEl, '使用制品时从已上传制品中选择；使用 script_url 时可填 latest（仅作记录）。'),        field('IP 段', ipEl, '支持 10.1.255.24-26、10.1.255.0/24，多个用逗号分隔；留空表示所有在线主机。仅在线主机参与任务，离线主机自动跳过。')
       ]),
       f.kind === 'command' ? null : datalist,
       // 主机字段筛选（如果配置了可选字段）
@@ -8304,6 +8350,10 @@
       var mask = document.getElementById('task-detail-mask');
       if (mask) mask.scrollTop = state.taskDetailScroll || 0;
     }
+    // 日志查看弹窗放在最后：层级高于任务详情，关闭时不影响任务详情滚动位置。
+    if (state.logViewer) {
+      app.appendChild(logViewerModal());
+    }
     // i18n 必须放在弹窗之后：否则弹窗内按钮/标题不会被翻译。
     applyI18n(app);
     // 表格卡片化标签依赖翻译后的表头文字。
@@ -8577,7 +8627,7 @@
     state.taskDetailLoading = false;
     state.taskDetailErr = '';
     state.taskDetailScroll = 0;
-    state.taskDetailOpenLogs = {};
+    state.logViewer = null;
     state.taskDetailSig = '';
     if (!skipRender) render();
   }
@@ -8590,7 +8640,7 @@
     state.taskDetailLoading = true;
     state.taskDetailErr = '';
     state.taskDetailScroll = 0;
-    state.taskDetailOpenLogs = {};
+    state.logViewer = null;
     state.taskDetailSig = '';
     render();
     loadTaskDetail(id, 1);

@@ -253,6 +253,17 @@ pre.code {
 .modal .table-wrap { max-height: 340px; overflow: auto; }
 .log-details summary { cursor: pointer; color: var(--primary-color); font-size: 12px; }
 .log-pre { max-height: 260px; margin-top: 6px; white-space: pre-wrap; word-break: break-word; }
+/* 日志查看弹窗：宽幅等宽字体。表格列内的行内 pre 会被挤成细长条，
+   因此执行日志改为在独立弹窗中查看，保证长行可读且可横向/纵向滚动。 */
+.log-viewer-mask { z-index: 600; }
+.log-viewer { max-width: min(1100px, 100%); }
+.log-viewer-pre {
+  margin: 0; padding: 14px; padding-right: 14px; max-height: 68vh; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; line-height: 1.7;
+}
+.log-open-btn { white-space: nowrap; }
 .tag.status-running { background: color-mix(in srgb, var(--primary-color) 22%, transparent); }
 .tag.status-success { background: color-mix(in srgb, #22c55e 20%, transparent); }
 .tag.status-failed, .tag.status-timeout { background: color-mix(in srgb, var(--err-color) 18%, transparent); }
