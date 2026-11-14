@@ -120,7 +120,7 @@
     hostImport: null, hostBatchEdit: null,
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
-    logViewer: null,
+    contentViewer: null, contentViewerScroll: 0,
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
     // 认证方式：casdoor 时登录页只展示 SSO 按钮（authLoginURL 由 /api/auth/config 提供）。
@@ -253,15 +253,15 @@
     btn.onclick = function () { copyText(text, btn); };
     return h('div', { class: 'code-wrap' }, [btn, h('pre', { class: 'code' }, [text])]);
   }
-  // copyLogBtn 日志复制按钮：复制完整日志文本，按钮文字短暂提示结果。
-  function copyLogBtn(text) {
-    var label = state.lang === 'en' ? 'Copy log' : '复制日志';
-    var btn = h('button', { type: 'button', class: 'btn ghost small', 'aria-label': label }, [label]);
+  // copyTextBtn 通用复制按钮：复制完整文本，按钮文字短暂提示结果。
+  function copyTextBtn(text, label) {
+    var l = label || (state.lang === 'en' ? 'Copy' : '复制');
+    var btn = h('button', { type: 'button', class: 'btn ghost small', 'aria-label': l }, [l]);
     btn.onclick = function (e) {
-      // 按钮放在 details 内，阻止冒泡避免折叠日志。
+      // 按钮可能放在 details 内，阻止冒泡避免折叠内容。
       e.preventDefault();
       e.stopPropagation();
-      copyText(text, btn, label);
+      copyText(text, btn, l);
     };
     return btn;
   }
@@ -1642,7 +1642,7 @@
           x.agent_update_log ? h('button', {
             class: 'btn ghost small', type: 'button',
             onclick: function () {
-              openLogViewer('Agent 自升级日志 · ' + (x.exit_ip || x.ip), x.agent_update_log);
+              openContentViewer('Agent 自升级日志 · ' + (x.exit_ip || x.ip), x.agent_update_log);
             }
           }, ['自升级日志']) : null
         ]),
@@ -2137,7 +2137,7 @@
             h('td', {}, [st.name]),
             h('td', {}, [st.ok ? '✅' : '❌']),
             h('td', {}, [st.latency_ms + ' ms']),
-            h('td', {}, [st.detail || '-'])
+            h('td', {}, [h('div', { class: 'cell-wrap' }, [st.detail || '-'])])
           ]);
         }))
       ])]),
@@ -3544,7 +3544,9 @@
     return h('div', { class: 'card' }, [
       h('h3', {}, ['用户详情：' + (u.display_name || u.username)]),
       hint('扩展字段来自 FlyIAM 同步到 Casdoor properties 的值，本系统只读展示，不回写。'),
-      simpleTable(['字段', '值'], rows, function (r) { return [r[0], r[1]]; }),
+      simpleTable(['字段', '值'], rows, function (r) {
+        return [r[0], h('div', { class: 'cell-wrap' }, [r[1]])];
+      }),
       h('div', { class: 'toolbar' }, [
         h('button', { class: 'btn ghost', onclick: function () { state.orgUserDetail = null; render(); } }, ['关闭'])
       ])
@@ -4396,7 +4398,7 @@
               k.note ? h('div', { class: 'muted' }, [k.note]) : null
             ]),
             String(k.count),
-            h('div', { class: 'muted' }, [(k.samples || []).join(' / ') || '-']),
+            h('div', { class: 'muted cell-wrap' }, [(k.samples || []).join(' / ') || '-']),
             k.mapped ? h('span', { class: 'muted' }, [k.mapped_to || '']) : ''
           ];
         });
@@ -5417,7 +5419,13 @@
       var details = '';
       try { details = JSON.stringify(x.details || {}); } catch (e) { details = ''; }
       if (details === '{}') details = '';
+      var errText = x.error_message || '';
+      var full = [];
+      if (errText) full.push('错误信息：\n' + errText);
+      if (details) full.push('详情：\n' + details);
+      var fullText = full.join('\n\n');
       var shortDetails = details.length > 120 ? details.slice(0, 120) + '…' : details;
+      var shortErr = errText.length > 80 ? errText.slice(0, 80) + '…' : errText;
       return [
         fmtTime(x.created_at),
         x.username || '-',
@@ -5428,9 +5436,16 @@
           class: 'tag ' + (x.status === 'success' ? 'status-success' : 'status-failed')
         }, [x.status === 'success' ? '成功' : '失败']),
         x.ip_address || '-',
-        x.error_message || '-',
-        shortDetails
-          ? h('span', { class: 'muted', title: details }, [shortDetails])
+        shortErr ? h('span', { class: 'muted cell-wrap', title: errText }, [shortErr]) : '-',
+        // 详情/错误可能很长：窄屏没有 hover，统一放进弹窗查看。
+        fullText
+          ? h('button', {
+              class: 'btn ghost small', type: 'button', title: shortDetails || errText,
+              onclick: function () {
+                openContentViewer('审计详情 · ' + (x.action || '') + ' · ' + fmtTime(x.created_at),
+                  fullText, { mono: details !== '' });
+              }
+            }, ['查看详情'])
           : '-'
       ];
     });
@@ -5704,6 +5719,9 @@
     '新增团队': 'Add team', '新增角色': 'Add role', '新增服务组': 'Add service group',
     '编辑角色': 'Edit role', '编辑服务组': 'Edit service group', '被引用': 'Referenced by',
     '权限': 'Permissions', '只读': 'Read', '写入': 'Write', '部署': 'Deploy',
+    '直接权限': 'Direct permissions', '引用角色': 'Referenced roles',
+    '查看详情': 'View details', '查看参数': 'View parameters',
+    '查看结果': 'View result', '查看命令脚本': 'View command script',
     '新增字段': 'Add field', '保存': 'Save', '取消': 'Cancel', '删除': 'Delete',
     '编辑': 'Edit', '关闭': 'Close', '刷新': 'Refresh', '上传': 'Upload',
     '查询': 'Search', '重置': 'Reset', '上一页': 'Previous', '下一页': 'Next',
@@ -6813,35 +6831,48 @@
     return text;
   }
 
-  // openLogViewer 在独立宽弹窗中展示日志。
-  // 表格列太窄时，行内 <pre> 会被挤成细长条、内容难以阅读；
+  // openContentViewer 在独立宽弹窗中展示长文本（日志、脚本、JSON 详情等）。
+  // 表格列/窄容器内的行内 <pre> 会被挤成细长条、内容难以阅读，因此统一改为弹窗。
   // text 可以是字符串或函数（函数用于任务执行日志随自动刷新实时更新）。
-  function openLogViewer(title, text) {
-    state.logViewer = { title: title, text: text };
+  // opts.mono=false 时用普通字体（适合错误信息等非代码文本）。
+  function openContentViewer(title, text, opts) {
+    state.contentViewer = { title: title, text: text, opts: opts || {} };
+    state.contentViewerScroll = 0;
     render();
   }
-  function closeLogViewer() {
-    if (!state.logViewer) return;
-    state.logViewer = null;
+  function closeContentViewer() {
+    if (!state.contentViewer) return;
+    state.contentViewer = null;
+    state.contentViewerScroll = 0;
     render();
   }
-  function logViewerModal() {
-    var v = state.logViewer;
+  function contentViewerModal() {
+    var v = state.contentViewer;
+    var opts = v.opts || {};
     var text = typeof v.text === 'function' ? (v.text() || '') : (v.text || '');
+    var meta = text
+      ? (text.split('\n').length + ' 行 · ' + text.length + ' 字符')
+      : '';
     var mask = h('div', {
-      id: 'log-viewer-mask',
-      class: 'modal-mask log-viewer-mask',
-      onclick: function (e) { if (e.target === mask) closeLogViewer(); }
+      id: 'content-viewer-mask',
+      class: 'modal-mask content-viewer-mask',
+      onclick: function (e) { if (e.target === mask) closeContentViewer(); }
     }, []);
-    var modal = h('div', { class: 'modal log-viewer', role: 'dialog', 'aria-modal': 'true' }, [
+    var modal = h('div', { class: 'modal content-viewer', role: 'dialog', 'aria-modal': 'true' }, [
       h('div', { class: 'modal-head' }, [
-        h('h3', {}, [v.title || '执行日志']),
+        h('h3', {}, [v.title || '详情']),
         h('div', { class: 'row-actions' }, [
-          copyLogBtn(text),
-          h('button', { class: 'btn ghost small', type: 'button', onclick: closeLogViewer }, ['关闭'])
+          meta ? h('span', { class: 'muted content-viewer-meta' }, [meta]) : null,
+          text ? copyTextBtn(text) : null,
+          h('button', { class: 'btn ghost small', type: 'button', onclick: closeContentViewer }, ['关闭'])
         ])
       ]),
-      h('pre', { class: 'code log-viewer-pre' }, [text || '暂无日志'])
+      h('pre', {
+        id: 'content-viewer-pre',
+        class: 'code content-viewer-pre' + (opts.mono === false ? ' content-viewer-text' : ''),
+        // 任务日志会自动刷新，保存滚动位置，避免每次刷新都跳回顶部。
+        onscroll: function (e) { state.contentViewerScroll = e.target.scrollTop; }
+      }, [text || opts.empty || '暂无内容'])
     ]);
     mask.appendChild(modal);
     return mask;
@@ -6900,10 +6931,15 @@
       h('div', { class: 'detail-stat' }, ['创建时间: ', fmtTime(d.created_at)])
     ]));
     if (d.kind === 'command' && d.command && d.command.script) {
-      modal.appendChild(h('details', { class: 'log-details' }, [
-        h('summary', {}, ['查看命令脚本']),
-        h('div', { class: 'log-toolbar' }, [copyLogBtn(d.command.script)]),
-        h('pre', { class: 'code log-pre' }, [d.command.script])
+      // 命令脚本可能很长：与执行日志一致，改为独立宽弹窗查看，避免撑高任务详情。
+      modal.appendChild(h('div', { class: 'toolbar' }, [
+        h('button', {
+          class: 'btn ghost small', type: 'button',
+          onclick: function () {
+            openContentViewer('命令脚本 · 任务 #' + d.id, d.command.script);
+          }
+        }, ['查看命令脚本']),
+        copyTextBtn(d.command.script)
       ]));
     }
     modal.appendChild(h('div', { class: 'progress', title: '完成 ' + done + ' / ' + total }, [
@@ -6942,7 +6978,7 @@
           ? h('button', {
               class: 'btn ghost small log-open-btn', type: 'button',
               onclick: function () {
-                openLogViewer('执行日志 · ' + x.ip + (x.hostname ? ' · ' + x.hostname : ''),
+                openContentViewer('执行日志 · ' + x.ip + (x.hostname ? ' · ' + x.hostname : ''),
                   function () { return taskHostLogText(state.taskDetail, x.id); });
               }
             }, ['查看日志' + (latest ? '（' + cmdStatusText(latest.status) + '）' : '')])
@@ -8025,6 +8061,23 @@
   }
 
   // ========== AI 助手独立页面 ==========
+  // aiStepResult 工具调用结果：短结果内联，长结果放入内容查看弹窗，
+  // 避免大段 JSON/日志把聊天气泡撑得很高，窄屏下也便于阅读。
+  function aiStepResult(s) {
+    if (s.error) return h('span', { class: 'err' }, ['失败：' + s.error]);
+    if (s.pending) return '已生成待确认操作';
+    var text = s.result || '';
+    if (!text) return h('span', { class: 'muted' }, ['完成']);
+    if (text.length <= 200) return h('span', { class: 'muted' }, [text]);
+    return h('span', {}, [
+      h('span', { class: 'muted' }, [text.slice(0, 200) + '… ']),
+      h('button', {
+        class: 'btn ghost small', type: 'button',
+        onclick: function () { openContentViewer('工具结果 · ' + s.tool, text); }
+      }, ['查看结果'])
+    ]);
+  }
+
   function aiAssistantView() {
     var d = state.ai;
     if (!d) return h('div', { class: 'card' }, [h('h2', {}, ['AI 助手']), hint('加载中…')]);
@@ -8051,9 +8104,7 @@
         var steps = (m.steps || []).length ? h('details', { class: 'ai-chat-steps' }, [
           h('summary', {}, ['工具调用 ' + m.steps.length + ' 次']),
           h('ul', {}, m.steps.map(function (s) {
-            return h('li', {}, [h('code', {}, [s.tool]), ' ',
-              s.error ? h('span', { class: 'err' }, ['失败：' + s.error])
-                : (s.pending ? '已生成待确认操作' : h('span', { class: 'muted' }, [s.result || '完成']))]);
+            return h('li', {}, [h('code', {}, [s.tool]), ' ', aiStepResult(s)]);
           }))
         ]) : null;
         return h('div', { class: 'ai-msg ' + (m.role === 'user' ? 'user' : 'bot') }, [
@@ -8070,7 +8121,15 @@
     ].concat(pending.map(function (a) {
         return h('div', { class: 'ai-notice warn' }, [
           h('div', { class: 'ai-notice-title' }, [a.title || a.tool]),
-          h('pre', { class: 'code' }, [JSON.stringify(a.args || {}, null, 2)]),
+          h('div', { class: 'toolbar' }, [
+            h('button', {
+              class: 'btn ghost small', type: 'button',
+              onclick: function () {
+                openContentViewer('待确认操作参数 · ' + (a.title || a.tool),
+                  JSON.stringify(a.args || {}, null, 2));
+              }
+            }, ['查看参数'])
+          ]),
           a.expires_at ? hint('有效期至 ' + fmtTime(a.expires_at) + '，过期需重新生成。') : null,
           h('div', { class: 'toolbar' }, [
             h('button', { class: 'btn small', onclick: function () { executeAIAction(a); } }, ['确认执行']),
@@ -8388,9 +8447,11 @@
       var mask = document.getElementById('task-detail-mask');
       if (mask) mask.scrollTop = state.taskDetailScroll || 0;
     }
-    // 日志查看弹窗放在最后：层级高于任务详情，关闭时不影响任务详情滚动位置。
-    if (state.logViewer) {
-      app.appendChild(logViewerModal());
+    // 内容查看弹窗放在最后：层级高于任务详情，关闭时不影响任务详情滚动位置。
+    if (state.contentViewer) {
+      app.appendChild(contentViewerModal());
+      var cvPre = document.getElementById('content-viewer-pre');
+      if (cvPre) cvPre.scrollTop = state.contentViewerScroll || 0;
     }
     // i18n 必须放在弹窗之后：否则弹窗内按钮/标题不会被翻译。
     applyI18n(app);
@@ -8665,7 +8726,7 @@
     state.taskDetailLoading = false;
     state.taskDetailErr = '';
     state.taskDetailScroll = 0;
-    state.logViewer = null;
+    state.contentViewer = null;
     state.taskDetailSig = '';
     if (!skipRender) render();
   }
@@ -8678,7 +8739,7 @@
     state.taskDetailLoading = true;
     state.taskDetailErr = '';
     state.taskDetailScroll = 0;
-    state.logViewer = null;
+    state.contentViewer = null;
     state.taskDetailSig = '';
     render();
     loadTaskDetail(id, 1);
