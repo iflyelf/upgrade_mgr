@@ -120,7 +120,7 @@
     hostImport: null, hostBatchEdit: null,
     tunnelTest: null,
     taskDetailId: null, taskDetail: null, taskDetailPage: 1, taskDetailLoading: false, taskDetailErr: '', taskDetailScroll: 0,
-    contentViewer: null, contentViewerScroll: 0, contentViewerWrap: true, contentViewerFont: 12.5,
+    contentViewer: null, contentViewerScroll: 0, contentViewerWrap: true, contentViewerFont: 12.5, codeBlockOpen: {},
     // 自动刷新：记录上一次数据指纹，状态没变化时不重建 DOM，避免滚动/焦点抖动。
     hostsSig: '', tasksSig: '', taskDetailSig: '', loginName: '', loginBusy: false,
     // 认证方式：casdoor 时登录页只展示 SSO 按钮（authLoginURL 由 /api/auth/config 提供）。
@@ -247,21 +247,57 @@
       done(fallbackCopy(text));
     }
   }
-  // codeBlock 完整展示代码/命令：自动换行、自适应宽度，不截断内容。
-  // 超长内容在页面内纵向滚动；需要更大阅读区域时可点「弹窗查看」。
+  // codeBlock 完整展示代码/命令：自动换行、自适应宽度。
+  // 特别长的内容默认折叠一段（不是截断首行），可「展开/收起」；仍可弹窗查看完整内容。
   function codeBlock(text, title) {
     var body = String(text || '');
+    var key = codeBlockKey(title, body);
+    var long = isLongCode(body);
+    var open = long && !!state.codeBlockOpen[key];
+    var wrap = h('div', { class: 'code-inline-wrap' + (long && !open ? ' collapsed' : '') }, [
+      h('pre', { class: 'code code-inline' }, [body || '（空）'])
+    ]);
+    var toggle = null;
+    if (long) {
+      var expandLabel = state.lang === 'en' ? 'Expand' : '展开';
+      var collapseLabel = state.lang === 'en' ? 'Collapse' : '收起';
+      toggle = h('button', {
+        class: 'btn ghost small', type: 'button',
+        onclick: function () {
+          var next = !state.codeBlockOpen[key];
+          state.codeBlockOpen[key] = next;
+          wrap.classList.toggle('collapsed', !next);
+          toggle.textContent = next ? collapseLabel : expandLabel;
+          toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+        }
+      }, [open ? collapseLabel : expandLabel]);
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
     return h('div', { class: 'code-block' }, [
       h('div', { class: 'code-actions' }, [
         h('span', { class: 'code-actions-title' }, [title || '代码']),
+        toggle,
         h('button', {
           class: 'btn ghost small', type: 'button',
           onclick: function () { openContentViewer(title || '代码', body); }
         }, ['弹窗查看']),
         copyTextBtn(body)
       ]),
-      h('pre', { class: 'code code-inline' }, [body || '（空）'])
+      wrap
     ]);
+  }
+
+  // isLongCode 判断代码块是否需要默认折叠：行数多或单行特别长（换行后会很高）。
+  function isLongCode(body) {
+    if (!body) return false;
+    return body.split('\n').length > 10 || body.length > 800;
+  }
+
+  // codeBlockKey 为代码块生成稳定键，页面重绘后仍能保持展开/收起状态。
+  function codeBlockKey(title, body) {
+    var h = 5381;
+    for (var i = 0; i < body.length; i++) h = ((h << 5) + h + body.charCodeAt(i)) | 0;
+    return (title || '') + ':' + body.length + ':' + h;
   }
   // copyTextBtn 通用复制按钮：复制完整文本，按钮文字短暂提示结果。
   function copyTextBtn(text, label) {
@@ -5753,6 +5789,7 @@
     '查看详情': 'View details', '查看参数': 'View parameters',
     '查看结果': 'View result', '查看命令脚本': 'View command script',
     '查看': 'View', '弹窗查看': 'View in dialog', '自动换行': 'Wrap lines', '字号': 'Font size',
+    '展开': 'Expand', '收起': 'Collapse',
     '代码': 'Code', '主机接入命令': 'Host enrollment command',
     '自动化令牌': 'Automation token', '安装命令示例': 'Install command example',
     '新增字段': 'Add field', '保存': 'Save', '取消': 'Cancel', '删除': 'Delete',
