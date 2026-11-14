@@ -106,8 +106,8 @@ func TestCreatedByWritten(t *testing.T) {
 	hostIP := fmt.Sprintf("10.%d.%d.%d", (sfx/65536)%256, (sfx/256)%256, sfx%256)
 	var hostID int64
 	if err := db.QueryRow(`
-		INSERT INTO hosts (ip, hostname, arch, os_family, tenant_id)
-		VALUES ($1,'owner-host','amd64','linux',1) RETURNING id`,
+		INSERT INTO hosts (ip, hostname, arch, os_family, tenant_id, agent_id, agent_status, last_seen)
+		VALUES ($1,'owner-host','amd64','linux',1,'owner-agent','online',NOW()) RETURNING id`,
 		hostIP).Scan(&hostID); err != nil {
 		t.Fatalf("建主机失败: %v", err)
 	}
@@ -266,8 +266,8 @@ func TestPreviewHostGroupScope(t *testing.T) {
 
 	hostIP := fmt.Sprintf("10.%d.%d.%d", (sfx/65536)%256, (sfx/256)%256, sfx%256)
 	if _, err := db.Exec(`
-		INSERT INTO hosts (ip, hostname, arch, os_family, app_code, tenant_id)
-		VALUES ($1,'preview-host','amd64','linux','APPX',1)`, hostIP); err != nil {
+		INSERT INTO hosts (ip, hostname, arch, os_family, app_code, tenant_id, agent_id, agent_status, last_seen)
+		VALUES ($1,'preview-host','amd64','linux','APPX',1,'preview-agent','online',NOW())`, hostIP); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip=$1`, hostIP) })

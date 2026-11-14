@@ -4,6 +4,7 @@
 
 - 用 `hosts_list` 按同样的 IP 段或分组确认主机存在于当前租户。
 - `task_preview` 返回 `skipped_os` > 0：组件目标系统与主机 `os_family` 不一致（Linux 任务跳过 Windows 主机，反之亦然）。
+- `task_preview` 返回 `skipped_offline` > 0：这些主机不在线（Agent 心跳超时或未接入 Agent），预览/创建只包含在线主机，离线主机自动跳过。
 - 普通用户还受团队授权的主机分组限制，用 `my_permissions` 查看 `host_groups`。
 
 ## 主机状态为 offline / 一直 pending

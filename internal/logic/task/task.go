@@ -318,6 +318,27 @@ func (s *Service) SetOfflineAfter(fn func() string) {
 	s.offlineAfter = fn
 }
 
+// offlineThreshold 返回离线判定阈值；未注入或配置非法时回退 1 分钟，
+// 与编排器跳过硬编码默认值保持一致。
+func (s *Service) offlineThreshold() time.Duration {
+	raw := "1m"
+	if s.offlineAfter != nil {
+		raw = s.offlineAfter()
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || d < time.Second {
+		d = time.Minute
+	}
+	return d
+}
+
+// isHostOnline 判断主机在任务执行意义上是否在线：
+// 有 Agent 凭据、心跳未超时。与编排器下发前的跳过条件一致，
+// 确保预览/创建命中的主机都是真正可执行的在线主机。
+func isHostOnline(h hostRow, offlineAfter time.Duration) bool {
+	return h.agentID != "" && h.lastSeen.Valid && time.Since(h.lastSeen.Time) <= offlineAfter
+}
+
 // PreviewResult 预览命中主机与分批。
 type PreviewResult struct {
 	TotalHosts int      `json:"total_hosts"`
@@ -327,6 +348,8 @@ type PreviewResult struct {
 	TargetOS string `json:"target_os"`
 	// SkippedOS 因系统不匹配被跳过的主机数。
 	SkippedOS int `json:"skipped_os"`
+	// SkippedOffline 因离线（Agent 心跳超时或未接入 Agent）被自动跳过的主机数。
+	SkippedOffline int `json:"skipped_offline"`
 }
 
 // SetActor 注入当前操作者（供权限校验，不支持从 JSON 伪造）。
@@ -438,7 +461,7 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 		targetOS = componentTargetOS(comp)
 	}
 
-	hosts, err := s.matchHosts(ctx, sc, req.Selector)
+	hosts, skippedOffline, err := s.matchHosts(ctx, sc, req.Selector)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +487,7 @@ func (s *Service) Preview(ctx context.Context, sc scope.Scope, req CreateRequest
 		sample = append(sample, h.ip)
 	}
 	return &PreviewResult{TotalHosts: len(hosts), Batches: batches, SampleIPs: sample,
-		TargetOS: targetOS, SkippedOS: skippedOS}, nil
+		TargetOS: targetOS, SkippedOS: skippedOS, SkippedOffline: skippedOffline}, nil
 }
 
 // Create 创建任务：落库 upgrade_tasks + task_hosts + task_batches。
@@ -516,17 +539,24 @@ func (s *Service) Create(ctx context.Context, sc scope.Scope, req CreateRequest)
 			return 0, fmt.Errorf("标准输入过长（最多 %d 字节）", maxCommandStdinBytes)
 		}
 	}
-	hosts, err := s.matchHosts(ctx, sc, req.Selector)
+	hosts, skippedOffline, err := s.matchHosts(ctx, sc, req.Selector)
 	if err != nil {
 		return 0, err
 	}
 	// Linux 任务跳过 Windows 主机，Windows 任务跳过 Linux 主机。
 	hosts, skippedOS := filterHostsByOS(hosts, targetOS)
-	if len(hosts) == 0 && skippedOS > 0 {
-		return 0, fmt.Errorf("命中的 %d 台主机系统均与 %s 任务不匹配，已全部跳过", skippedOS, osLabel(targetOS))
-	}
 	if len(hosts) == 0 {
-		return 0, fmt.Errorf("目标选择器未命中任何主机")
+		switch {
+		case skippedOS > 0 && skippedOffline > 0:
+			return 0, fmt.Errorf("命中的主机已全部跳过：%d 台系统不匹配，%d 台不在线（Agent 心跳超时或未接入）",
+				skippedOS, skippedOffline)
+		case skippedOS > 0:
+			return 0, fmt.Errorf("命中的 %d 台主机系统均与 %s 任务不匹配，已全部跳过", skippedOS, osLabel(targetOS))
+		case skippedOffline > 0:
+			return 0, fmt.Errorf("命中的 %d 台主机当前均不在线（Agent 心跳超时或未接入），已全部跳过", skippedOffline)
+		default:
+			return 0, fmt.Errorf("目标选择器未命中任何主机")
+		}
 	}
 	// 主机分组范围：团队授权可限定 app_code / biz_group，超出范围的主机拒绝下发。
 	if kind == KindUpgrade {
@@ -603,10 +633,16 @@ type hostRow struct {
 	bizGroup string
 	// osFamily 用于按任务目标系统过滤（Linux 任务跳过 Windows 主机，反之亦然）。
 	osFamily string
+	// agentID / lastSeen 用于判断主机是否在线（可执行任务）。
+	agentID  string
+	lastSeen sql.NullTime
 }
 
-// matchHosts 解析 selector：IP 段展开 ∩ 分组过滤 − 排除。
-func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) ([]hostRow, error) {
+// matchHosts 解析 selector：IP 段展开 ∩ 分组过滤 − 排除，并且只保留在线主机。
+//
+// 返回命中的在线主机与因离线被跳过的主机数（含未接入 Agent 的主机）。
+// 离线主机不进入任务：创建与预览都不显示其 IP，编排器也不会下发。
+func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) ([]hostRow, int, error) {
 	// 构建分组过滤 SQL。第一个条件恒为租户隔离，确保不会漏过滤。
 	tCond, tArgs := sc.Where("", 1)
 	where := []string{tCond}
@@ -625,11 +661,11 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 		i++
 	}
 
-	q := "SELECT id, ip, COALESCE(exit_ip,''), COALESCE(app_code,''), COALESCE(biz_group,''), COALESCE(os_family,'') " +
-		"FROM hosts WHERE " + join(where, " AND ")
+	q := "SELECT id, ip, COALESCE(exit_ip,''), COALESCE(app_code,''), COALESCE(biz_group,''), COALESCE(os_family,''), " +
+		"COALESCE(agent_id,''), last_seen FROM hosts WHERE " + join(where, " AND ")
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -640,18 +676,20 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 	all := map[int64]hostRow{}
 	for rows.Next() {
 		var id int64
-		var ip, exitIP, appCode, bizGroup, osFamily string
-		if err := rows.Scan(&id, &ip, &exitIP, &appCode, &bizGroup, &osFamily); err != nil {
-			return nil, err
+		var ip, exitIP, appCode, bizGroup, osFamily, agentID string
+		var lastSeen sql.NullTime
+		if err := rows.Scan(&id, &ip, &exitIP, &appCode, &bizGroup, &osFamily, &agentID, &lastSeen); err != nil {
+			return nil, 0, err
 		}
 		byIP[ip] = append(byIP[ip], id)
 		if exitIP != "" && exitIP != ip {
 			byIP[exitIP] = append(byIP[exitIP], id)
 		}
-		all[id] = hostRow{id: id, ip: ip, exitIP: exitIP, appCode: appCode, bizGroup: bizGroup, osFamily: osFamily}
+		all[id] = hostRow{id: id, ip: ip, exitIP: exitIP, appCode: appCode, bizGroup: bizGroup,
+			osFamily: osFamily, agentID: agentID, lastSeen: lastSeen}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// IP 段展开（若指定）
@@ -659,7 +697,7 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 	if sel.IPExpr != "" {
 		ips, err := ipx.ParseWithExclude(sel.IPExpr, sel.ExcludeIPExpr, 0)
 		if err != nil {
-			return nil, fmt.Errorf("IP 表达式解析失败: %w", err)
+			return nil, 0, fmt.Errorf("IP 表达式解析失败: %w", err)
 		}
 		wantIPs = map[string]struct{}{}
 		for _, ip := range ips {
@@ -684,7 +722,19 @@ func (s *Service) matchHosts(ctx context.Context, sc scope.Scope, sel Selector) 
 	}
 	// 稳定排序（按 IP），多网卡主机按出口地址排序更符合运维直觉。
 	sortHosts(out)
-	return out, nil
+
+	// 只保留在线主机：离线主机自动跳过，不进入任务也不出现在预览 IP 中。
+	offlineAfter := s.offlineThreshold()
+	online := make([]hostRow, 0, len(out))
+	skippedOffline := 0
+	for _, h := range out {
+		if isHostOnline(h, offlineAfter) {
+			online = append(online, h)
+			continue
+		}
+		skippedOffline++
+	}
+	return online, skippedOffline, nil
 }
 
 // splitBatches 依策略计算各批次大小。
