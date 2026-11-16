@@ -17,7 +17,7 @@ collector:
   textfile:
     # 与安装脚本的 -TextfileDir 默认值保持一致（原 zabbix_agentd 目录已改为 monitor）
     directories:
-      - C:\monitor\windows_exporter\textfile_inputs
+      - C:\monitor\exporter\metrics
   service:
     # 屏蔽系统服务与常见第三方后台服务，只保留业务服务指标。
     # 如需按环境增删，直接修改这一行正则即可。

@@ -40,7 +40,7 @@
     监听端口，默认 16666。
 
 .PARAMETER TextfileDir
-    textfile 采集器目录，默认 C:\monitor\windows_exporter\textfile_inputs。
+    textfile 采集器目录，默认 C:\monitor\exporter\metrics（与 Linux 的 /opt/monitor/exporter/metrics 对齐）。
 
 .PARAMETER InstallDir
     安装目录，默认 C:\monitor\exporter（与 Linux 的 /opt/monitor/exporter 对齐）。
@@ -108,7 +108,7 @@ param(
     [ValidateSet('auto', 'latest', 'legacy')]
     [string]$Flavor = 'auto',
     [int]$ListenPort = 16666,
-    [string]$TextfileDir = 'C:\monitor\windows_exporter\textfile_inputs',
+    [string]$TextfileDir = 'C:\monitor\exporter\metrics',
     [string]$InstallDir = '',
     [string]$BinaryPath = '',
     [string]$BinaryUrl = '',
@@ -147,7 +147,7 @@ if ($env:WINDOWS_EXPORTER_FLAVOR) { $Flavor = $env:WINDOWS_EXPORTER_FLAVOR }
 # 最后一个用 Go 1.20 构建、支持 Windows 7 / Server 2008 R2 的官方版本。
 $LegacyVersion = '0.23.1'
 # 默认配置模板版本：模板内容变更时递增，旧脚本生成的配置会自动备份并升级。
-$ConfigTemplateVersion = '3'
+$ConfigTemplateVersion = '4'
 if ($env:WINDOWS_EXPORTER_LISTEN_PORT) { $ListenPort = [int]$env:WINDOWS_EXPORTER_LISTEN_PORT }
 # 自定义下载基础地址（末尾不要带斜杠），默认 iflyelf release。
 $script:BaseUrl = ''
@@ -163,6 +163,8 @@ if (-not $InstallDir) {
 $ExePath = Join-Path $InstallDir 'windows_exporter.exe'
 $ExeBak = "$ExePath.bak"
 $ConfigFile = Join-Path $InstallDir 'config.yaml'
+# 历史默认 textfile 目录：升级/卸载时提示或清理，避免遗留旧指标文件。
+$LegacyTextfileDir = 'C:\monitor\windows_exporter\textfile_inputs'
 
 # 输出约定（重要）：
 #   - 不能用 Write-Host：它写 host/information 流，平台把 stdout 重定向到管道时收不到。
@@ -496,7 +498,7 @@ function Get-DefaultConfigContent {
     if ($script:ExporterFlavor -eq 'legacy') {
         return @"
 # windows_exporter 配置（由 install.ps1 生成）
-# config-version: 3
+# config-version: 4
 # flavor: legacy（windows_exporter v0.23.1 / Go 1.20，支持 Server 2008 R2 ~ 2012 R2）
 # 注意：旧系统通道不支持 physical_disk；hardware_info 默认启用（本仓库 legacy 资产）。
 collectors:
@@ -512,7 +514,7 @@ collector:
     # 修改 config.yaml 的规则时同步这里（examples/examples_test.go 会校验两者一致）。
     $template = @'
 # windows_exporter 配置（由 install.ps1 生成）
-# config-version: 3
+# config-version: 4
 # flavor: latest（windows_exporter latest，支持 Windows 10 / Server 2016+）
 # 规则与 examples/windows_exporter/config.yaml 一致；修改后重启服务生效。
 collectors:
@@ -865,6 +867,9 @@ function Do-Install {
     }
     Write-Step "系统: $([Environment]::OSVersion.VersionString)；架构: $script:ResolvedArch；端口: $ListenPort"
     Ensure-Dirs
+    if ($TextfileDir -ne $LegacyTextfileDir -and (Test-Path $LegacyTextfileDir)) {
+        Write-Warn "检测到旧 textfile 目录 $LegacyTextfileDir；新目录为 $TextfileDir，确认旧数据无用后可手动删除"
+    }
     Stop-ServiceIfRunning
 
     $tmp = Join-Path $env:TEMP "windows_exporter-download-$PID.exe"
@@ -927,6 +932,9 @@ function Do-Update {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
     Remove-StaleExeCopies
 
+    if ($TextfileDir -ne $LegacyTextfileDir -and (Test-Path $LegacyTextfileDir)) {
+        Write-Warn "检测到旧 textfile 目录 $LegacyTextfileDir；新目录为 $TextfileDir，确认旧数据无用后可手动删除"
+    }
     Write-DefaultConfig
     Update-ServiceArgs
     Set-ServiceAutoRestart
@@ -998,6 +1006,10 @@ function Do-Uninstall {
             Remove-Item -Recurse -Force $serviceDir -ErrorAction SilentlyContinue
         }
         if (Test-Path $TextfileDir) { Remove-Item -Recurse -Force $TextfileDir -ErrorAction SilentlyContinue }
+        if ($LegacyTextfileDir -ne $TextfileDir -and (Test-Path $LegacyTextfileDir)) {
+            Write-Step "删除历史 textfile 目录 $LegacyTextfileDir"
+            Remove-Item -Recurse -Force $LegacyTextfileDir -ErrorAction SilentlyContinue
+        }
     }
     Write-Output ''
     Write-Output '卸载完成。'

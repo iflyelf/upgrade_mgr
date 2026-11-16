@@ -90,3 +90,27 @@ func TestWindowsExporterServiceAutoRestart(t *testing.T) {
 		t.Fatalf("Set-ServiceAutoRestart 应在安装/更新流程中调用，实际出现 %d 次", n)
 	}
 }
+
+// TestWindowsExporterInstallPaths 校验默认安装目录与 textfile 目录都位于 C:\monitor\exporter。
+func TestWindowsExporterInstallPaths(t *testing.T) {
+	ps, err := os.ReadFile("windows_exporter/install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(ps)
+	for _, want := range []string{
+		"$InstallDir = 'C:\\monitor\\exporter'",
+		"[string]$TextfileDir = 'C:\\monitor\\exporter\\metrics'",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("install.ps1 缺少 %q", want)
+		}
+	}
+	cfg, err := os.ReadFile("windows_exporter/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfg), "C:\\monitor\\exporter\\metrics") {
+		t.Fatal("config.yaml 的 textfile 目录未对齐到 C:\\monitor\\exporter\\metrics")
+	}
+}

@@ -248,7 +248,7 @@ systems:
             - 示例 script_url 指向 examples/windows_exporter/install.ps1（经 proxy 代理）；Agent 默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行。
             - install.ps1 支持 install / update / uninstall / status；安装到 C:\monitor\exporter（与 Linux 的 /opt/monitor/exporter 对齐），服务名 windows_exporter，端口 16666，自动创建防火墙规则。
             - 注册服务时启用延迟自动启动，并配置失败自动重启（默认 60 秒后重启，最多 3 次；可用 -RestartDelay / -FailureReset / -NoDelayedAutoStart 调整）。
-            - textfile 采集目录：C:\monitor\windows_exporter\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。
+            - textfile 采集目录：C:\monitor\exporter\metrics（与 Linux 的 /opt/monitor/exporter/metrics 对齐）；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。
             - 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把命令脚本转为 UTF-8 BOM + CRLF，平台下发 install.ps1 时也会自动补 BOM，避免中文脚本乱码/语法错误。
             - Windows 10 / Server 2016 及以上自动使用 latest；Windows 7 / Server 2008 R2 ~ 2012 R2 自动切换 legacy（基于官方 v0.23.1 + Go 1.20，默认启用 hardware_info 移植），也可用 -Flavor latest|legacy 强制。
             - 2008 R2 无法直连 GitHub 时：install.ps1 支持 -BinaryPath / -BinaryUrl。
@@ -262,7 +262,7 @@ systems:
             - "script_url points to examples/windows_exporter/install.ps1 (via proxy); the agent runs it with powershell.exe -NoProfile -ExecutionPolicy Bypass -File."
             - "install.ps1 supports install / update / uninstall / status. It installs to C:\\monitor\\exporter (aligned with /opt/monitor/exporter on Linux), service windows_exporter, port 16666 and creates a firewall rule."
             - "The service uses delayed auto-start and a failure recovery policy (restart after 60 seconds, up to 3 times; tune with -RestartDelay / -FailureReset / -NoDelayedAutoStart)."
-            - "Textfile collector directory: C:\\monitor\\windows_exporter\\textfile_inputs; use -ConfigPath for a custom config."
+            - "Textfile collector directory: C:\\monitor\\exporter\\metrics (aligned with /opt/monitor/exporter/metrics on Linux); use -ConfigPath for a custom config."
             - "PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites command scripts to UTF-8 BOM + CRLF, and the console adds a BOM when serving install.ps1, avoiding encoding/parse errors."
             - "Windows 10 / Server 2016 and newer use latest automatically; Windows 7 / Server 2008 R2 – 2012 R2 switch to legacy (based on official v0.23.1 + Go 1.20, with the ported hardware_info collector enabled by default). Force it with -Flavor latest|legacy."
             - "On 2008 R2 without GitHub access, install.ps1 supports -BinaryPath / -BinaryUrl."
