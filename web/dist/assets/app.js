@@ -944,7 +944,11 @@
   //   2. 用子进程 powershell.exe -File 执行，确保语法错误/脚本失败能拿到非 0 退出码，
   //      不会被外层 `exit $LASTEXITCODE` 吞成成功。
   function windowsInstallScript(action) {
-    var args = action === 'uninstall' ? ' uninstall -Yes' : ' ' + action;
+    // 与 Linux 的 /opt/monitor/exporter 对齐：Windows 二进制统一安装到 C:\monitor\exporter。
+    var winInstallDir = 'C:\\monitor\\exporter';
+    var args = action === 'uninstall'
+      ? ' uninstall -Yes -InstallDir "' + winInstallDir + '"'
+      : ' ' + action + ' -InstallDir "' + winInstallDir + '"';
     // 控制台地址兜底：老 Agent 可能没有注入平台地址变量。
     var consoleBase = '';
     try {
@@ -1227,17 +1231,17 @@
     {
       key: 'windows_exporter_script',
       label: 'windows_exporter_script（Windows 脚本安装）',
-      desc: 'Windows 专用示例：script_url 指向平台 /api/external/binary（自动代理外网或返回本地上传文件）。Agent 在 Windows 主机上默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行，脚本按系统版本自动选择 exe：Windows 10/Server 2016+ 用 latest，Windows 7/Server 2008 R2~2012 R2 用 legacy（v0.23.1 + Go 1.20，默认启用 hardware_info），注册 Windows 服务 windows_exporter、创建防火墙规则并写入默认配置。适合 Windows Server 2008 R2 ~ Windows 11；需要 PowerShell 2.0+（系统自带）。',
+      desc: 'Windows 专用示例：script_url 指向平台 /api/external/binary（自动代理外网或返回本地上传文件）。Agent 在 Windows 主机上默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行，脚本按系统版本自动选择 exe：Windows 10/Server 2016+ 用 latest，Windows 7/Server 2008 R2~2012 R2 用 legacy（v0.23.1 + Go 1.20，默认启用 hardware_info），安装到 C:\\monitor\\exporter（与 Linux 的 /opt/monitor/exporter 对齐）、注册 Windows 服务 windows_exporter、创建防火墙规则并写入默认配置。适合 Windows Server 2008 R2 ~ Windows 11；需要 PowerShell 2.0+（系统自带）。',
       comp: {
         name: 'windows_exporter_script', display_name: 'Windows Exporter（Win 脚本安装）', deploy_mode: 'script',
         binary_name: 'windows_exporter',
-        install_path: 'C:\\Program Files\\windows_exporter',
+        install_path: 'C:\\monitor\\exporter',
         service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
         script_url: WINDOWS_INSTALL_SCRIPT_PLATFORM_URL,
-        exec_args: ['install'],
+        exec_args: ['install', '-InstallDir', 'C:\\monitor\\exporter'],
         exec_timeout: '15m',
         health_cmd: [['powershell.exe', '-NoProfile', '-Command', "if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]],
-        version_cmd: [['powershell.exe', '-NoProfile', '-Command', "& 'C:\\Program Files\\windows_exporter\\windows_exporter.exe' --version"]]
+        version_cmd: [['powershell.exe', '-NoProfile', '-Command', "& 'C:\\monitor\\exporter\\windows_exporter.exe' --version"]]
       }
     },
     {
@@ -1247,26 +1251,26 @@
       comp: {
         name: 'windows_exporter_script_update', display_name: 'Windows Exporter（Win 脚本更新）', deploy_mode: 'script',
         binary_name: 'windows_exporter',
-        install_path: 'C:\\Program Files\\windows_exporter',
+        install_path: 'C:\\monitor\\exporter',
         service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
         script_url: WINDOWS_INSTALL_SCRIPT_PLATFORM_URL,
-        exec_args: ['update'],
+        exec_args: ['update', '-InstallDir', 'C:\\monitor\\exporter'],
         exec_timeout: '15m',
         health_cmd: [['powershell.exe', '-NoProfile', '-Command', "if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]],
-        version_cmd: [['powershell.exe', '-NoProfile', '-Command', "& 'C:\\Program Files\\windows_exporter\\windows_exporter.exe' --version"]]
+        version_cmd: [['powershell.exe', '-NoProfile', '-Command', "& 'C:\\monitor\\exporter\\windows_exporter.exe' --version"]]
       }
     },
     {
       key: 'windows_exporter_script_uninstall',
       label: 'windows_exporter_script_uninstall（Win 脚本卸载，非交互）',
-      desc: 'exec_args 为 uninstall -Yes（-Yes 跳过交互确认，非交互场景必需）。脚本停止并删除 Windows 服务 windows_exporter、防火墙规则与安装目录。service_name 填 windows_exporter 与安装/更新对齐，Agent（uninstall_detect 能力）识别卸载动作后跳过启服，避免 sc delete 延迟导致 ERROR_SERVICE_MARKED_FOR_DELETE。旧 Agent 会被服务端自动剥离 service_name。不填 health_cmd / version_cmd 避免卸载后健康检查失败。',
+      desc: 'exec_args 为 uninstall -Yes -InstallDir C:\\monitor\\exporter（-Yes 跳过交互确认，非交互场景必需）。脚本停止并删除 Windows 服务 windows_exporter、防火墙规则、安装目录，并强制清理注册表项 HKLM\\SYSTEM\\CurrentControlSet\\Services\\windows_exporter。service_name 填 windows_exporter 与安装/更新对齐，Agent（uninstall_detect 能力）识别卸载动作后跳过启服，避免 sc delete 延迟导致 ERROR_SERVICE_MARKED_FOR_DELETE。旧 Agent 会被服务端自动剥离 service_name。不填 health_cmd / version_cmd 避免卸载后健康检查失败。',
       comp: {
         name: 'windows_exporter_script_uninstall', display_name: 'Windows Exporter（Win 脚本卸载）', deploy_mode: 'script',
         binary_name: 'windows_exporter',
-        install_path: 'C:\\Program Files\\windows_exporter',
+        install_path: 'C:\\monitor\\exporter',
         service_name: 'windows_exporter', service_mgr: 'auto', enabled: true,
         script_url: WINDOWS_INSTALL_SCRIPT_PLATFORM_URL,
-        exec_args: ['uninstall', '-Yes'],
+        exec_args: ['uninstall', '-Yes', '-InstallDir', 'C:\\monitor\\exporter'],
         exec_timeout: '15m'
       }
     },

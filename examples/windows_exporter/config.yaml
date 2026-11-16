@@ -3,7 +3,7 @@
 # 新版 textfile/service 配置。Server 2008 R2 / Windows 7~8.1 请使用
 # config-legacy.yaml（或让 install.ps1 自动生成 legacy 配置）。
 #
-# 该文件用于演示「安装后由脚本写入 C:\Program Files\windows_exporter\config.yaml」。
+# 该文件用于演示「安装后由脚本写入 C:\monitor\exporter\config.yaml」。
 # 实际部署时可：
 #   - 直接修改本文件后，用 install.ps1 -ConfigPath <本文件> 安装；或
 #   - 只在控制台一键安装（脚本会生成等价的默认配置），再登录主机替换该文件后重启服务。

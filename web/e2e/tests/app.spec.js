@@ -276,6 +276,22 @@ test('快速上手支持 Linux / Windows 双示例', async ({ page }) => {
   await expect(copyBtn).toHaveText('已复制');
 });
 
+test('Windows 脚本任务使用 C:\\monitor\\exporter 安装目录', async ({ page }) => {
+  await login(page);
+  await page.locator('.main-nav').getByRole('button', { name: '任务', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '创建任务' })).toBeVisible();
+
+  // 切换为命令任务，Windows 示例按钮才会出现。
+  await page.getByLabel('任务类型').selectOption('command');
+  const script = page.locator('textarea').first();
+
+  await page.getByRole('button', { name: '安装脚本', exact: true }).last().click();
+  await expect(script).toHaveValue(/-InstallDir "C:\\monitor\\exporter"/);
+
+  await page.getByRole('button', { name: '卸载脚本', exact: true }).last().click();
+  await expect(script).toHaveValue(/uninstall -Yes -InstallDir "C:\\monitor\\exporter"/);
+});
+
 // 回归：顶栏下拉曾被 .main-nav 的 overflow-x:auto 裁剪（overflow-y 被强制为 auto），
 // 点击后菜单实际展开但不可见。Playwright 的 click 会自动滚动被裁剪元素，
 // 因此必须显式断言菜单能被真实命中，而不是只断言 click 成功。

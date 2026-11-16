@@ -35,7 +35,8 @@ func TestComponentTargetOS(t *testing.T) {
 		{"os_match windows", &component.Component{OSMatch: "Windows", InstallPath: "/opt/x"}, targetOSWindows},
 		{"proxied sh", &component.Component{ScriptURL: "https://proxy.xiaonuo.live/?url=https://raw.githubusercontent.com/a/b/main/install.sh"}, targetOSLinux},
 		{"platform ps1", &component.Component{ScriptURL: "/api/external/binary/windows-exporter-install.ps1"}, targetOSWindows},
-		{"windows install path", &component.Component{InstallPath: `C:\Program Files\windows_exporter`}, targetOSWindows},
+		{"windows install path", &component.Component{InstallPath: `C:\monitor\exporter`}, targetOSWindows},
+		{"legacy windows install path", &component.Component{InstallPath: `C:\Program Files\windows_exporter`}, targetOSWindows},
 		{"linux install path", &component.Component{InstallPath: "/opt/monitor/exporter"}, targetOSLinux},
 		{"unknown", &component.Component{}, ""},
 	}

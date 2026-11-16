@@ -43,7 +43,7 @@
     textfile 采集器目录，默认 C:\monitor\windows_exporter\textfile_inputs。
 
 .PARAMETER InstallDir
-    安装目录，默认 C:\Program Files\windows_exporter。
+    安装目录，默认 C:\monitor\exporter（与 Linux 的 /opt/monitor/exporter 对齐）。
 
 .PARAMETER BinaryPath
     本地已存在的 exe 路径（跳过下载）。老系统（Server 2008 R2 + PowerShell 2.0/.NET 2.0）
@@ -140,11 +140,8 @@ if ($env:WINDOWS_EXPORTER_BINARY_URL) { $BinaryUrl = $env:WINDOWS_EXPORTER_BINAR
 if ($env:WINDOWS_EXPORTER_BINARY_PATH) { $BinaryPath = $env:WINDOWS_EXPORTER_BINARY_PATH }
 
 if (-not $InstallDir) {
-    if ($env:ProgramFiles) {
-        $InstallDir = Join-Path $env:ProgramFiles 'windows_exporter'
-    } else {
-        $InstallDir = 'C:\Program Files\windows_exporter'
-    }
+    # 与 Linux 示例 /opt/monitor/exporter 对齐；仍可用 -InstallDir 覆盖。
+    $InstallDir = 'C:\monitor\exporter'
 }
 $ExePath = Join-Path $InstallDir 'windows_exporter.exe'
 $ExeBak = "$ExePath.bak"
@@ -659,6 +656,19 @@ function Remove-ServiceQuietly {
     }
 }
 
+# Remove-ServiceRegistryKey 强制清理服务注册表项。
+# sc.exe delete 在 pending delete / 权限异常 / 历史残留时可能留下
+# HKLM\SYSTEM\CurrentControlSet\Services\windows_exporter，卸载后再次安装会撞名。
+function Remove-ServiceRegistryKey {
+    $regPath = "HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    Write-Step "清理服务注册表项 $regPath"
+    try {
+        & reg.exe delete $regPath /f 2>$null | Out-Null
+    } catch {
+        Write-Warn "清理注册表项失败：$($_.Exception.Message)"
+    }
+}
+
 function Start-AndVerify {
     Write-Step "启动服务 $ServiceName"
     try {
@@ -701,6 +711,22 @@ function Get-ServiceBinPath {
         if ($svc) { return $svc.PathName }
     } catch { }
     return ''
+}
+
+# Get-DirFromBinPath 从服务 binPath 解析安装目录（兼容带引号与不带引号）。
+function Get-DirFromBinPath([string]$BinPath) {
+    if (-not $BinPath) { return '' }
+    if ($BinPath -match '^\s*"([^"]+)"') {
+        return (Split-Path -Parent $Matches[1])
+    }
+    if ($BinPath -match '^\s*(\S+\.exe)') {
+        return (Split-Path -Parent $Matches[1])
+    }
+    return ''
+}
+
+function Get-ServiceInstallDir {
+    return (Get-DirFromBinPath (Get-ServiceBinPath))
 }
 
 function Set-ServiceBinPath([string]$BinPath) {
@@ -790,6 +816,10 @@ function Do-Install {
     $script:ResolvedArch = Resolve-Arch
     Initialize-Exporter
     $script:PrevBinPath = Get-ServiceBinPath
+    $prevDir = Get-DirFromBinPath $script:PrevBinPath
+    if ($prevDir -and $prevDir -ne $InstallDir) {
+        Write-Warn "检测到现有安装目录 $prevDir；本次将安装到 $InstallDir，旧目录保留，确认无用后可手动删除"
+    }
     Write-Step "系统: $([Environment]::OSVersion.VersionString)；架构: $script:ResolvedArch；端口: $ListenPort"
     Ensure-Dirs
     Stop-ServiceIfRunning
@@ -838,6 +868,10 @@ function Do-Update {
         Fail '未安装 windows_exporter 服务，请先执行 install' 1
     }
     $script:PrevBinPath = Get-ServiceBinPath
+    $prevDir = Get-DirFromBinPath $script:PrevBinPath
+    if ($prevDir -and $prevDir -ne $InstallDir) {
+        Write-Warn "检测到现有安装目录 $prevDir；本次将更新到 $InstallDir，旧目录保留，确认无用后可手动删除"
+    }
     $configBackup = "$ConfigFile.update-bak"
     if (Test-Path $ConfigFile) { Copy-Item -Force $ConfigFile $configBackup }
     Write-Step '备份当前版本'
@@ -878,12 +912,20 @@ function Do-Update {
 }
 
 function Do-Uninstall {
+    # 先记录服务实际指向的目录：历史版本可能安装在 C:\Program Files\windows_exporter。
+    $serviceDir = Get-ServiceInstallDir
     if ((Get-ServiceState) -eq 'Missing' -and -not (Test-Path $ExePath)) {
         Write-Step '未安装 windows_exporter（无需卸载）'
+        # 服务已不存在但注册表可能残留（例如手工删除了服务目录），仍然清理。
+        Remove-ServiceRegistryKey
         return
     }
     if (-not $Yes) {
-        $answer = Read-Host "确定卸载 windows_exporter 并删除 $InstallDir 吗？输入 yes 继续"
+        $targetDir = $InstallDir
+        if ($serviceDir -and $serviceDir -ne $InstallDir) {
+            $targetDir = "$InstallDir（及历史目录 $serviceDir）"
+        }
+        $answer = Read-Host "确定卸载 windows_exporter 并删除 $targetDir 吗？输入 yes 继续"
         if ($answer -ne 'yes') {
             Write-Step '已取消'
             return
@@ -892,15 +934,25 @@ function Do-Uninstall {
     Stop-ServiceIfRunning
     Write-Step "删除服务 $ServiceName"
     Remove-ServiceQuietly
+    Remove-ServiceRegistryKey
     Remove-FirewallRule
 
     if ($KeepData) {
         Write-Step '保留配置与数据（-KeepData），仅删除二进制'
-        Remove-Item -Force $ExePath -ErrorAction SilentlyContinue
-        Remove-Item -Force $ExeBak -ErrorAction SilentlyContinue
+        foreach ($dir in @($InstallDir, $serviceDir)) {
+            if (-not $dir) { continue }
+            Remove-Item -Force (Join-Path $dir 'windows_exporter.exe') -ErrorAction SilentlyContinue
+            Remove-Item -Force (Join-Path $dir 'windows_exporter.exe.bak') -ErrorAction SilentlyContinue
+        }
     } else {
         Write-Step "删除安装目录 $InstallDir"
         if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
+        # 兼容历史安装目录：仅当服务确实指向该目录且其中存在 windows_exporter.exe 时删除。
+        if ($serviceDir -and $serviceDir -ne $InstallDir -and
+            (Test-Path (Join-Path $serviceDir 'windows_exporter.exe'))) {
+            Write-Step "删除旧安装目录 $serviceDir"
+            Remove-Item -Recurse -Force $serviceDir -ErrorAction SilentlyContinue
+        }
         if (Test-Path $TextfileDir) { Remove-Item -Recurse -Force $TextfileDir -ErrorAction SilentlyContinue }
     }
     Write-Output ''
@@ -915,6 +967,7 @@ function Do-Status {
         Write-Output "启动类型: $($svc.StartType)"
     }
     Write-Output "安装路径: $ExePath（存在: $(Test-Path $ExePath)）"
+    Write-Output "注册表项: HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName（存在: $(Test-Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName")）"
     Write-Output "配置文件: $ConfigFile（存在: $(Test-Path $ConfigFile)）"
     Write-Output "指标目录: $TextfileDir"
     Write-Output "监听端口: $ListenPort"

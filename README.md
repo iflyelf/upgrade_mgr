@@ -190,7 +190,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 
 - 组件页顶部「Windows 示例」提供：windows_exporter_script（安装）、windows_exporter_script_update（更新，失败自动回滚）、windows_exporter_script_uninstall（卸载，-Yes 非交互）。
 - 示例 script_url 指向 examples/windows_exporter/install.ps1（经 proxy 代理）；Agent 默认用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 执行。
-- install.ps1 支持 install / update / uninstall / status；安装到 C:\Program Files\windows_exporter，服务名 windows_exporter，端口 16666，自动创建防火墙规则。
+- install.ps1 支持 install / update / uninstall / status；安装到 C:\monitor\exporter（与 Linux 的 /opt/monitor/exporter 对齐），服务名 windows_exporter，端口 16666，自动创建防火墙规则。
 - textfile 采集目录：C:\monitor\windows_exporter\textfile_inputs；配置文件由脚本生成，可用 -ConfigPath 指定自定义配置。
 - 兼容 PowerShell 2.0（Server 2008 R2 起）；Agent 会把命令脚本转为 UTF-8 BOM + CRLF，平台下发 install.ps1 时也会自动补 BOM，避免中文脚本乱码/语法错误。
 - Windows 10 / Server 2016 及以上自动使用 latest；Windows 7 / Server 2008 R2 ~ 2012 R2 自动切换 legacy（基于官方 v0.23.1 + Go 1.20，默认启用 hardware_info 移植），也可用 -Flavor latest|legacy 强制。
@@ -199,7 +199,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<控制�
 - 2008 R2 上脚本只探测对应通道的平台「本地/缓存」接口（?local=1），未上传时几秒内报错并提示上传，不会等待平台现场下载；平台能出网时可先在外部文件页「刷新缓存」预下载。
 - legacy 默认启用 hardware_info（仅本仓库 legacy 资产包含该采集器）；如替换为官方 v0.23.1，请从 collectors.enabled 删除 hardware_info 或使用 -NoConfig 自备配置。
 - 低权限运行：install.ps1 -ServiceAccount "NT AUTHORITY\LocalService"（或域账户 + -ServicePassword）。
-- 更新示例先备份 windows_exporter.exe.bak，启动失败自动回滚；卸载示例不带 health/version 检查。
+- 更新示例先备份 windows_exporter.exe.bak，启动失败自动回滚；卸载示例不带 health/version 检查，并强制清理注册表项 HKLM\SYSTEM\CurrentControlSet\Services\windows_exporter。
 
 ```powershell
 # 仓库自带单文件 PowerShell 安装脚本（PS 2.0 兼容）
@@ -323,7 +323,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<console
 
 - Windows examples: windows_exporter_script (install), windows_exporter_script_update (update with rollback) and windows_exporter_script_uninstall (uninstall -Yes, non-interactive).
 - script_url points to examples/windows_exporter/install.ps1 (via proxy); the agent runs it with powershell.exe -NoProfile -ExecutionPolicy Bypass -File.
-- install.ps1 supports install / update / uninstall / status. It installs to C:\Program Files\windows_exporter, service windows_exporter, port 16666 and creates a firewall rule.
+- install.ps1 supports install / update / uninstall / status. It installs to C:\monitor\exporter (aligned with /opt/monitor/exporter on Linux), service windows_exporter, port 16666 and creates a firewall rule.
 - Textfile collector directory: C:\monitor\windows_exporter\textfile_inputs; use -ConfigPath for a custom config.
 - PowerShell 2.0 compatible (Server 2008 R2+). The agent rewrites command scripts to UTF-8 BOM + CRLF, and the console adds a BOM when serving install.ps1, avoiding encoding/parse errors.
 - Windows 10 / Server 2016 and newer use latest automatically; Windows 7 / Server 2008 R2 – 2012 R2 switch to legacy (based on official v0.23.1 + Go 1.20, with the ported hardware_info collector enabled by default). Force it with -Flavor latest|legacy.
@@ -332,7 +332,7 @@ Start-Process -FilePath $exe -ArgumentList 'install','--server','http://<console
 - On 2008 R2 the script only probes the selected channel's platform local/cache endpoint (?local=1); if nothing is uploaded it fails within seconds with an upload hint instead of waiting for the console to fetch from GitHub. If the console has outbound access, use Refresh cache beforehand to pre-download.
 - hardware_info is enabled by default in legacy (only the legacy asset from this repository includes it). If you substitute the official v0.23.1 binary, remove hardware_info from collectors.enabled or use -NoConfig with your own config.
 - Low privilege: install.ps1 -ServiceAccount "NT AUTHORITY\LocalService" (or a domain account with -ServicePassword).
-- Update backs up windows_exporter.exe.bak and rolls back on startup failure; uninstall omits health/version checks.
+- Update backs up windows_exporter.exe.bak and rolls back on startup failure; uninstall omits health/version checks and force-deletes the registry key HKLM\SYSTEM\CurrentControlSet\Services\windows_exporter.
 
 ```powershell
 # Single-file PowerShell installer (PS 2.0 compatible)
@@ -1358,19 +1358,19 @@ Linux legacy 追加 `-legacy`；Windows 文件名带 `.exe`。服务端按主机
 
 - 二进制来源：`iflyelf/windows_exporter` 的 `latest` 发布（`amd64` / `arm64`），
   经 `proxy.xiaonuo.live` 代理下载，兼容 Server 2008 R2 ~ Windows 11 的 PowerShell 2.0；
-- 安装位置：`C:\Program Files\windows_exporter`，服务名 `windows_exporter`
+- 安装位置：`C:\monitor\exporter`（与 Linux 的 `/opt/monitor/exporter` 对齐），服务名 `windows_exporter`
   （SCM，自动启动 + 失败重启 5s/10s/30s）；
 - 监听端口：**16666**（默认），防火墙入站规则自动创建；
 - textfile 目录：`C:\monitor\windows_exporter\textfile_inputs`
   （原 `C:\zabbix_agentd\...` 已按你的要求改为 `monitor`）；
-- 配置：`C:\Program Files\windows_exporter\config.yaml`，仓库示例见
+- 配置：`C:\monitor\exporter\config.yaml`，仓库示例见
   `examples/windows_exporter/config.yaml`（含 `service.exclude` 大清单，可直接用）。
 
 | 动作 | 说明 |
 |---|---|
 | `install` | 安装或覆盖升级：下载 exe → 备份旧版本 → 替换 → 建服务 → 建防火墙规则 → 启动 |
 | `update` | 备份旧 exe → 替换 → 重启；启动失败自动回滚旧版本 |
-| `uninstall` | 停止并删除服务、防火墙规则、安装目录（`-Yes` 跳过确认，`-KeepData` 保留配置） |
+| `uninstall` | 停止并删除服务、防火墙规则、安装目录，并强制清理服务注册表项（`-Yes` 跳过确认，`-KeepData` 保留配置） |
 | `status` | 输出服务状态、启动类型、版本、路径与 `/metrics` 连通性 |
 
 **控制台操作**（两种方式，与 Linux 示例一一对应）：
@@ -1379,7 +1379,7 @@ Linux legacy 追加 `-legacy`；Windows 文件名带 `.exe`。服务端按主机
    → 保存；再到「任务」页选中对应组件启动。组件名分别为
    `windows_exporter_script` / `windows_exporter_script_update` / `windows_exporter_script_uninstall`。
 2. **命令任务方式**：「任务」页类型选「执行命令/脚本」→ Windows 分组 →「安装脚本 / 更新脚本 / 卸载脚本」。
-   生成的脚本会自动下载 `install.ps1` 并以 `install / update / uninstall -Yes` 执行，
+   生成的脚本会自动下载 `install.ps1` 并以 `install / update / uninstall -Yes -InstallDir C:\monitor\exporter` 执行，
    解释器预填 `powershell.exe`。
 
 手工在目标机执行：
@@ -1460,7 +1460,7 @@ Server 2008 R2 的 PowerShell 2.0/CLR 2.0 不支持 TLS 1.2，无法直连 GitHu
 
 ```
 health_cmd : [["powershell.exe","-NoProfile","-Command","if ((Get-Service windows_exporter -ErrorAction Stop).Status -ne 'Running') { exit 1 }"]]
-version_cmd: [["powershell.exe","-NoProfile","-Command","(Get-Item 'C:\Program Files\windows_exporter\windows_exporter.exe').VersionInfo.FileVersion"]]
+version_cmd: [["powershell.exe","-NoProfile","-Command","(Get-Item 'C:\monitor\exporter\windows_exporter.exe').VersionInfo.FileVersion"]]
 ```
 
 > 只在 Windows 主机上执行：任务按 `os_family=windows` 选主机（本平台任务筛选支持），
