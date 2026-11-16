@@ -72,6 +72,15 @@
 .PARAMETER NoFirewall
     不创建 Windows 防火墙入站规则。
 
+.PARAMETER RestartDelay
+    服务失败后自动重启的延迟秒数，默认 60。
+
+.PARAMETER FailureReset
+    失败计数重置周期（秒），默认 86400（1 天）；0 表示不重置。
+
+.PARAMETER NoDelayedAutoStart
+    不启用延迟自动启动（默认启用，降低开机时的服务启动风暴）。
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 install
 
@@ -107,10 +116,18 @@ param(
     [switch]$NoConfig,
     [string]$ServiceAccount = '',
     [string]$ServicePassword = '',
-    [switch]$NoFirewall
+    [switch]$NoFirewall,
+
+    # 服务自动重启策略：失败后等待 RestartDelay 秒再重启，最多 3 次；
+    # FailureReset 秒无失败后重置计数（0 表示不重置）。
+    [int]$RestartDelay = 60,
+    [int]$FailureReset = 86400,
+    [switch]$NoDelayedAutoStart
 )
 
 $ErrorActionPreference = 'Stop'
+if ($RestartDelay -lt 1) { $RestartDelay = 1 }
+if ($FailureReset -lt 0) { $FailureReset = 0 }
 
 # 输出编码：Windows 控制台默认 GBK(OEM)，平台按 UTF-8 读取会出现乱码。
 # 主动把 stdout 设为 UTF-8；失败不阻断（只影响日志可读性）。
@@ -610,6 +627,32 @@ function Get-ExporterArgs {
            ' ' + $textfileFlag + '="' + $TextfileDir + '"'
 }
 
+# Set-ServiceAutoRestart 配置延迟自动启动与失败自动重启。
+# - 延迟自动启动降低开机时多个 exporter 同时启动对磁盘/CPU 的冲击；
+# - 失败后默认 60 秒重启，最多 3 次；FailureReset 秒无失败后重置计数。
+function Set-ServiceAutoRestart {
+    if (-not $NoDelayedAutoStart) {
+        Write-Step '配置延迟自动启动（DelayedAutostart=1）'
+        & sc.exe config $ServiceName start= delayed-auto 2>$null | Out-Null
+        $scDelayCode = $LASTEXITCODE
+        # 兜底：部分旧系统/策略下 sc 不识别 delayed-auto，直接写注册表。
+        & reg.exe add "HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName" /v DelayedAutostart /t REG_DWORD /d 1 /f 2>$null | Out-Null
+        if ($scDelayCode -ne 0) {
+            Write-Warn "sc config delayed-auto 失败（退出码 $scDelayCode），已写入 DelayedAutostart 注册表兜底"
+        }
+    } else {
+        # 显式恢复普通自动启动，并清理可能残留的 DelayedAutostart。
+        & sc.exe config $ServiceName start= auto 2>$null | Out-Null
+        & reg.exe delete "HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName" /v DelayedAutostart /f 2>$null | Out-Null
+    }
+    $restartAction = 'restart/' + ([int]$RestartDelay * 1000)
+    Write-Step "配置失败自动重启（$RestartDelay 秒后重启，最多 3 次；重置周期 $FailureReset 秒）"
+    & sc.exe failure $ServiceName reset= $FailureReset actions= "$restartAction/$restartAction/$restartAction" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "配置失败自动重启失败（sc 退出码 $LASTEXITCODE），服务仍可手动启动"
+    }
+}
+
 function Create-Service {
     # 使用 New-Service 而非 sc.exe create：binPath 含空格与引号时，
     # PowerShell 调用原生 exe 的转义规则很绕，New-Service 直接按原样写入。
@@ -638,9 +681,9 @@ function Create-Service {
             Fail "配置服务账户失败（请确认账户已授予“作为服务登录”权限，密码正确）。" 1
         }
     }
-    # 描述与失败重启策略：sc.exe 的参数都是简单 token，无引号问题。
+    # 描述：sc.exe 的参数都是简单 token，无引号问题。
     & sc.exe description $ServiceName "windows_exporter - Prometheus metrics exporter for Windows" | Out-Null
-    & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
+    Set-ServiceAutoRestart
 }
 
 function Remove-ServiceQuietly {
@@ -886,6 +929,7 @@ function Do-Update {
 
     Write-DefaultConfig
     Update-ServiceArgs
+    Set-ServiceAutoRestart
     if (-not (Start-AndVerify)) {
         Write-Warn '新版本启动失败，收集诊断信息'
         Show-ServiceFailureDetails

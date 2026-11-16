@@ -66,3 +66,27 @@ func TestWindowsExporterDefaultConfigMatchesExample(t *testing.T) {
 		t.Fatalf("latest/legacy 模板的 config-version 应都为 %s，实际匹配 %d 处", ver[1], n)
 	}
 }
+
+// TestWindowsExporterServiceAutoRestart 校验服务安装/更新后配置了延迟自动启动与失败自动重启。
+func TestWindowsExporterServiceAutoRestart(t *testing.T) {
+	ps, err := os.ReadFile("windows_exporter/install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(ps)
+	for _, want := range []string{
+		"sc.exe config $ServiceName start= delayed-auto",
+		"DelayedAutostart",
+		"sc.exe failure $ServiceName reset= $FailureReset actions=",
+		"[int]$RestartDelay = 60",
+		"[int]$FailureReset = 86400",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("install.ps1 缺少 %q", want)
+		}
+	}
+	// 函数定义 + install/update 两处调用。
+	if n := strings.Count(text, "Set-ServiceAutoRestart"); n < 3 {
+		t.Fatalf("Set-ServiceAutoRestart 应在安装/更新流程中调用，实际出现 %d 次", n)
+	}
+}
