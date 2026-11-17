@@ -169,11 +169,15 @@ func New(c *config.Config) *ServiceContext {
 	taskSvc.SetOwnerPolicyResolver(orgSvc.TeamOwnerPolicy)
 	taskSvc.SetOwnerShareChecker(orgSvc.CanShareTasks)
 	taskSvc.SetTeamMateChecker(orgSvc.SharesTeam)
+	syncSvc := synclogic.NewSyncer(db)
+	syncSvc.SetOfflineAfter(func() string {
+		return settings.Snapshot().Agent.OfflineAfter
+	})
 	svc := &ServiceContext{
 		Config:     c,
 		DB:         db,
 		Settings:   settings,
-		Syncer:     synclogic.NewSyncer(db),
+		Syncer:     syncSvc,
 		Component:  compRepo,
 		Artifact:   artRepo,
 		Task:       taskSvc,

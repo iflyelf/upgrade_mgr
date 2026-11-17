@@ -11,7 +11,7 @@
 **P0 骨架**
 - 独立启动、可选依赖优雅降级（Consul / Casdoor / Redis 不可用仅告警，不阻塞）
 - 主机清单本地化（事实来源为 `hosts` 表），Consul 为可选同步来源（含业务分组 account/app_code/group…）
-- Consul 同步自动清理已移除的纯 Consul 主机（有 Agent/未完成任务时保留；部分或空清单自动跳过）
+- Consul 同步自动清理已移除的纯 Consul 主机（有 Agent、在线/最近心跳、维护中或未完成任务时保留；部分或空清单自动跳过）
 - 可切换认证：内置 bcrypt 账号（默认）/ FlyIAM-Casdoor SSO
 - 页面设置化（DB 优先 / env 兜底）；多数配置即时生效，启动期绑定项标记为需重启
 - IP 段表达式解析：`10.1.255.24-26,10.1.255.38,10.1.255.0/24,10.1.26.5-10.1.26.7`（含排除、展开上限）
@@ -2129,7 +2129,7 @@ install-windows-monitor.exe install -y --server http://console.example.com
 
 - 默认开启（`consul.cleanup_missing=true`，设置页 Consul 分组可关闭）。
 - 同步结束后，删除「已从 Consul 移除」的 `source='consul'` 主机。
-- 只删 `agent_id` 为空、没有 `agents` 记录、没有未完成任务/指令的主机；Agent 主机、手工主机不受影响。
+- 只删 `agent_id` 为空、没有 `agents` 记录、最近 15 分钟无心跳、未维护、没有未完成任务/指令的主机；**在线主机永远不会被同步清理**，只能通过页面手动勾选「强制删除在线主机」删除。
 - 任一服务实例查询失败，或本轮 Consul 未返回任何主机时，**整轮跳过清理**，防止 Consul ACL/网络/配置异常导致误删。
 - 返回字段：`upserted`（写入/更新数）、`deleted`（清理数）、`cleanup_skipped`（跳过原因）。
 - 环境变量：`CONSUL_CLEANUP_MISSING=false` 可关闭。
@@ -2138,7 +2138,7 @@ install-windows-monitor.exe install -y --server http://console.example.com
 
 - 默认开启（`consul_mgr.cleanup_missing=true`，设置页 consul_mgr 分组可关闭）。
 - 按服务组同步时，只清理 `source='consul_mgr'` 且 `source_group=当前 group_id` 的主机，不会误删其他服务组。
-- 同样保留有 Agent、有未完成任务/指令、维护中的主机；`manual` / CSV 导入主机完全不受影响。
+- 同样保留有 Agent、在线/最近心跳、维护中、有未完成任务/指令的主机；**在线主机永远不会被同步清理**，只能手动强制删除；`manual` / CSV 导入主机完全不受影响。
 - 服务组查询不完整（`partial=true`）时本轮跳过清理；同步全部服务组（`group_id=0`）时不做清理，避免跨组误删。
 - 返回字段：`cleanup_deleted`、`cleanup_skipped`。
 

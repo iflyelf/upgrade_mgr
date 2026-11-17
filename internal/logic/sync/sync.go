@@ -45,10 +45,37 @@ type Result struct {
 // Syncer 主机同步器。
 type Syncer struct {
 	db *sql.DB
+	// offlineAfter 返回 Agent 离线阈值（如 "1m"）；清理时用于保护最近心跳主机。
+	offlineAfter func() string
 }
 
 // NewSyncer 创建同步器。
 func NewSyncer(db *sql.DB) *Syncer { return &Syncer{db: db} }
+
+// SetOfflineAfter 注入离线阈值读取函数（设置页热更新）。
+func (s *Syncer) SetOfflineAfter(fn func() string) { s.offlineAfter = fn }
+
+// onlineProtectWindow 返回清理时保护「最近心跳」主机的时间窗口。
+// 至少 15 分钟，且不小于配置的 Agent 离线阈值，避免在线主机被误清。
+func (s *Syncer) onlineProtectWindow() time.Duration {
+	raw := "1m"
+	if s != nil && s.offlineAfter != nil {
+		raw = s.offlineAfter()
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || d < time.Minute {
+		d = time.Minute
+	}
+	if d < 15*time.Minute {
+		d = 15 * time.Minute
+	}
+	return d
+}
+
+// onlineProtectSQL 返回可直接拼入 INTERVAL 的秒数字面量（仅由服务端生成）。
+func (s *Syncer) onlineProtectSQL() string {
+	return fmt.Sprintf("'%.0f seconds'", s.onlineProtectWindow().Seconds())
+}
 
 // SyncFromConsul 遍历 Consul 全部服务实例，按 IP 聚合并 upsert 到 hosts。
 //
@@ -347,16 +374,18 @@ const maxCleanupBatches = 20
 //
 // 参数占位符由调用方传入（不同语句的参数编号不同）：
 // 条件中两次引用同一 syncedAt 参数。
-func missingHostCond(syncedAtParam string) string {
+func missingHostCond(syncedAtParam, onlineWindow string) string {
 	return `
 		h.source='consul'
-		AND COALESCE(h.agent_status,'') <> 'online'
-		AND (h.agent_id IS NULL OR h.agent_id='')
+		AND COALESCE(h.agent_id,'')=''
+		AND LOWER(COALESCE(h.agent_status,'')) <> 'online'
+		AND (h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL ` + onlineWindow + `)
 		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
 		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
 		AND (h.maintenance_until IS NULL OR h.maintenance_until <= NOW())
-		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.ip = h.ip)
-		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.host_id = h.id)
+		AND NOT EXISTS (SELECT 1 FROM agents a
+		                WHERE a.ip = h.ip OR a.host_id = h.id
+		                   OR (COALESCE(a.agent_id,'')<>'' AND a.agent_id = h.agent_id))
 		AND NOT EXISTS (SELECT 1 FROM task_hosts th
 		                WHERE th.host_id=h.id AND th.status IN ('pending','running'))
 		AND NOT EXISTS (SELECT 1 FROM commands c
@@ -403,7 +432,7 @@ func (s *Syncer) cleanupMissingHosts(ctx context.Context, syncedAt time.Time) (i
 func (s *Syncer) findMissingHosts(ctx context.Context, syncedAt time.Time, limit int) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT h.id FROM hosts h
-		WHERE `+missingHostCond("$1")+`
+		WHERE `+missingHostCond("$1", s.onlineProtectSQL())+`
 		ORDER BY h.id
 		LIMIT $2`, syncedAt, limit)
 	if err != nil {
@@ -420,6 +449,40 @@ func (s *Syncer) findMissingHosts(ctx context.Context, syncedAt time.Time, limit
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// hostProtectedFromCleanup 在删除前做最后的在线/Agent 复核。
+//
+// 与 missing*HostCond 的 SQL 条件双保险：只要发现 Agent 凭据、在线状态、
+// 维护中、最近心跳或 agents 记录，就保留主机。同步清理绝不能删除在线主机。
+func hostProtectedFromCleanup(ctx context.Context, tx *sql.Tx, id int64, onlineWindow time.Duration) (bool, error) {
+	var agentID, status string
+	var lastSeen, maintenance sql.NullTime
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(agent_id,''), COALESCE(agent_status,''), last_seen, maintenance_until
+		  FROM hosts WHERE id=$1`, id).Scan(&agentID, &status, &lastSeen, &maintenance)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(agentID) != "" ||
+		strings.EqualFold(strings.TrimSpace(status), "online") ||
+		(lastSeen.Valid && time.Since(lastSeen.Time) < onlineWindow) ||
+		(maintenance.Valid && maintenance.Time.After(time.Now())) {
+		return true, nil
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM agents a
+		 WHERE a.host_id=$1
+		    OR a.ip=(SELECT ip FROM hosts WHERE id=$1)
+		    OR (COALESCE(a.agent_id,'')<>'' AND a.agent_id=(SELECT agent_id FROM hosts WHERE id=$1))`,
+		id).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // deleteMissingHosts 在一个事务内按统一锁序删除候选主机。
@@ -448,9 +511,16 @@ func (s *Syncer) deleteMissingHosts(ctx context.Context, syncedAt time.Time, ids
 		}
 
 		// 加锁后复查：期间可能新增 Agent/任务/指令，或主机重新出现在 Consul 中。
+		protected, err := hostProtectedFromCleanup(ctx, tx, id, s.onlineProtectWindow())
+		if err != nil {
+			return deleted, err
+		}
+		if protected {
+			continue
+		}
 		res, err := tx.ExecContext(ctx, `
 			DELETE FROM hosts h
-			WHERE h.id=$1 AND `+missingHostCond("$2"), id, syncedAt)
+			WHERE h.id=$1 AND `+missingHostCond("$2", s.onlineProtectSQL()), id, syncedAt)
 		if err != nil {
 			return deleted, err
 		}
@@ -467,17 +537,19 @@ func (s *Syncer) deleteMissingHosts(ctx context.Context, syncedAt time.Time, ids
 // missingMgrHostCond 返回「可从 consul_mgr 当前服务组安全删除」的过滤条件。
 //
 // groupParam/syncedAtParam 由调用方传入占位符（如 $1/$2）。
-func missingMgrHostCond(groupParam, syncedAtParam string) string {
+func missingMgrHostCond(groupParam, syncedAtParam, onlineWindow string) string {
 	return `
 		h.source='consul_mgr'
 		AND h.source_group=` + groupParam + `
-		AND COALESCE(h.agent_status,'') <> 'online'
-		AND (h.agent_id IS NULL OR h.agent_id='')
+		AND COALESCE(h.agent_id,'')=''
+		AND LOWER(COALESCE(h.agent_status,'')) <> 'online'
+		AND (h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL ` + onlineWindow + `)
 		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
 		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
 		AND (h.maintenance_until IS NULL OR h.maintenance_until <= NOW())
-		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.ip = h.ip)
-		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.host_id = h.id)
+		AND NOT EXISTS (SELECT 1 FROM agents a
+		                WHERE a.ip = h.ip OR a.host_id = h.id
+		                   OR (COALESCE(a.agent_id,'')<>'' AND a.agent_id = h.agent_id))
 		AND NOT EXISTS (SELECT 1 FROM task_hosts th
 		                WHERE th.host_id=h.id AND th.status IN ('pending','running'))
 		AND NOT EXISTS (SELECT 1 FROM commands c
@@ -488,7 +560,7 @@ func missingMgrHostCond(groupParam, syncedAtParam string) string {
 func (s *Syncer) findMissingMgrHosts(ctx context.Context, groupID int64, syncedAt time.Time, limit int) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT h.id FROM hosts h
-		WHERE `+missingMgrHostCond("$1", "$2")+`
+		WHERE `+missingMgrHostCond("$1", "$2", s.onlineProtectSQL())+`
 		ORDER BY h.id
 		LIMIT $3`, groupID, syncedAt, limit)
 	if err != nil {
@@ -528,9 +600,16 @@ func (s *Syncer) deleteMissingMgrHosts(ctx context.Context, groupID int64, synce
 				return deleted, err
 			}
 		}
+		protected, err := hostProtectedFromCleanup(ctx, tx, id, s.onlineProtectWindow())
+		if err != nil {
+			return deleted, err
+		}
+		if protected {
+			continue
+		}
 		res, err := tx.ExecContext(ctx, `
 			DELETE FROM hosts h
-			WHERE h.id=$1 AND `+missingMgrHostCond("$2", "$3"), id, groupID, syncedAt)
+			WHERE h.id=$1 AND `+missingMgrHostCond("$2", "$3", s.onlineProtectSQL()), id, groupID, syncedAt)
 		if err != nil {
 			return deleted, err
 		}
@@ -571,18 +650,20 @@ func (s *Syncer) cleanupMissingMgrHosts(ctx context.Context, groupID int64, sync
 //
 // 只清理上次同步时 source_services 包含该服务、本次未被更新（已不在服务范围）
 // 的主机；保留有 Agent、维护中、有未完成任务/指令的主机，规则与按服务组清理一致。
-func missingMgrServiceHostCond(groupParam, serviceParam, syncedAtParam string) string {
+func missingMgrServiceHostCond(groupParam, serviceParam, syncedAtParam, onlineWindow string) string {
 	return `
 		h.source='consul_mgr'
 		AND h.source_group=` + groupParam + `
 		AND h.source_services @> ARRAY[` + serviceParam + `]::text[]
-		AND COALESCE(h.agent_status,'') <> 'online'
-		AND (h.agent_id IS NULL OR h.agent_id='')
+		AND COALESCE(h.agent_id,'')=''
+		AND LOWER(COALESCE(h.agent_status,'')) <> 'online'
+		AND (h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL ` + onlineWindow + `)
 		AND (h.last_synced_at IS NULL OR h.last_synced_at < ` + syncedAtParam + `)
 		AND (h.last_seen IS NULL OR h.last_seen < ` + syncedAtParam + `)
 		AND (h.maintenance_until IS NULL OR h.maintenance_until <= NOW())
-		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.ip = h.ip)
-		AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.host_id = h.id)
+		AND NOT EXISTS (SELECT 1 FROM agents a
+		                WHERE a.ip = h.ip OR a.host_id = h.id
+		                   OR (COALESCE(a.agent_id,'')<>'' AND a.agent_id = h.agent_id))
 		AND NOT EXISTS (SELECT 1 FROM task_hosts th
 		                WHERE th.host_id=h.id AND th.status IN ('pending','running'))
 		AND NOT EXISTS (SELECT 1 FROM commands c
@@ -593,7 +674,7 @@ func missingMgrServiceHostCond(groupParam, serviceParam, syncedAtParam string) s
 func (s *Syncer) findMissingMgrServiceHosts(ctx context.Context, groupID int64, service string, syncedAt time.Time, limit int) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT h.id FROM hosts h
-		WHERE `+missingMgrServiceHostCond("$1", "$2", "$3")+`
+		WHERE `+missingMgrServiceHostCond("$1", "$2", "$3", s.onlineProtectSQL())+`
 		ORDER BY h.id
 		LIMIT $4`, groupID, service, syncedAt, limit)
 	if err != nil {
@@ -633,9 +714,16 @@ func (s *Syncer) deleteMissingMgrServiceHosts(ctx context.Context, groupID int64
 				return deleted, err
 			}
 		}
+		protected, err := hostProtectedFromCleanup(ctx, tx, id, s.onlineProtectWindow())
+		if err != nil {
+			return deleted, err
+		}
+		if protected {
+			continue
+		}
 		res, err := tx.ExecContext(ctx, `
 			DELETE FROM hosts h
-			WHERE h.id=$1 AND `+missingMgrServiceHostCond("$2", "$3", "$4"), id, groupID, service, syncedAt)
+			WHERE h.id=$1 AND `+missingMgrServiceHostCond("$2", "$3", "$4", s.onlineProtectSQL()), id, groupID, service, syncedAt)
 		if err != nil {
 			return deleted, err
 		}

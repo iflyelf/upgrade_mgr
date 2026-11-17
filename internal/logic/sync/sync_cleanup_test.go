@@ -71,6 +71,21 @@ func TestCleanupMissingHosts(t *testing.T) {
 	if _, err := db.Exec(`UPDATE hosts SET agent_status='online' WHERE id=$1`, onlineID); err != nil {
 		t.Fatalf("标记在线主机失败: %v", err)
 	}
+	// 有 agent_id 但状态为 offline：仍属于接入过 Agent 的主机，必须保留。
+	agentOfflineID := insertHost("agent-offline", "consul", "agent-keep-"+prefix, &old)
+	if _, err := db.Exec(`UPDATE hosts SET agent_status='offline' WHERE id=$1`, agentOfflineID); err != nil {
+		t.Fatalf("标记离线 Agent 主机失败: %v", err)
+	}
+	// 状态大写 ONLINE：SQL 用 LOWER 比较，也必须保留。
+	upperOnlineID := insertHost("upper-online", "consul", "", &old)
+	if _, err := db.Exec(`UPDATE hosts SET agent_status='ONLINE' WHERE id=$1`, upperOnlineID); err != nil {
+		t.Fatalf("标记大写在线主机失败: %v", err)
+	}
+	// 最近心跳（1 分钟前，早于本轮 syncedAt）：仍应受到在线保护窗口保护。
+	recentSeenID := insertHost("recent-seen", "consul", "", &old)
+	if _, err := db.Exec(`UPDATE hosts SET last_seen=$2 WHERE id=$1`, recentSeenID, now.Add(-time.Minute)); err != nil {
+		t.Fatalf("设置最近心跳失败: %v", err)
+	}
 
 	// 有 agents 记录（即使 hosts.agent_id 为空）也应保留。
 	if _, err := db.Exec(`
@@ -142,6 +157,9 @@ func TestCleanupMissingHosts(t *testing.T) {
 	check(taskHostID, 1, "有未完成任务的主机")
 	check(commandHostID, 1, "有未完成指令的主机")
 	check(onlineID, 1, "在线主机")
+	check(agentOfflineID, 1, "有 agent_id 的离线主机")
+	check(upperOnlineID, 1, "大写 ONLINE 状态主机")
+	check(recentSeenID, 1, "最近心跳主机")
 }
 
 // TestCleanupMissingMgrHosts 验证 consul_mgr 清理只影响当前服务组。
@@ -192,6 +210,14 @@ func TestCleanupMissingMgrHosts(t *testing.T) {
 	if _, err := db.Exec(`UPDATE hosts SET agent_status='online' WHERE id=$1`, g1Online); err != nil {
 		t.Fatalf("标记在线主机失败: %v", err)
 	}
+	g1UpperOnline := insert("g1-upper-online", "consul_mgr", groupStr, old)
+	if _, err := db.Exec(`UPDATE hosts SET agent_status='ONLINE' WHERE id=$1`, g1UpperOnline); err != nil {
+		t.Fatalf("标记大写在线主机失败: %v", err)
+	}
+	g1RecentSeen := insert("g1-recent-seen", "consul_mgr", groupStr, old)
+	if _, err := db.Exec(`UPDATE hosts SET last_seen=$2 WHERE id=$1`, g1RecentSeen, now.Add(-time.Minute)); err != nil {
+		t.Fatalf("设置最近心跳失败: %v", err)
+	}
 	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip LIKE $1`, prefix+"%") })
 
 	deleted, err := syncer.cleanupMissingMgrHosts(ctx, groupID, now)
@@ -209,7 +235,8 @@ func TestCleanupMissingMgrHosts(t *testing.T) {
 	if exists(g1Stale) {
 		t.Fatal("当前服务组过期主机应被删除")
 	}
-	for name, id := range map[string]int64{"fresh": g1Fresh, "other-group": g2Stale, "manual": manual, "online": g1Online} {
+	for name, id := range map[string]int64{"fresh": g1Fresh, "other-group": g2Stale, "manual": manual, "online": g1Online,
+		"upper-online": g1UpperOnline, "recent-seen": g1RecentSeen} {
 		if !exists(id) {
 			t.Fatalf("%s 主机不应被清理", name)
 		}
