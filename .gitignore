@@ -22,3 +22,6 @@ web/node_modules/
 GITHUB_SECRETS.md
 *SECRETS*.md
 *secrets*.md
+
+# 本地构建的 Windows 安装器（dist/ 下由 make build-monitor-installer 生成）
+/install-monitor
