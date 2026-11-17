@@ -267,6 +267,12 @@ pre.code {
 /* 自动刷新状态提示：小圆点呼吸效果，避免用户误以为需要手动刷新 */
 .auto-refresh-tip { white-space: nowrap; font-size: 12px; opacity: .85; }
 .auto-refresh-tip::first-letter { color: var(--ok-color); }
+/* 卡片标题行：标题 + 自动刷新提示（如 Agent 版本分布）左右对齐，窄屏自动换行 */
+.card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
+}
+.card-head h3 { margin: 0; }
 .detail-subtitle { margin: 16px 0 8px; }
 .modal .table-wrap { max-height: 340px; overflow: auto; }
 /* 内容查看弹窗：宽幅等宽字体。表格列/窄容器内的行内 pre 会被挤成细长条，

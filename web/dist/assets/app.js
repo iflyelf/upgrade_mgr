@@ -106,7 +106,7 @@
   })(), hosts: [], total: 0, q: '', settings: [], components: [], artifacts: [], tasks: [], err: '',
     hostPage: 1, hostSize: 50, hostPages: 1, hostErr: '', hostsLoading: false, editingHost: null,
     agentTargetVersion: '', agentAutoUpdate: false, agentStats: null,
-    agentStatsAt: 0, agentStatsSig: '', agentUpdateActive: false,
+    agentStatsAt: 0, agentStatsSig: '', agentUpdateActive: false, agentStatsErr: '',
     // AI 接入
     ai: null, aiErr: '', aiTokens: [], aiTokensTotal: 0, aiTokenErr: '', aiTokenCreated: null, aiTokenForm: null, aiTokenMine: true,
     aiSnippets: null, aiSnippetsBusy: false, aiSnippetsErr: '', aiSnippetClient: '', aiSnippetOS: '', aiSnippetArch: '', aiGen: null,
@@ -2040,23 +2040,69 @@
     return mask;
   }
 
+  var agentStatsReqSeq = 0;
+  // loadAgentStats 拉取 Agent 版本分布。
+  //
+  // 与主机列表共用同一轮自动刷新：每次 loadHosts 都会调用（空闲 15 秒、
+  // 有升级动作 4 秒），这里只按数据指纹去重，避免数据没变时重建 DOM。
   function loadAgentStats() {
-    state.agentStatsAt = Date.now();
+    var seq = ++agentStatsReqSeq;
     return api('/api/agents/stats')
       .then(function (d) {
-        // 自动刷新时版本分布通常不变，避免每次轮询都重建 DOM。
+        // 只接受最后一次请求，避免慢响应覆盖新结果。
+        if (seq !== agentStatsReqSeq) return;
+        state.agentStatsAt = Date.now();
+        state.agentStatsErr = '';
+        // 数据没变时不重建 DOM，只就地更新“最近更新时间”文字。
+        refreshAgentStatsTip();
         var sig = JSON.stringify(d || null);
         if (sig === state.agentStatsSig) return;
         state.agentStatsSig = sig;
         state.agentStats = d;
-        render();
+        if (state.view === 'hosts') render();
       })
-      .catch(function () { state.agentStats = null; });
+      .catch(function (e) {
+        if (seq !== agentStatsReqSeq) return;
+        // 保留上一次成功的数据：轮询偶发失败不应该把卡片清空。
+        var msg = '加载版本分布失败: ' + e.message;
+        if (msg === state.agentStatsErr) return;
+        state.agentStatsErr = msg;
+        if (state.view === 'hosts') render();
+      });
+  }
+
+  // agentStatsTipText 版本分布卡片的自动刷新提示（含最近成功更新时间）。
+  function agentStatsTipText() {
+    var text = '● 自动刷新中' +
+      (state.agentStatsAt ? ' · ' + fmtTime(state.agentStatsAt).slice(11) : '');
+    // 数据未变化时就地更新提示时不会走 applyI18n，这里主动翻译。
+    return translateText(text) || text;
+  }
+
+  // refreshAgentStatsTip 数据未变化时只更新提示文字，不重建整个列表。
+  function refreshAgentStatsTip() {
+    var el = document.getElementById('agent-stats-tip');
+    if (el) el.textContent = agentStatsTipText();
   }
 
   function agentStatsCard() {
     var st = state.agentStats;
-    if (!st || !st.total) return null;
+    var head = h('div', { class: 'card-head' }, [
+      h('h3', {}, ['Agent 版本分布']),
+      h('span', {
+        class: 'muted auto-refresh-tip', id: 'agent-stats-tip'
+      }, [agentStatsTipText()])
+    ]);
+    if (!st || !st.total) {
+      // 首次加载失败时给出提示；没有 Agent 时保持空白，不占用页面空间。
+      if (state.agentStatsErr) {
+        return h('div', { class: 'card' }, [
+          head,
+          h('div', { class: 'err', role: 'alert' }, [state.agentStatsErr])
+        ]);
+      }
+      return null;
+    }
     var rows = (st.list || []).map(function (x) {
       return [
         x.version || '未知',
@@ -2073,10 +2119,13 @@
       ? '（离线按 agent 状态或心跳超过 ' + st.offline_after + ' 统计）'
       : '（离线按 agent 状态或心跳超时统计）';
     return h('div', { class: 'card' }, [
-      h('h3', {}, ['Agent 版本分布']),
+      head,
       hint('目标版本：' + (st.target_version || '-') +
         '；离线 ' + (st.offline || 0) + ' 台；旧版本 ' + (st.outdated || 0) +
         ' 台' + offlineNote + '。'),
+      state.agentStatsErr
+        ? h('div', { class: 'err', role: 'alert' }, [state.agentStatsErr + '（显示上次数据）'])
+        : null,
       simpleTable(['版本', 'OS', '架构', '数量', '离线', '状态'], st.list || [],
         function (x, i) { return rows[i]; })
     ]);
@@ -5983,6 +6032,8 @@
     '个部门': 'departments', '条': 'entries', '台': 'hosts'
   };
   var I18N_RULES = [
+    [/^● 自动刷新中 · (.*)$/, '● Auto-refreshing · $1'],
+    [/^● 自动刷新中$/, '● Auto-refreshing'],
     [/^共 (\d+) 个任务.*$/, 'Total $1 task(s)'],
     [/^筛选结果 (\d+) 个任务.*$/, 'Filtered: $1 task(s)'],
     [/^第 (\d+) \/ (\d+) 页.*$/, 'Page $1 / $2'],
@@ -8736,12 +8787,9 @@
       // 页面刷新或从其他页签切回时，恢复显示后台主机删除作业的进度（仅管理员可删除）。
       if (isAdmin()) resumeBatchJob(HOST_DELETE_JOB);
     }
-    // 版本分布变化较慢：手动刷新/进入页面时立即拉取；自动刷新时默认 30 秒，
-    // 有 Agent 正在自升级时缩短到 10 秒，便于及时看到剩余旧版本数量。
-    var statsEvery = state.agentUpdateActive ? 10000 : 30000;
-    if (!quiet || !state.agentStatsAt || Date.now() - state.agentStatsAt >= statsEvery) {
-      loadAgentStats();
-    }
+    // 版本分布与主机列表共用同一轮自动刷新：空闲 15 秒、有升级动作 4 秒，
+    // 保证卡片和主机列表同步更新；数据未变化时 loadAgentStats 内部按指纹跳过重绘。
+    loadAgentStats();
     // 主机自定义字段定义：列表列与编辑表单共用；只加载一次，失败后置空数组。
     if (state.hostFieldDefs === undefined) {
       state.hostFieldDefs = null;
@@ -8771,7 +8819,7 @@
         state.agentTargetVersion = d.agent_target_version || '';
         state.agentAutoUpdate = !!d.agent_auto_update;
         state.hostsLoading = false;
-        // 自升级刚结束：立即刷新一次版本分布，不必等下一个 10/30 秒周期。
+        // 自升级刚结束：立即刷新一次版本分布，不必等下一轮自动刷新。
         var wasUpdating = state.agentUpdateActive;
         var nowUpdating = (d.list || []).some(function (x) {
           var s = x.agent_update_status;
