@@ -158,6 +158,17 @@
     mgrSync: null,
     helpOpen: null, cacheStatus: null, cacheErr: '', navOpen: null };
 
+  // appendChildren 递归挂载子节点：容忍单个字符串/节点，也展开 arr.map(...) 产生的嵌套数组。
+  function appendChildren(node, list) {
+    if (list == null) return;
+    if (!Array.isArray(list)) list = [list];
+    list.forEach(function (c) {
+      if (c == null) return;
+      if (Array.isArray(c)) { appendChildren(node, c); return; }
+      node.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
+    });
+  }
+
   function h(tag, attrs, children) {
     var el = document.createElement(tag);
     attrs = attrs || {};
@@ -170,13 +181,7 @@
       else if (k === 'checked') el.checked = !!v;
       else el.setAttribute(k, v);
     }
-    // 容忍调用方把单个字符串/节点直接作为 children 传入，避免整页渲染崩溃。
-    if (children == null) children = [];
-    else if (!Array.isArray(children)) children = [children];
-    children.forEach(function (c) {
-      if (c == null) return;
-      el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
-    });
+    appendChildren(el, children);
     // select 的 value 需要在 option 挂载后设置才会生效
     if (val !== undefined) el.value = val;
     return el;
