@@ -172,16 +172,15 @@ func TestAutomationEnrollTokenAPI(t *testing.T) {
 	if created.ExpiresAt != nil {
 		t.Fatalf("永久令牌 expires_at 应为 nil: %+v", created.ExpiresAt)
 	}
-	if len(created.Arches) != 2 || len(created.Commands) != 2 {
-		t.Fatalf("多架构响应不符: arches=%v commands=%v", created.Arches, created.Commands)
+	if len(created.Arches) != 2 || len(created.Commands) != 1 {
+		t.Fatalf("多架构应返回一条自动识别命令: arches=%v commands=%v", created.Arches, created.Commands)
 	}
-	for _, c := range created.Commands {
-		if c.EnrollToken != created.Token || !strings.Contains(c.InstallCommand, created.Token) {
-			t.Fatalf("安装命令未包含令牌: %+v", c)
-		}
-		if !strings.Contains(c.InstallCommand, c.Arch) {
-			t.Fatalf("安装命令未包含架构 %s: %s", c.Arch, c.InstallCommand)
-		}
+	auto := created.Commands[0]
+	if auto.Arch != "auto" || auto.EnrollToken != created.Token ||
+		!strings.Contains(auto.InstallCommand, created.Token) ||
+		!strings.Contains(auto.InstallCommand, "uname -m") ||
+		!strings.Contains(auto.InstallCommand, "linux-${ARCH}") {
+		t.Fatalf("自动识别命令不符: %+v", auto)
 	}
 
 	// 列表必须能查到，且不回显完整 token。
@@ -235,8 +234,9 @@ func TestAutomationEnrollTokenAPI(t *testing.T) {
 	if rotated.ID == created.ID || rotated.Token == created.Token {
 		t.Fatalf("轮换后应生成新令牌: old=%+v new=%+v", created, rotated)
 	}
-	if len(rotated.Commands) != 2 {
-		t.Fatalf("轮换后应返回两个架构的安装命令: %+v", rotated.Commands)
+	if len(rotated.Commands) != 1 || rotated.Arch != "auto" ||
+		!strings.Contains(rotated.Commands[0].InstallCommand, "uname -m") {
+		t.Fatalf("轮换后应返回一条自动识别命令: %+v", rotated.Commands)
 	}
 	if _, ok := consumeTestToken(t, db, created.Token, "10.1.2.3"); ok {
 		t.Fatal("轮换后的旧 token 不应能消费")
@@ -504,22 +504,18 @@ func TestAgentEnrollTokenMultiArch(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Data.Arches) != 2 || len(out.Data.Commands) != 2 {
-		t.Fatalf("多架构响应不符: %+v", out.Data)
+	if len(out.Data.Arches) != 2 || len(out.Data.Commands) != 1 {
+		t.Fatalf("多架构应返回一条自动识别命令: %+v", out.Data)
 	}
-	seen := map[string]bool{}
-	for i, c := range out.Data.Commands {
-		token := c.EnrollToken
-		t.Cleanup(func() { db.Exec(`DELETE FROM enroll_tokens WHERE token_hash=$1`, agentgw.HashToken(token)) })
-		if c.Arch != out.Data.Arches[i] || c.EnrollToken == "" {
-			t.Fatalf("命令架构/令牌不符: %+v", c)
-		}
-		if seen[c.EnrollToken] {
-			t.Fatal("每个架构应生成独立的一次性令牌")
-		}
-		seen[c.EnrollToken] = true
-		if !strings.Contains(c.InstallCommand, c.EnrollToken) || !strings.Contains(c.InstallCommand, c.Arch) {
-			t.Fatalf("安装命令内容不符: %s", c.InstallCommand)
+	c := out.Data.Commands[0]
+	token := c.EnrollToken
+	t.Cleanup(func() { db.Exec(`DELETE FROM enroll_tokens WHERE token_hash=$1`, agentgw.HashToken(token)) })
+	if c.Arch != "auto" || token == "" {
+		t.Fatalf("命令架构/令牌不符: %+v", c)
+	}
+	for _, want := range []string{"uname -m", "linux-${ARCH}", token, "kernel=${KERNEL}"} {
+		if !strings.Contains(c.InstallCommand, want) {
+			t.Fatalf("自动识别命令缺少 %q: %s", want, c.InstallCommand)
 		}
 	}
 }

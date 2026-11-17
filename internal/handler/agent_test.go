@@ -146,6 +146,40 @@ func TestBuildInstallCommandArchitectures(t *testing.T) {
 	}
 }
 
+func TestBuildAutoInstallCommands(t *testing.T) {
+	linux := buildAutoInstallCommand("http://h", "tok", false, false)
+	for _, want := range []string{"uname -m", "linux-${ARCH}", "?kernel=${KERNEL}", "tok"} {
+		if !strings.Contains(linux, want) {
+			t.Fatalf("Linux 自动命令缺少 %q: %s", want, linux)
+		}
+	}
+	if strings.Contains(linux, "linux-${ARCH}-legacy") {
+		t.Fatalf("混合架构不应强制 legacy: %s", linux)
+	}
+	legacy := buildAutoInstallCommand("http://h", "tok", true, true)
+	if !strings.Contains(legacy, "linux-${ARCH}-legacy") || !strings.Contains(legacy, "--force") {
+		t.Fatalf("强制 legacy 命令不符: %s", legacy)
+	}
+	win := buildAutoWindowsInstallCommand("http://h", "tok", false)
+	for _, want := range []string{"PROCESSOR_ARCHITECTURE", "windows-' + $arch", "tok"} {
+		if !strings.Contains(win, want) {
+			t.Fatalf("Windows 自动命令缺少 %q: %s", want, win)
+		}
+	}
+}
+
+func TestAllLegacyArches(t *testing.T) {
+	if !allLegacyArches([]string{"amd64-legacy", "arm64-legacy"}) {
+		t.Fatal("全 legacy 应返回 true")
+	}
+	if allLegacyArches([]string{"amd64", "arm64-legacy"}) {
+		t.Fatal("混合选择不应强制 legacy")
+	}
+	if allLegacyArches(nil) {
+		t.Fatal("空列表不应强制 legacy")
+	}
+}
+
 func TestInstallBaseURLPrefersExternalURL(t *testing.T) {
 	r := httptest.NewRequest("GET", "http://internal:8090/api/agent/enroll-token", nil)
 	r.Host = "10.1.230.50:8090"

@@ -715,25 +715,34 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		commands := make([]agentInstallCommand, 0, len(arches))
-		for _, arch := range arches {
-			token := randHex(32)
-			hash := agentgw.HashToken(token)
-			if _, err := tx.ExecContext(r.Context(),
-				`INSERT INTO enroll_tokens (token_hash, expires_at, created_by, tenant_id) VALUES ($1, $2, $3, $4)`,
-				hash, expiresAt, creator, tenantID); err != nil {
-				auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", err)
-				httpx.Fail(w, http.StatusInternalServerError, "生成令牌失败")
-				return
-			}
-			installCmd := buildInstallCommand(safeURL, arch, token, force, variant)
-			if osName == "windows" {
-				installCmd = buildWindowsInstallCommand(rawURL, arch, token, force)
-			}
-			commands = append(commands, agentInstallCommand{
-				Arch: arch, EnrollToken: token, InstallCommand: installCmd,
-			})
+		// 一次请求只生成一个令牌：多架构时命令会在目标机自动识别架构，
+		// 一次性令牌仍然只能接入一台主机。
+		token := randHex(32)
+		hash := agentgw.HashToken(token)
+		if _, err := tx.ExecContext(r.Context(),
+			`INSERT INTO enroll_tokens (token_hash, expires_at, created_by, tenant_id) VALUES ($1, $2, $3, $4)`,
+			hash, expiresAt, creator, tenantID); err != nil {
+			auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", err)
+			httpx.Fail(w, http.StatusInternalServerError, "生成令牌失败")
+			return
 		}
+		var installCmd, cmdArch string
+		if len(arches) > 1 {
+			installCmd = buildAutoInstallCommand(safeURL, token, force, allLegacyArches(arches) || variant == "legacy")
+			if osName == "windows" {
+				installCmd = buildAutoWindowsInstallCommand(rawURL, token, force)
+			}
+			cmdArch = "auto"
+		} else {
+			installCmd = buildInstallCommand(safeURL, arches[0], token, force, variant)
+			if osName == "windows" {
+				installCmd = buildWindowsInstallCommand(rawURL, arches[0], token, force)
+			}
+			cmdArch = arches[0]
+		}
+		commands := []agentInstallCommand{{
+			Arch: cmdArch, EnrollToken: token, InstallCommand: installCmd,
+		}}
 		if err := tx.Commit(); err != nil {
 			auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", err)
 			httpx.Fail(w, http.StatusInternalServerError, "生成令牌失败")
@@ -805,6 +814,70 @@ func buildInstallCommand(safeURL, arch, token string, force bool, variant string
 		cmd += " --force"
 	}
 	return cmd
+}
+
+// allLegacyArches 判断所选架构是否全部为 legacy 变体。
+// 多架构自动命令据此决定是否强制使用 legacy 文件；混合选择时交给内核检测。
+func allLegacyArches(arches []string) bool {
+	if len(arches) == 0 {
+		return false
+	}
+	for _, a := range arches {
+		if !strings.HasSuffix(a, "-legacy") {
+			return false
+		}
+	}
+	return true
+}
+
+// buildAutoInstallCommand 生成自动识别架构的 Linux 安装命令。
+// uname -m 映射到 amd64/arm64/arm/386；内核版本通过 ?kernel= 传给服务端，
+// 2.x 内核会自动重定向到 *-legacy。forceLegacy 为 true 时直接使用 legacy 文件。
+func buildAutoInstallCommand(safeURL, token string, force, forceLegacy bool) string {
+	legacy := ""
+	if forceLegacy {
+		legacy = "-legacy"
+	}
+	cmd := `ARCH=$(uname -m) \
+  && case "$ARCH" in \
+       x86_64|amd64) ARCH=amd64 ;; \
+       aarch64|arm64) ARCH=arm64 ;; \
+       armv8l|armv7l|armv7|armv6l|armv6) ARCH=arm ;; \
+       i386|i486|i586|i686) ARCH=386 ;; \
+       *) echo "ERROR: 不支持的架构: $ARCH" >&2; exit 1 ;; \
+     esac \
+  && KERNEL=$(uname -r) \
+  && rm -f /tmp/upgrade-agent \
+  && wget -c --tries=5 --timeout=30 --waitretry=5 -O /tmp/upgrade-agent \
+  "` + safeURL + `/api/agent/binary/linux-${ARCH}` + legacy + `?kernel=${KERNEL}" \
+  && chmod +x /tmp/upgrade-agent \
+  && /tmp/upgrade-agent install --server '` + safeURL + `' --enroll-token '` + token + `'`
+	if force {
+		cmd += " --force"
+	}
+	return cmd
+}
+
+// buildAutoWindowsInstallCommand 生成自动识别 amd64/arm64 的 Windows 安装命令。
+// Windows 没有 legacy 变体；PROCESSOR_ARCHITEW6432 用于 32 位 PowerShell 识别 64 位系统。
+func buildAutoWindowsInstallCommand(safeURL, token string, force bool) string {
+	args := []string{"'install'", "'--server'", psQuote(safeURL), "'--enroll-token'", psQuote(token)}
+	if force {
+		args = append(args, "'--force'")
+	}
+	return "$ErrorActionPreference = 'Stop'\n" +
+		"$arch = $env:PROCESSOR_ARCHITECTURE\n" +
+		"if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }\n" +
+		"if ($arch -eq 'ARM64') { $arch = 'arm64' } elseif ($arch -eq 'AMD64') { $arch = 'amd64' } else { Write-Host ('不支持的 Windows 架构: ' + $arch) -ForegroundColor Red; exit 1 }\n" +
+		"$exe = Join-Path $env:TEMP 'upgrade-agent.exe'\n" +
+		"Remove-Item -Force -ErrorAction SilentlyContinue $exe\n" +
+		"$url = " + psQuote(safeURL) + " + '/api/agent/binary/windows-' + $arch\n" +
+		"try { (New-Object System.Net.WebClient).DownloadFile($url, $exe) } " +
+		"catch { Write-Host ('下载失败: ' + $_.Exception.Message) -ForegroundColor Red; " +
+		"Write-Host " + psQuote("请确认本机能访问 "+safeURL+"，可用 Test-NetConnection "+hostOnly(safeURL)+" -Port "+portOf(safeURL)+" 检查") + " -ForegroundColor Yellow }\n" +
+		"if (Test-Path $exe) { Start-Process -FilePath $exe -ArgumentList " +
+		strings.Join(args, ",") + " -Wait -NoNewWindow } " +
+		"else { Write-Host '未下载到安装包，请先解决本机到平台的网络连通性' -ForegroundColor Red }"
 }
 
 // buildWindowsInstallCommand 生成 Windows 一键安装命令（PowerShell）。

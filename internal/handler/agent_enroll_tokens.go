@@ -587,6 +587,17 @@ func insertAutomationToken(ctx context.Context, db automationTokenDB, token, pre
 }
 
 func buildAutomationInstallCommands(s *svc.ServiceContext, r *http.Request, token, osName string, arches []string, force bool) ([]agentInstallCommand, string, error) {
+	// 多架构时只返回一条命令：命令在目标机自动识别 uname -m / PROCESSOR_ARCHITECTURE，
+	// 避免页面出现多条几乎相同的命令。
+	if len(arches) > 1 {
+		cmd, base, err := buildAutomationAutoInstallCommand(s, r, token, osName, arches, force)
+		if err != nil {
+			return nil, "", err
+		}
+		return []agentInstallCommand{{
+			Arch: "auto", EnrollToken: token, InstallCommand: cmd,
+		}}, base, nil
+	}
 	commands := make([]agentInstallCommand, 0, len(arches))
 	baseURL := ""
 	for _, arch := range arches {
@@ -600,6 +611,21 @@ func buildAutomationInstallCommands(s *svc.ServiceContext, r *http.Request, toke
 		})
 	}
 	return commands, baseURL, nil
+}
+
+// buildAutomationAutoInstallCommand 生成多架构自动识别命令（自动化令牌复用同一 token）。
+func buildAutomationAutoInstallCommand(s *svc.ServiceContext, r *http.Request, token, osName string, arches []string, force bool) (string, string, error) {
+	snap := s.ConfigSnapshot()
+	serverURL := installBaseURL(snap.Server.ExternalURL, r, snap.Server.TrustProxy)
+	rawURL, err := validateURL(serverURL)
+	if err != nil {
+		return "", "", err
+	}
+	if osName == "windows" {
+		return buildAutoWindowsInstallCommand(rawURL, token, force), serverURL, nil
+	}
+	safeURL := shellEscape(rawURL)
+	return buildAutoInstallCommand(safeURL, token, force, allLegacyArches(arches)), serverURL, nil
 }
 
 func buildAutomationInstallCommand(s *svc.ServiceContext, r *http.Request, token, osName, arch string, force bool) (string, string, error) {

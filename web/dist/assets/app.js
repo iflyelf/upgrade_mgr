@@ -2580,7 +2580,7 @@
     return h('div', {}, [
       hint('主机信息来自 Agent 注册：IP 取服务端看到的来源地址，主机名、OS、架构、init 系统由 Agent 上报。所以装好客户端，主机就会带着 IP 出现在列表里。'),
       field('目标操作系统', osEl, 'Windows 支持 Server 2008 R2 ~ Windows 11（amd64/arm64）；Windows 安装命令需在“管理员 PowerShell”中执行。'),
-      field('目标机器架构', picker.el, '可多选：一次性令牌会为每个架构分别生成独立令牌与安装命令。Linux 上执行 uname -m：x86_64 选 amd64，aarch64 选 arm64；Windows 绝大多数为 amd64，arm64 用于 Windows on ARM。镜像/部署目录需包含对应架构的 Agent，否则下载会 404。'),
+      field('目标机器架构', picker.el, '可多选：多选时生成一条自动识别目标机架构的命令（Linux 用 uname -m + 内核检测，Windows 用 PROCESSOR_ARCHITECTURE）；一次性令牌仍只能接入一台主机。镜像/部署目录需包含对应架构的 Agent，否则下载会 404。'),
       field('强制重新注册', forceEl, '勾选后命令会带 --force，覆盖目标机已有 state.json 并重新注册。仅在换服务端、数据库重置或重新接入同一台机器时使用；普通重装请勿勾选。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
@@ -2603,8 +2603,12 @@
       e && e.commands && e.commands.length ? h('div', {}, [
         e.base ? hint('安装命令使用地址：' + e.base + '。可在“设置”页修改 server.external_url，保存后立即生效；Nginx 域名场景填 https://your-domain。') : null,
         hint(((e.os === 'windows') ? '在目标机器用“管理员 PowerShell”执行（令牌一次性使用，' : '在目标机器用 root 执行（令牌一次性使用，') + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）' +
-          (e.commands.length > 1 ? '。已为 ' + e.commands.length + ' 个架构分别生成独立令牌，请按目标机架构选择对应命令。' : '：')),
-        e.commands.map(function (c) { return codeBlock(c.install_command, '主机接入命令 · ' + c.arch); }),
+          (e.commands.length === 1 && e.commands[0].arch === 'auto'
+            ? '。命令会自动识别目标机架构（已选 ' + (e.arches || []).join(' / ') + '），一次性令牌仍只能接入一台主机。'
+            : '：')),
+        e.commands.map(function (c) {
+          return codeBlock(c.install_command, '主机接入命令 · ' + (c.arch === 'auto' ? '自动识别架构' : c.arch));
+        }),
         e.os === 'windows' ? hint('Windows 安装使用 PowerShell + System.Net.WebClient，兼容 Server 2008 R2 自带的 PowerShell 2.0。cmd 可先执行 powershell -NoProfile -ExecutionPolicy Bypass 再粘贴命令。服务以 LocalSystem 运行，重启后自动恢复。') : null,
         e.force ? hint('当前为强制重新注册命令（含 --force）：会覆盖目标机现有 Agent 身份，旧 Agent 记录将不再被该主机使用。') : null,
         hint('执行完成后点上方“搜索”刷新列表。如果 IP 显示成了代理地址，检查服务端 server.trust_proxy 配置。'),
@@ -2649,8 +2653,12 @@
     var createdBlock = created ? h('div', { class: 'field' }, [
       hint('自动化令牌已生成（仅显示一次，请立即复制到自动化平台）：'),
       codeBlock(created.token, '自动化令牌'),
-      createdCmds.length ? hint('安装命令示例（token 已嵌入，可分别用于所选架构）：') : null,
-      createdCmds.map(function (c) { return codeBlock(c.install_command, '安装命令示例 · ' + c.arch); }),
+      createdCmds.length ? hint(createdCmds.length === 1 && createdCmds[0].arch === 'auto'
+        ? '安装命令示例（token 已嵌入，命令会自动识别目标机架构）：'
+        : '安装命令示例（token 已嵌入，可分别用于所选架构）：') : null,
+      createdCmds.map(function (c) {
+        return codeBlock(c.install_command, '安装命令示例 · ' + (c.arch === 'auto' ? '自动识别架构' : c.arch));
+      }),
       created.expires_at ? hint('到期时间：' + fmtTime(created.expires_at)) : hint('永久有效：不会自动过期，请妥善保管并定期轮换。'),
       h('button', { type: 'button', class: 'btn ghost small', onclick: function () { state.automationCreated = null; render(); } }, ['关闭提示'])
     ]) : null;
@@ -2719,7 +2727,7 @@
       field('最大使用次数（0=不限）', maxUsesEl, '达到上限后令牌自动失效；永久令牌建议至少设置来源 CIDR。'),
       field('IP/CIDR 白名单（可选）', cidrEl, '逗号分隔，例如 10.0.0.0/8,192.168.1.0/24；为空表示不限制来源 IP。'),
       field('安装命令目标系统', osEl, '令牌本身与操作系统无关；这里只影响生成的安装命令示例。'),
-      field('安装命令架构', picker.el, '可多选；令牌本身与架构无关，这里只影响生成的安装命令示例。'),
+      field('安装命令架构', picker.el, '可多选；多选时生成一条自动识别目标机架构的安装命令。令牌本身与架构无关。'),
       field('强制重新注册', forceEl, '安装命令是否带 --force；普通接入不要勾选。'),
       h('div', { class: 'toolbar' }, [
         h('button', {

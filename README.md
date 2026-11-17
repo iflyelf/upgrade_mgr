@@ -109,7 +109,7 @@ export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
 
 **1. 主机 接入 Linux Agent**
 
-- 在「主机」页选择 Linux 与一个或多个架构（可多选：amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；一次性令牌会为每个架构分别生成独立令牌，默认 15 分钟有效。
+- 在「主机」页选择 Linux 与一个或多个架构（可多选：amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；多选时生成一条自动识别架构的命令（Linux 用 uname -m + 内核检测），一次性令牌仍只能接入一台主机，默认 15 分钟有效。
 - 到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。
 - 主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。
 - 「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。
@@ -168,7 +168,7 @@ sudo bash examples/node_exporter/install.sh uninstall -y
 
 **1. 主机 接入 Windows Agent**
 
-- 在「主机」页选择 Windows 与一个或多个架构（可多选：绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」，在目标机以管理员 PowerShell 执行。
+- 在「主机」页选择 Windows 与一个或多个架构（可多选：绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」；多选时生成一条自动识别架构的命令，在目标机以管理员 PowerShell 执行。
 - Server 2008 R2 ~ Windows 11 通用；2008 R2 + PowerShell 2.0 不支持 TLS 1.2 时，页面命令直接从控制台下载 Agent（HTTP 即可），不依赖 GitHub。
 - Agent 注册为 Windows 服务 upgrade-agent（LocalSystem，失败 5s/10s/30s 自动重启），并安装每分钟运行的计划任务看门狗。
 - 可选 MSI：msiexec /i upgrade-agent-`<版本>`-x64.msi SERVERURL=https://`<控制台>` ENROLLTOKEN=`<令牌>`。
@@ -243,7 +243,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 **1. Host: enroll Linux agent**
 
-- On Hosts, choose Linux and one or more architectures (multi-select: amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Each architecture gets its own one-time token, valid for 15 minutes.
+- On Hosts, choose Linux and one or more architectures (multi-select: amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Multi-arch selection generates one command that auto-detects the architecture; the one-time token still enrolls a single host and is valid for 15 minutes.
 - Run the command as root on the target. The agent installs as a systemd service (SysV fallback) and the host appears in the list.
 - Hostname, OS, architecture and egress IP are reported by the agent; multi-NIC hosts are matched by their egress address.
 - Consul sync can also import hosts, but hosts without an agent are skipped when tasks are dispatched.
@@ -302,7 +302,7 @@ sudo bash examples/node_exporter/install.sh uninstall -y
 
 **1. Host: enroll Windows agent**
 
-- On Hosts, choose Windows and one or more architectures (multi-select: usually amd64; Windows on ARM uses arm64), generate the command and run it in an elevated PowerShell.
+- On Hosts, choose Windows and one or more architectures (multi-select: usually amd64; Windows on ARM uses arm64); multi-arch selection generates one auto-detecting command to run in an elevated PowerShell.
 - Works on Server 2008 R2 – Windows 11. On 2008 R2 + PowerShell 2.0 without TLS 1.2, the command downloads the agent directly from the console over HTTP (no GitHub dependency).
 - The agent registers as the Windows service upgrade-agent (LocalSystem, restart 5s/10s/30s) and installs a per-minute scheduled-task watchdog.
 - Optional MSI: msiexec /i upgrade-agent-`<version>`-x64.msi SERVERURL=https://`<console>` ENROLLTOKEN=`<token>`.
@@ -2015,7 +2015,7 @@ POST /api/agent/enroll-tokens/batch-delete # 批量删除自动化令牌
 自动化令牌与一次性令牌并存：
 
 - **一次性令牌**：保持原有行为，默认 15 分钟、单次使用、每台机器一个；`consumeEnrollTokenTx` 的单次消费逻辑不变。
-- **自动化令牌**：页面「主机 → 接入主机 → 自动化令牌」生成，可永久有效或自定义到期时间；可设置最大使用次数（0=不限）、来源 CIDR；生成安装命令时可多选目标架构（同一令牌可用于多个架构的命令）；页面可注销/轮换，注销只阻止新注册，不影响已运行 Agent。
+- **自动化令牌**：页面「主机 → 接入主机 → 自动化令牌」生成，可永久有效或自定义到期时间；可设置最大使用次数（0=不限）、来源 CIDR；生成安装命令时可多选目标架构，多选时生成一条自动识别架构的命令（同一令牌可用于多个架构）；页面可注销/轮换，注销只阻止新注册，不影响已运行 Agent。
 - 创建时完整 token 只返回一次，列表仅显示 `token_prefix`；数据库只保存 SHA-256。
 - 注册接口按 token 类型消费：一次性令牌检查 `used_at IS NULL`，自动化令牌原子累加 `used_count` 并检查 `max_uses`，两者都受 `enabled/expires_at/CIDR` 约束。
 
