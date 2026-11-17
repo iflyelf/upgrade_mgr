@@ -2089,9 +2089,16 @@
     var st = state.agentStats;
     var head = h('div', { class: 'card-head' }, [
       h('h3', {}, ['Agent 版本分布']),
-      h('span', {
-        class: 'muted auto-refresh-tip', id: 'agent-stats-tip'
-      }, [agentStatsTipText()])
+      h('div', { class: 'card-head-actions' }, [
+        h('span', {
+          class: 'muted auto-refresh-tip', id: 'agent-stats-tip'
+        }, [agentStatsTipText()]),
+        // 除自动刷新外保留手动刷新，便于升级后立即核对最新分布。
+        h('button', {
+          type: 'button', class: 'btn ghost small',
+          title: '立即刷新版本分布', onclick: function () { loadAgentStats(); }
+        }, ['刷新'])
+      ])
     ]);
     if (!st || !st.total) {
       // 首次加载失败时给出提示；没有 Agent 时保持空白，不占用页面空间。
@@ -2110,8 +2117,12 @@
         x.arch || '-',
         x.count || 0,
         x.offline || 0,
+        // 旧版本数量会随 Agent 逐个升级而变化（3 -> 2 -> 1 -> 最新），
+        // 让「状态」列在整组升级完成前也能看出自动刷新效果。
         x.outdated
-          ? h('span', { class: 'tag status-failed' }, ['旧版本'])
+          ? h('span', { class: 'tag status-failed' }, [
+            '旧版本' + (x.outdated_count ? ' ' + x.outdated_count : '')
+          ])
           : h('span', { class: 'tag status-success' }, ['最新'])
       ];
     });

@@ -18,9 +18,12 @@ import (
 // 只缓存 JSON 200 响应；带 Set-Cookie 的响应不缓存（登录态变化）。
 // 键包含会话 cookie 哈希，天然按用户隔离，不会串租户数据。
 var cacheablePaths = map[string]bool{
-	"/api/hosts":               true,
-	"/api/hosts/facets":        true,
-	"/api/agents/stats":        true,
+	"/api/hosts":        true,
+	"/api/hosts/facets": true,
+	// /api/agents/stats 不缓存：版本/离线/旧版本数量随 Agent 心跳与自升级结果变化，
+	// 而 Agent 上报（/api/agent/*）不会清空缓存。若走 Redis 缓存，版本分布卡片
+	// 会最多滞后一个 TTL，看起来像「数量/离线/状态没有自动刷新」。
+	// 该查询只按 agents 分组，数据量小，按页面刷新频率直连数据库无压力。
 	"/api/components":          true,
 	"/api/artifacts":           true,
 	"/api/artifacts/paged":     true,

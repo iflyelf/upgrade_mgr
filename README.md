@@ -2071,6 +2071,7 @@ GET /api/hosts?page=1&size=50&q=关键字&app_code=&os_family=&account=&agent_st
                                     # app_code/os_family/account: 精确匹配
                                     # agent_status: 按页面显示的有效状态筛选（online/offline/unknown等）
                                     # upgrade_status: Agent 自升级状态（success/failed/none）
+GET /api/agents/stats                # Agent 版本分布（数量/离线/旧版本状态；不走 Redis 缓存，轮询即最新）
 GET /api/hosts/facets?fields=app_code,os_family,account
                                     # 主机字段去重值（下拉筛选用）；不传 fields 时取 task.host_selector_fields 配置
 GET /api/hosts/deletable-ids?q=&app_code=  # 当前筛选条件下可删除的主机 ID（排除有未完成任务的）
@@ -2543,7 +2544,7 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 
 ### 2026-10-22 页面自动刷新、登录回车、CI 整合与并发审计
 
-- 任务列表与主机列表新增自动刷新：有升级动作时 4 秒、空闲时 15 秒；Agent 版本分布卡片与主机列表同频自动刷新并显示最近更新时间；数据未变化不重建 DOM，自动刷新遇到输入框聚焦会跳过，避免打断填写。任务详情弹窗同样按数据指纹去重，并恢复展开的日志与滚动位置。页面切到后台时暂停轮询，重新可见时立即刷新。
+- 任务列表与主机列表新增自动刷新：有升级动作时 4 秒、空闲时 15 秒；Agent 版本分布卡片与主机列表同频自动刷新并显示最近更新时间，数量/离线/状态均按轮询实时刷新（状态列显示剩余旧版本数量，如「旧版本 3」）；数据未变化不重建 DOM，自动刷新遇到输入框聚焦会跳过，避免打断填写。任务详情弹窗同样按数据指纹去重，并恢复展开的日志与滚动位置。页面切到后台时暂停轮询，重新可见时立即刷新。
 - 任务列表新增“进度”列，直接展示成功占比；主机列表与任务列表标注“自动刷新中”。
 - 登录页支持用户名/密码框按回车提交，登录中禁用按钮，失败后保留用户名并自动聚焦密码框。
 - 合并 `.github/workflows/build.yml` 与 `publish.yml` 为单一 `ci-cd.yml`：PR 跑 PostgreSQL 集成测试 + `go vet` + 前端语法检查；main/tag 复用同一套编译产物发布，不再重复编译；整仓只保留一个旧运行记录清理任务。

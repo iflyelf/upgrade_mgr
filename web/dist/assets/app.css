@@ -273,6 +273,7 @@ pre.code {
   gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
 }
 .card-head h3 { margin: 0; }
+.card-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .detail-subtitle { margin: 16px 0 8px; }
 .modal .table-wrap { max-height: 340px; overflow: auto; }
 /* 内容查看弹窗：宽幅等宽字体。表格列/窄容器内的行内 pre 会被挤成细长条，
