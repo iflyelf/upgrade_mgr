@@ -11,6 +11,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/hostfieldmap"
+	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 )
 
 // TestUpsertWithMappings 验证「映射驱动的 upsert」真实落库行为。
@@ -145,5 +146,62 @@ func TestUpsertWithMappings(t *testing.T) {
 	if err := syncer.upsert(ctx, row, hostfieldmap.NewSet(nil),
 		hostfieldmap.SourceConsul, time.Now()); err != nil {
 		t.Fatalf("空映射 upsert 失败: %v", err)
+	}
+}
+
+// TestConsulHostnameAuthoritative 验证 Consul/consul_mgr 的 hostname 映射默认覆盖，
+// 同步会用清单主机名覆盖 Agent 上报值。
+func TestConsulHostnameAuthoritative(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL，跳过 hostname 覆盖测试")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	ctx := context.Background()
+	for _, source := range []string{hostfieldmap.SourceConsul, hostfieldmap.SourceConsulMgr} {
+		var overwrite bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT overwrite FROM host_field_mappings
+			 WHERE source=$1 AND source_key='name'
+			   AND target_kind='column' AND target_key='hostname'`, source).Scan(&overwrite); err != nil {
+			t.Fatalf("读取 %s hostname 映射失败: %v", source, err)
+		}
+		if !overwrite {
+			t.Fatalf("%s hostname 映射应为覆盖模式", source)
+		}
+	}
+
+	const ip = "203.0.113.78"
+	db.ExecContext(ctx, `DELETE FROM hosts WHERE ip=$1`, ip)
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip=$1`, ip) })
+	if _, err := db.ExecContext(ctx, `INSERT INTO hosts (ip, hostname, source, tenant_id)
+		VALUES ($1,'agent-name','agent',1)`, ip); err != nil {
+		t.Fatal(err)
+	}
+
+	mappings, err := hostfieldmap.NewRepo(db).Enabled(ctx, hostfieldmap.SourceConsul)
+	if err != nil {
+		t.Fatalf("加载默认映射失败: %v", err)
+	}
+	syncer := NewSyncer(db)
+	row := &hostRow{IP: ip, Meta: map[string]string{"name": "consul-node-a"}}
+	if err := syncer.upsert(ctx, row, hostfieldmap.NewSet(mappings),
+		hostfieldmap.SourceConsul, time.Now()); err != nil {
+		t.Fatalf("upsert 失败: %v", err)
+	}
+	var got string
+	if err := db.QueryRowContext(ctx, `SELECT hostname FROM hosts WHERE ip=$1`, ip).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "consul-node-a" {
+		t.Fatalf("hostname = %q, want consul-node-a（Consul 数据应覆盖 Agent 值）", got)
 	}
 }

@@ -2087,7 +2087,7 @@ POST /api/hosts/{id}/tunnel-test        # 从平台侧拨测隧道地址（管�
   两者都不参与隧道建立。
 - 未提交的字段保持原值，传空字符串表示清空。
 - `ip`、`os_family`、`arch`、`agent_status` 等由 Agent 上报，不允许页面修改。
-- Agent 重新注册会覆盖 `hostname`；Consul 同步返回非空业务字段时会覆盖对应字段。
+- 主机名以 `consul` / `consul_mgr` 清单数据为准：`hostname` 映射默认覆盖已有值，Agent 重新注册/心跳不会覆盖清单主机名；没有清单数据的主机才使用 Agent 上报的主机名。对应映射可在「人员组织 → 主机字段映射」调整。
 
 **主机删除**
 

@@ -313,8 +313,13 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 				return
 			}
 			// 更新现有主机：保留原 ip（清单地址），只绑定 Agent 与运行信息。
+			// 主机名以 Consul/consul_mgr 数据为准：已有清单主机名时不被 Agent 覆盖；
+			// 清单主机名为空时才用上报值补齐。source 也保留清单来源，避免合并时丢优先级。
 			if _, err = tx.ExecContext(ctx, `UPDATE hosts SET
-					hostname=$2,
+					hostname=CASE
+						WHEN (COALESCE(source,'') IN ('consul','consul_mgr') OR COALESCE(consul_node,'') <> '')
+						     AND COALESCE(hostname,'') <> '' THEN hostname
+						ELSE $2 END,
 					os_family=COALESCE(NULLIF($3,''),os_family),
 					os_version=COALESCE(NULLIF($4,''),os_version),
 					arch=COALESCE(NULLIF($5,''),arch),
@@ -327,7 +332,7 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 					exit_ip=CASE WHEN $12<>'' THEN $12 ELSE exit_ip END,
 					agent_status='online',
 					supervisor=$13,
-					source='agent',
+					source=CASE WHEN COALESCE(source,'') IN ('','agent') THEN 'agent' ELSE source END,
 					last_seen=NOW()
 				WHERE id=$1`,
 				hostID, hostname, osName, osVersion, arch, kernel, agentID, agentVersion,
@@ -341,7 +346,12 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 			err = tx.QueryRowContext(ctx, `INSERT INTO hosts (ip, hostname, os_family, os_version, arch, kernel, agent_id, agent_version,
 					agent_build_version, agent_build_hash, agent_build_variant, exit_ip, agent_status, supervisor, source, last_seen, tenant_id)
 				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'online',$13,'agent',NOW(),$14)
-				ON CONFLICT (ip) DO UPDATE SET hostname=EXCLUDED.hostname, os_family=COALESCE(NULLIF(EXCLUDED.os_family,''),hosts.os_family),
+				ON CONFLICT (ip) DO UPDATE SET
+					hostname=CASE
+						WHEN (COALESCE(hosts.source,'') IN ('consul','consul_mgr') OR COALESCE(hosts.consul_node,'') <> '')
+						     AND COALESCE(hosts.hostname,'') <> '' THEN hosts.hostname
+						ELSE EXCLUDED.hostname END,
+					os_family=COALESCE(NULLIF(EXCLUDED.os_family,''),hosts.os_family),
 					arch=COALESCE(NULLIF(EXCLUDED.arch,''),hosts.arch), agent_id=EXCLUDED.agent_id,
 					agent_version=EXCLUDED.agent_version,
 					agent_build_version=EXCLUDED.agent_build_version,
@@ -349,7 +359,8 @@ func AgentRegister(s *svc.ServiceContext) http.HandlerFunc {
 					agent_build_variant=EXCLUDED.agent_build_variant,
 					exit_ip=CASE WHEN EXCLUDED.exit_ip<>'' THEN EXCLUDED.exit_ip ELSE hosts.exit_ip END,
 					agent_status='online', supervisor=EXCLUDED.supervisor,
-					source='agent', last_seen=NOW()
+					source=CASE WHEN COALESCE(hosts.source,'') IN ('','agent') THEN 'agent' ELSE hosts.source END,
+					last_seen=NOW()
 				WHERE hosts.tenant_id = EXCLUDED.tenant_id
 				RETURNING id`,
 				ip, hostname, osName, osVersion, arch, kernel, agentID, agentVersion,

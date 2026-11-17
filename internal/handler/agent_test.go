@@ -304,6 +304,72 @@ func TestAgentRegisterStoresSignatureModes(t *testing.T) {
 	}
 }
 
+// TestAgentRegisterPreservesConsulHostname 验证主机名以 Consul/consul_mgr 为准：
+// 清单已有主机名时 Agent 注册不覆盖；清单为空或非清单主机才使用上报值。
+func TestAgentRegisterPreservesConsulHostname(t *testing.T) {
+	db, sc := setupHostDB(t)
+	sc.Config = config.Default()
+	sc.Config.Agent.RequireEnrollToken = false
+
+	cases := []struct {
+		ip, source, hostname, consulNode string
+		wantHostname, wantSource         string
+	}{
+		{"203.0.113.201", "consul", "consul-node-a", "consul-node-a", "consul-node-a", "consul"},
+		{"203.0.113.202", "consul_mgr", "mgr-node-b", "mgr-node-b", "mgr-node-b", "consul_mgr"},
+		{"203.0.113.203", "consul", "", "consul-node-c", "agent-reported", "consul"},
+		{"203.0.113.204", "manual", "manual-name", "", "agent-reported", "manual"},
+		// 历史数据可能已被写成 source=agent，但 consul_node 仍能证明它来自清单。
+		{"203.0.113.205", "agent", "legacy-consul-name", "legacy-node", "legacy-consul-name", "agent"},
+	}
+	var ids []int64
+	for _, tc := range cases {
+		var id int64
+		if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, consul_node, source, tenant_id)
+			VALUES ($1,$2,$3,$4,1) RETURNING id`,
+			tc.ip, tc.hostname, tc.consulNode, tc.source).Scan(&id); err != nil {
+			t.Fatalf("插入主机 %s 失败: %v", tc.ip, err)
+		}
+		ids = append(ids, id)
+	}
+	t.Cleanup(func() {
+		for _, id := range ids {
+			db.Exec(`DELETE FROM hosts WHERE id=$1`, id)
+		}
+	})
+
+	for _, tc := range cases {
+		req := httptest.NewRequest("POST", "/api/agent/register",
+			strings.NewReader(`{"hostname":"agent-reported","arch":"amd64"}`))
+		req.RemoteAddr = tc.ip + ":12345"
+		rec := httptest.NewRecorder()
+		AgentRegister(sc)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s 注册失败 %d: %s", tc.ip, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Data struct {
+				AgentID string `json:"agent_id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("解析注册响应失败: %v", err)
+		}
+		agentID := out.Data.AgentID
+		t.Cleanup(func() { db.Exec(`DELETE FROM agents WHERE agent_id=$1`, agentID) })
+
+		var gotHost, gotSource string
+		if err := db.QueryRow(`SELECT COALESCE(hostname,''), COALESCE(source,'')
+			FROM hosts WHERE ip=$1`, tc.ip).Scan(&gotHost, &gotSource); err != nil {
+			t.Fatalf("查询主机 %s 失败: %v", tc.ip, err)
+		}
+		if gotHost != tc.wantHostname || gotSource != tc.wantSource {
+			t.Fatalf("%s hostname/source = %q/%q, want %q/%q",
+				tc.ip, gotHost, gotSource, tc.wantHostname, tc.wantSource)
+		}
+	}
+}
+
 func TestAgentHeartbeatUpdatesSignatureModes(t *testing.T) {
 	db, sc := setupHostDB(t)
 	sc.Config = config.Default()

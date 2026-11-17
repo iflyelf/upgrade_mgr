@@ -101,3 +101,48 @@ func TestMergeCandidates(t *testing.T) {
 		t.Fatalf("Agent 应迁移到目标主机 %d，实际 %d", idA, agentHost)
 	}
 }
+
+// TestPickTargetPrefersConsul 验证合并目标优先选择 Consul 清单行，
+// 从而保留清单主机名而不是 Agent 上报值。
+func TestPickTargetPrefersConsul(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL，跳过合并目标测试")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("连接数据库失败: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+
+	sfx := time.Now().UnixNano()
+	ipAgent := fmt.Sprintf("198.35.%d.%d", (sfx/250)%250, sfx%250)
+	ipConsul := fmt.Sprintf("198.36.%d.%d", (sfx/250)%250, (sfx+1)%250)
+	var agentID, consulID int64
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, source, tenant_id)
+		VALUES ($1,'agent-name','agent',1) RETURNING id`, ipAgent).Scan(&agentID); err != nil {
+		t.Fatalf("插入 Agent 主机失败: %v", err)
+	}
+	if err := db.QueryRow(`INSERT INTO hosts (ip, hostname, source, tenant_id)
+		VALUES ($1,'consul-name','consul',1) RETURNING id`, ipConsul).Scan(&consulID); err != nil {
+		t.Fatalf("插入 Consul 主机失败: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE id IN ($1,$2)`, agentID, consulID) })
+
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	got, err := PickTarget(ctx, tx, []int64{agentID, consulID}, "")
+	if err != nil {
+		t.Fatalf("PickTarget 失败: %v", err)
+	}
+	if got != consulID {
+		t.Fatalf("应优先选择 consul 清单行，got %d want %d", got, consulID)
+	}
+}

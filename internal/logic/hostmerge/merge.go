@@ -226,6 +226,9 @@ func PickTarget(ctx context.Context, tx *sql.Tx, ids []int64, key string) (int64
 		switch source {
 		case "consul_mgr":
 			score += 300
+		case "consul":
+			// 直连 Consul 与 consul_mgr 都属于清单数据，主机名/业务字段优先保留。
+			score += 250
 		case "manual":
 			score += 200
 		}
