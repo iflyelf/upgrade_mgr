@@ -205,3 +205,85 @@ func TestConsulHostnameAuthoritative(t *testing.T) {
 		t.Fatalf("hostname = %q, want consul-node-a（Consul 数据应覆盖 Agent 值）", got)
 	}
 }
+
+// TestConsulMappedFieldsUpdate 验证默认映射为覆盖模式：
+// Consul/consul_mgr 标签值变化后，下次同步会自动更新已有主机的业务字段。
+func TestConsulMappedFieldsUpdate(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("未设置 DATABASE_URL，跳过映射更新测试")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := migrate.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	ctx := context.Background()
+	// 两个来源的默认映射都应为覆盖模式（hostname 由 045 负责，其余由 046）。
+	rows, err := db.QueryContext(ctx, `
+		SELECT source, source_key, target_key, overwrite
+		  FROM host_field_mappings
+		 WHERE source IN ('consul','consul_mgr')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	checked := 0
+	for rows.Next() {
+		var source, sourceKey, targetKey string
+		var overwrite bool
+		if err := rows.Scan(&source, &sourceKey, &targetKey, &overwrite); err != nil {
+			t.Fatal(err)
+		}
+		if !overwrite {
+			t.Fatalf("%s 映射 %s→%s 应为覆盖模式", source, sourceKey, targetKey)
+		}
+		checked++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if checked < 16 {
+		t.Fatalf("默认映射数量异常: %d", checked)
+	}
+
+	const ip = "203.0.113.79"
+	db.ExecContext(ctx, `DELETE FROM hosts WHERE ip=$1`, ip)
+	t.Cleanup(func() { db.Exec(`DELETE FROM hosts WHERE ip=$1`, ip) })
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO hosts (ip, hostname, app_code, biz_group, account, source, tenant_id)
+		VALUES ($1,'old-host','old-app','old-group','old-account','consul',1)`, ip); err != nil {
+		t.Fatal(err)
+	}
+
+	mappings, err := hostfieldmap.NewRepo(db).Enabled(ctx, hostfieldmap.SourceConsul)
+	if err != nil {
+		t.Fatalf("加载默认映射失败: %v", err)
+	}
+	syncer := NewSyncer(db)
+	row := &hostRow{IP: ip, Meta: map[string]string{
+		"name":     "new-host",
+		"app_code": "new-app",
+		"group":    "new-group",
+		"account":  "new-account",
+	}}
+	if err := syncer.upsert(ctx, row, hostfieldmap.NewSet(mappings),
+		hostfieldmap.SourceConsul, time.Now()); err != nil {
+		t.Fatalf("upsert 失败: %v", err)
+	}
+
+	var hostname, appCode, bizGroup, account string
+	if err := db.QueryRowContext(ctx, `
+		SELECT hostname, app_code, biz_group, account FROM hosts WHERE ip=$1`, ip).
+		Scan(&hostname, &appCode, &bizGroup, &account); err != nil {
+		t.Fatal(err)
+	}
+	if hostname != "new-host" || appCode != "new-app" || bizGroup != "new-group" || account != "new-account" {
+		t.Fatalf("标签变化未自动更新: hostname=%q app=%q group=%q account=%q",
+			hostname, appCode, bizGroup, account)
+	}
+}
