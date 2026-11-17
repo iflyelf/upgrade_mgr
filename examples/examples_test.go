@@ -4,6 +4,7 @@ package examples
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -112,5 +113,32 @@ func TestWindowsExporterInstallPaths(t *testing.T) {
 	}
 	if !strings.Contains(string(cfg), "C:\\monitor\\exporter\\metrics") {
 		t.Fatal("config.yaml 的 textfile 目录未对齐到 C:\\monitor\\exporter\\metrics")
+	}
+}
+
+// TestInstallMonitorScriptSyntax 校验一体化安装脚本语法与关键片段。
+func TestInstallMonitorScriptSyntax(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("未找到 bash，跳过脚本语法检查")
+	}
+	path := "install_monitor/install-monitor.sh"
+	out, err := exec.Command("bash", "-n", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("脚本语法错误: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"/api/agent/install-monitor/token",
+		"/api/agent/binary/linux-",
+		"node-exporter-install.sh",
+		"LEGACY-CLEANUP",
+		"--force",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("脚本缺少 %q", want)
+		}
 	}
 }

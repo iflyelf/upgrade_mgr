@@ -28,7 +28,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     -o /tmp/upgrade-mgr ./cmd/server && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /tmp/upgrade-agent ./cmd/agent
+    -o /tmp/upgrade-agent ./cmd/agent && \
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+    go build -trimpath -ldflags "-s -w" \
+    -o /tmp/install-windows-monitor.exe ./cmd/install-monitor
 
 #=================================================
 # 运行阶段：轻量级镜像，仅包含运行时依赖
@@ -65,6 +68,8 @@ RUN chmod +x /usr/local/bin/upgrade-mgr /usr/local/bin/upgrade-agent
 # 一键安装：Agent 二进制放入 server.agent_binary_dir（默认 ./dist）
 ARG TARGETARCH=amd64
 COPY --from=builder --chown=upgrade:upgrade /tmp/upgrade-agent /opt/upgrade-mgr/dist/upgrade-agent-linux-${TARGETARCH}
+# Windows 一体化安装器（接入脚本页 /install-windows-monitor.exe）
+COPY --from=builder --chown=upgrade:upgrade /tmp/install-windows-monitor.exe /opt/upgrade-mgr/dist/install-windows-monitor.exe
 
 # 拷贝默认配置示例（可选）
 COPY --chown=upgrade:upgrade deploy/config/config.yaml /etc/upgrade-mgr/config.example.yaml

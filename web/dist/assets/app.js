@@ -116,6 +116,7 @@
     artifactPages: 1, artifactTotal: 0,
     guideOpen: null, guideOS: '', quickstart: undefined, quickstartErr: '', enroll: null,
     enrollMode: 'one_time', automationList: null, automationErr: '', automationLoading: false, automationCreated: null,
+    installScripts: null, installScriptBusy: false, installScriptErr: '',
     automationOS: 'linux', automationArches: ['amd64'],
     preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     hostImport: null, hostBatchEdit: null,
@@ -2539,8 +2540,57 @@
         enrollModeTab('one_time', '一次性令牌'),
         enrollModeTab('automation', '自动化令牌')
       ]),
-      mode === 'automation' ? automationEnrollBody() : oneTimeEnrollBody()
+      mode === 'automation' ? automationEnrollBody() : oneTimeEnrollBody(),
+      isAdmin() ? installScriptSection() : null
     ]);
+  }
+
+  // installScriptSection 生成一体化安装脚本入口（永久令牌）。
+  // 脚本/安装器 URL 固定，内部运行时读取 /api/agent/install-monitor/token；
+  // 重新生成只会轮换令牌，不改变脚本地址。
+  function installScriptSection() {
+    var d = state.installScripts;
+    var busy = !!state.installScriptBusy;
+    function generate() {
+      state.installScriptBusy = true;
+      state.installScriptErr = '';
+      api('/api/agent/install-monitor/token', { method: 'POST' })
+        .then(function (res) {
+          state.installScripts = res || {};
+          state.installScriptBusy = false;
+          render();
+        })
+        .catch(function (e) {
+          state.installScriptErr = e.message;
+          state.installScriptBusy = false;
+          render();
+        });
+    }
+    var lines = [
+      h('h3', { style: 'margin-top:18px' }, ['生成接入脚本（自动化）']),
+      hint('脚本使用永久自动化令牌，可重复执行并强制重新注册主机；Linux 自动识别架构，安装 Agent + Node Exporter；Windows 安装器安装 Agent + Windows Exporter。仅使用控制台内网地址下载。'),
+      state.installScriptErr ? h('div', { class: 'err', role: 'alert' }, [state.installScriptErr]) : null,
+      h('div', { class: 'toolbar' }, [
+        h('button', {
+          type: 'button', class: 'btn', disabled: busy ? 'disabled' : null,
+          onclick: generate
+        }, [busy ? '生成中…' : '生成接入脚本'])
+      ])
+    ];
+    if (d) {
+      var base = d.base_url || '';
+      var linux = 'curl -fsSL -m 3 --retry 3 "' + (d.linux_url || '') + '" | bash -s -- install -y --server "' + base + '"';
+      var win = 'install-windows-monitor.exe install -y --server "' + base + '"';
+      lines.push(h('div', {}, [
+        hint('永久令牌：' + (d.token_prefix || '') + '。重新生成会轮换令牌，旧脚本 URL 会自动读取新令牌。'),
+        codeBlock(linux, 'Linux 接入脚本命令'),
+        hint('Windows 安装器下载地址（在目标机以管理员 PowerShell/CMD 运行）：'),
+        codeBlock(d.windows_url || '', 'Windows 安装器地址'),
+        codeBlock(win, 'Windows 安装命令'),
+        hint('⚠️ 安装脚本与令牌接口无鉴权，仅限内网使用；请在防火墙限制访问来源。')
+      ]));
+    }
+    return h('div', {}, lines);
   }
 
   function enrollModeTab(mode, label) {

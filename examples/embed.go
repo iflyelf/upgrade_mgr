@@ -12,6 +12,9 @@ var nodeExporterInstallSh []byte
 //go:embed windows_exporter/install.ps1
 var windowsExporterInstallPs1 []byte
 
+//go:embed install_monitor/install-monitor.sh
+var installMonitorSh []byte
+
 // embeddedScripts 外部文件白名单名称 → 随服务端二进制发布的脚本内容。
 //
 // 平台无法出网、管理员也未上传离线文件时，/api/external/binary/{name} 用它兜底，
@@ -19,6 +22,7 @@ var windowsExporterInstallPs1 []byte
 var embeddedScripts = map[string][]byte{
 	"node-exporter-install.sh":     nodeExporterInstallSh,
 	"windows-exporter-install.ps1": windowsExporterInstallPs1,
+	"install-monitor.sh":           installMonitorSh,
 }
 
 // EmbeddedScript 返回内嵌脚本内容（名称大小写不敏感）；不存在时返回 nil。

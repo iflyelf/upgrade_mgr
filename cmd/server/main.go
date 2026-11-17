@@ -269,6 +269,13 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.Handle("POST /api/agent/enroll-tokens/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenBatchDelete(sc))))
 	// Agent 二进制下载（无鉴权，白名单架构；支持 kernel 参数自动选择构建）
 	mux.HandleFunc("GET /api/agent/binary/{name}", handler.AgentBinaryDownload(sc))
+	// 一体化安装脚本：静态 Linux 脚本 + Windows 安装器 + 永久安装令牌。
+	// 脚本/安装器均从控制台内网地址拉取，不依赖公网。
+	mux.HandleFunc("GET /api/external/binary/install-monitor.sh", handler.InstallMonitorScript(sc))
+	mux.HandleFunc("GET /api/external/binary/install-windows-monitor.exe", handler.InstallWindowsMonitorExe(sc))
+	mux.HandleFunc("GET /api/agent/install-monitor/token", handler.InstallMonitorTokenGet(sc))
+	mux.HandleFunc("POST /api/agent/install-monitor/token",
+		middleware.RequireAuth(auth, middleware.RequireAdmin(handler.InstallMonitorTokenCreate(sc))))
 	// 白名单外部二进制（控制台代为下载缓存）：供无法 TLS 1.2 的老系统用 HTTP 拉取
 	mux.HandleFunc("GET /api/external/binary/{name}", handler.ExternalBinaryDownload(sc))
 	// 白名单管理（页面表格页）：查看 / 保存（热加载）/ 测试下载

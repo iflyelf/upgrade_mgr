@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # legacy 构建额外上报变体，服务端自升级时据此选择同样兼容旧内核的二进制。
 LEGACY_LDFLAGS := $(LDFLAGS) -X main.variant=legacy
 
-.PHONY: all build build-agent test vet fmt tidy cross agent-legacy test-agent-legacy agent-windows test-agent-windows clean run
+.PHONY: all build build-agent test vet fmt tidy cross agent-legacy test-agent-legacy agent-windows test-agent-windows build-monitor-installer clean run
 
 all: build
 
@@ -70,6 +70,12 @@ agent-legacy:
 	GOTOOLCHAIN=$(LEGACY_GO) CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -modfile=build/agent-legacy.mod -trimpath -ldflags "$(LEGACY_LDFLAGS)" -o dist/upgrade-agent-linux-amd64-legacy ./cmd/agent
 	GOTOOLCHAIN=$(LEGACY_GO) CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -modfile=build/agent-legacy.mod -trimpath -ldflags "$(LEGACY_LDFLAGS)" -o dist/upgrade-agent-linux-386-legacy ./cmd/agent
 	GOTOOLCHAIN=$(LEGACY_GO) CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -modfile=build/agent-legacy.mod -trimpath -ldflags "$(LEGACY_LDFLAGS)" -o dist/upgrade-agent-linux-arm64-legacy ./cmd/agent
+
+## build-monitor-installer: 编译 Windows 一体化监控安装器（Agent + Windows Exporter）
+## 产物供 /api/external/binary/install-windows-monitor.exe 直接下载。
+build-monitor-installer:
+	mkdir -p dist
+	GOTOOLCHAIN=$(WINDOWS_GO) CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -modfile=build/agent-windows.mod -trimpath -ldflags "-s -w" -o dist/install-windows-monitor.exe ./cmd/install-monitor
 
 ## test-agent-legacy: 用 Go 1.23 运行 Agent 相关测试，防止引入 1.24+ 才有的 API
 test-agent-legacy:

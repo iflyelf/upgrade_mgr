@@ -429,6 +429,10 @@ tar -xzf /tmp/upgrade-agent-linux-arm64-legacy.tar.gz -C /tmp
 #   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-386-legacy.tar.gz"
 # tar -xzf /tmp/upgrade-agent-linux-386-legacy.tar.gz -C /tmp
 
+# 1.4 下载 Windows 一体化监控安装器（接入脚本页 /install-windows-monitor.exe）
+wget -q -c --no-check-certificate -O /tmp/install-windows-monitor.exe \
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/install-windows-monitor.exe"
+
 # 2. 替换二进制(mv -f 原子覆盖)
 mkdir -p /opt/upgrade-mgr/dist
 mv -f /tmp/upgrade-mgr-linux-amd64 /usr/local/bin/upgrade-mgr
@@ -445,6 +449,7 @@ mv -f /tmp/upgrade-agent-linux-arm64 /opt/upgrade-mgr/dist/upgrade-agent-linux-a
 mv -f /tmp/upgrade-agent-linux-arm64-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-arm64-legacy
 # 可选：32 位老内核
 # mv -f /tmp/upgrade-agent-linux-386-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-386-legacy
+mv -f /tmp/install-windows-monitor.exe /opt/upgrade-mgr/dist/install-windows-monitor.exe
 
 # 2.1 确认 dist 目录（控制台的 Agent 下载目录，默认 server.agent_binary_dir=./dist，
 #     systemd 单元里 WorkingDirectory=/opt/upgrade-mgr，所以实际是 /opt/upgrade-mgr/dist）
@@ -456,6 +461,7 @@ ls -l /opt/upgrade-mgr/dist/
 #   upgrade-agent-linux-arm64-legacy（可选）     旧内核 arm64
 #   upgrade-agent-windows-amd64.exe              Windows Server 2008 R2 ~ Windows 11（x64）
 #   upgrade-agent-windows-arm64.exe              Windows on ARM
+#   install-windows-monitor.exe                  Windows 一体化安装器（Agent + Windows Exporter）
 # 需要接入 32 位老内核（386-legacy）等其他架构时，再补充对应文件。
 # 缺少目标平台文件时，页面上该主机只会被跳过并提示「二进制不可用 / 下载 404」。
 
@@ -2088,6 +2094,28 @@ POST /api/hosts/{id}/tunnel-test        # 从平台侧拨测隧道地址（管�
 - 未提交的字段保持原值，传空字符串表示清空。
 - `ip`、`os_family`、`arch`、`agent_status` 等由 Agent 上报，不允许页面修改。
 - Consul / consul_mgr 的默认映射以外部清单为准（`overwrite=true`）：主机名、`app_code`、`biz_group`、`account`、`department`、`vendor`、`host_type`、`os_type` 等标签/ServiceMeta 值变化后，下次同步会自动更新已有主机，而不是只在空值时补齐；Agent 注册/心跳不会覆盖清单主机名。没有清单数据的主机才使用 Agent 上报的主机名。可在「人员组织 → 主机字段映射」把个别字段改回「仅补空」。
+
+**一体化安装脚本（自动化接入）**
+
+「主机 → 接入主机 → 生成接入脚本」会生成/轮换永久自动化令牌，并提供：
+
+```bash
+# Linux（自动识别 amd64/arm64/arm/386 与旧内核 legacy）
+curl -fsSL -m 3 --retry 3 "http://console.example.com/api/external/binary/install-monitor.sh" \
+  | bash -s -- install -y --server "http://console.example.com"
+```
+
+```text
+# Windows（安装器同时支持 install / update / uninstall / status）
+http://console.example.com/api/external/binary/install-windows-monitor.exe
+install-windows-monitor.exe install -y --server http://console.example.com
+```
+
+- Linux 安装 Agent + Node Exporter；Windows 安装 Agent + Windows Exporter；安装/更新始终 `--force` 重新注册主机，可重复执行。
+- 安装前会尝试清理旧监控：Linux 使用原 `qxbdown` 卸载命令，Windows 清理旧 Zabbix 服务/目录/注册表/计划任务；相关代码带 `LEGACY-CLEANUP` 注释，迁移完成后可删除。
+- 只从控制台内网地址下载，不访问 GitHub；控制台无法出网时请先在「外部文件」上传/缓存 node-exporter、windows-exporter。
+- 永久令牌保存在控制台 `server.agent_binary_dir/.install-monitor/token.json`（0600）；脚本 URL 不变，重新生成会轮换令牌。令牌接口无鉴权，仅限内网部署。
+- Windows 安装器随 Release 发布，也可在服务器执行 `make build-monitor-installer` 生成到 `dist/install-windows-monitor.exe`。
 
 **主机删除**
 
