@@ -206,18 +206,20 @@ case "$ACTION" in
   install)
     need_root
     detect_arch
-    legacy_cleanup
     fetch_token
+    # 先装/更新 Agent，确保旧监控卸载期间仍能保持平台连接（防止失联）。
     install_agent
+    legacy_cleanup
     install_node install
     log "安装完成"
     ;;
   update)
     need_root
     detect_arch
-    legacy_cleanup
     fetch_token
+    # 先更新 Agent，再清理旧监控。
     install_agent
+    legacy_cleanup
     install_node update || { warn "Node Exporter update 失败，尝试 install"; install_node install; }
     log "更新完成"
     ;;

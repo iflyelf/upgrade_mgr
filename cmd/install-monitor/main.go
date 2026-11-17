@@ -67,32 +67,40 @@ func main() {
 		return
 	}
 	opts = *o
-	if opts.Action == "" {
-		opts.Action = "install"
+	interactive := opts.Action == ""
+	if interactive {
+		action, ok := menu()
+		if !ok {
+			return
+		}
+		opts.Action = action
 	}
 	opts.Server = resolveServer(opts.Server)
-	mustRunAsAdmin()
+	if opts.Action != "status" {
+		mustRunAsAdmin()
+	}
 
 	log.Printf("install-monitor: action=%s server=%s", opts.Action, opts.Server)
 	switch opts.Action {
 	case "install":
-		legacyCleanup(true)
+		// 先安装/更新 Agent，确保旧监控清理期间仍能保持平台连接（防止失联）。
 		token := resolveToken()
 		installAgent(token)
+		legacyCleanup(true)
 		installExporter("install")
 		log.Printf("安装完成")
 	case "update":
-		// 更新时保留现有 windows_exporter 服务/注册表，只有安装才清理旧服务。
-		legacyCleanup(false)
+		// 先更新 Agent；更新时保留现有 windows_exporter 服务/注册表。
 		token := resolveToken()
 		installAgent(token)
+		legacyCleanup(false)
 		installExporter("update")
 		log.Printf("更新完成")
 	case "uninstall":
 		if !opts.Yes {
 			if !confirm("确定卸载 upgrade-agent 与 windows_exporter，并清理旧监控吗？输入 yes 继续: ") {
 				log.Printf("已取消")
-				return
+				break
 			}
 		}
 		uninstallExporter()
@@ -105,11 +113,51 @@ func main() {
 		usage()
 		fatal("未知动作: %s", opts.Action)
 	}
+	if interactive {
+		fmt.Print("\n按回车键退出...")
+		var dummy string
+		_, _ = fmt.Scanln(&dummy)
+	}
+}
+
+// menu 在无参数双击运行时提供数字菜单，兼容旧安装器的操作习惯。
+func menu() (string, bool) {
+	for {
+		fmt.Println()
+		fmt.Println("========================================")
+		fmt.Println("         监控一体化安装器")
+		fmt.Println("========================================")
+		fmt.Println("  1. 安装（Agent + Windows Exporter）")
+		fmt.Println("  2. 更新")
+		fmt.Println("  3. 卸载")
+		fmt.Println("  4. 查看状态")
+		fmt.Println("  0. 退出")
+		fmt.Print("请输入数字: ")
+		var choice string
+		if _, err := fmt.Scanln(&choice); err != nil {
+			return "", false
+		}
+		switch strings.TrimSpace(choice) {
+		case "1":
+			return "install", true
+		case "2":
+			return "update", true
+		case "3":
+			return "uninstall", true
+		case "4":
+			return "status", true
+		case "0":
+			return "", false
+		default:
+			fmt.Println("无效输入，请重新输入")
+		}
+	}
 }
 
 func usage() {
 	fmt.Println(`用法: install-windows-monitor.exe [install|update|uninstall|status] [-y] [--server URL] [--token TOKEN] [--arch amd64|arm64]
 
+  直接双击/无参数运行会显示数字菜单（1 安装 / 2 更新 / 3 卸载 / 4 状态）。
   install     安装/覆盖安装 Agent + Windows Exporter（默认）
   update      更新 Agent + Windows Exporter
   uninstall   卸载 Agent + Windows Exporter，并清理旧监控

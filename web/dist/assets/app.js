@@ -2568,7 +2568,7 @@
     }
     var lines = [
       h('h3', { style: 'margin-top:18px' }, ['生成接入脚本（自动化）']),
-      hint('脚本使用永久自动化令牌，可重复执行并强制重新注册主机；Linux 自动识别架构，安装 Agent + Node Exporter；Windows 安装器安装 Agent + Windows Exporter。仅使用控制台内网地址下载。'),
+      hint('脚本使用永久自动化令牌，可重复执行并强制重新注册主机；Linux 自动识别架构，安装 Agent + Node Exporter；Windows 安装器无参数运行会显示 1/2/3/4 数字菜单。两者都先安装 Agent，再清理旧监控，避免失联；仅使用控制台内网地址下载。'),
       state.installScriptErr ? h('div', { class: 'err', role: 'alert' }, [state.installScriptErr]) : null,
       h('div', { class: 'toolbar' }, [
         h('button', {
