@@ -131,6 +131,21 @@ func TestParseEnrollArches(t *testing.T) {
 	}
 }
 
+func TestBuildInstallCommandArchitectures(t *testing.T) {
+	linux := buildInstallCommand("http://h", "arm64", "tok", false, "")
+	if !strings.Contains(linux, "/api/agent/binary/linux-arm64?kernel=") {
+		t.Fatalf("Linux arm64 命令地址不符: %s", linux)
+	}
+	legacy := buildInstallCommand("http://h", "arm64-legacy", "tok", false, "")
+	if !strings.Contains(legacy, "/api/agent/binary/linux-arm64-legacy") {
+		t.Fatalf("Linux arm64-legacy 命令地址不符: %s", legacy)
+	}
+	win := buildWindowsInstallCommand("http://h", "arm64", "tok", false)
+	if !strings.Contains(win, "/api/agent/binary/windows-arm64") {
+		t.Fatalf("Windows arm64 命令地址不符: %s", win)
+	}
+}
+
 func TestInstallBaseURLPrefersExternalURL(t *testing.T) {
 	r := httptest.NewRequest("GET", "http://internal:8090/api/agent/enroll-token", nil)
 	r.Host = "10.1.230.50:8090"
