@@ -116,7 +116,8 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 	idle, _ := insertTestHost(t, db, 1)
 	stale, _ := insertTestHost(t, db, 1)
 	busy := insertBusyHost(t, db, tag)
-	other, _ := insertTestHost(t, db, 1) // 不匹配关键字，任何用例都不应出现
+	noUpdate, _ := insertTestHost(t, db, 1) // 有 Agent 但从未自升级
+	other, _ := insertTestHost(t, db, 1)    // 不匹配关键字，任何用例都不应出现
 	seed := []struct {
 		id                         int64
 		app, osFamily, acct, state string
@@ -127,6 +128,7 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 		{idle, "APP-B", "ubuntu", "acc2", "unknown", false, ""},
 		{stale, "APP-B", "centos", "acc2", "online", true, "1 hour"},
 		{busy, "APP-A", "ubuntu", "acc1", "online", true, "0 seconds"},
+		{noUpdate, "APP-A", "ubuntu", "acc1", "online", true, "0 seconds"},
 	}
 	for _, h := range seed {
 		agentID := ""
@@ -141,18 +143,40 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 		}
 	}
 
+	// 自升级状态：online/busy 成功，stale 失败，idle 无 Agent（未升级）。
+	insertSelfUpdate := func(hostID int64, status string) {
+		t.Helper()
+		var agentID string
+		if err := db.QueryRow(`SELECT COALESCE(agent_id,'') FROM hosts WHERE id=$1`, hostID).Scan(&agentID); err != nil {
+			t.Fatal(err)
+		}
+		if agentID == "" {
+			t.Fatalf("主机 %d 没有 agent_id", hostID)
+		}
+		if _, err := db.Exec(`INSERT INTO commands (host_id, agent_id, type, status)
+			VALUES ($1,$2,'self_update',$3)`, hostID, agentID, status); err != nil {
+			t.Fatalf("插入自升级指令失败: %v", err)
+		}
+	}
+	insertSelfUpdate(online, "success")
+	insertSelfUpdate(busy, "success")
+	insertSelfUpdate(stale, "failed")
+
 	cases := []struct {
 		param string
 		value string
 		want  []int64 // 列表应命中的主机（含 busy）
 	}{
-		{"q", tag, []int64{online, idle, stale, busy}},
-		{"app_code", "APP-A", []int64{online, busy}},
-		{"os_family", "ubuntu", []int64{idle, busy}},
+		{"q", tag, []int64{online, idle, stale, busy, noUpdate}},
+		{"app_code", "APP-A", []int64{online, busy, noUpdate}},
+		{"os_family", "ubuntu", []int64{idle, busy, noUpdate}},
 		{"account", "acc2", []int64{idle, stale}},
-		{"agent_status", "online", []int64{online, busy}},
+		{"agent_status", "online", []int64{online, busy, noUpdate}},
 		{"agent_status", "offline", []int64{stale}},
 		{"agent_status", "unknown", []int64{idle}},
+		{"upgrade_status", "success", []int64{online, busy}},
+		{"upgrade_status", "failed", []int64{stale}},
+		{"upgrade_status", "none", []int64{noUpdate}},
 	}
 
 	// 覆盖检查：hostListFilter 支持的每个参数都至少有一个用例。
@@ -221,7 +245,7 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 			// 可删除 = 列表结果 - 有未完成任务的主机 - 有效在线/维护中的主机。
 			wantDel := []int64{}
 			for _, id := range listIDs {
-				if id == busy || id == online {
+				if id == busy || id == online || id == noUpdate {
 					continue
 				}
 				wantDel = append(wantDel, id)

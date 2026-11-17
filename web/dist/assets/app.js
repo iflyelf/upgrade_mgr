@@ -148,7 +148,7 @@
     orgSelTeam: null, orgTeamMembers: null, orgTeamPerms: null, orgNewField: null,
     flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
     hostFacets: null, hostListFacets: null,
-    hostFilter: { app_code: '', os_family: '', account: '', agent_status: '' },
+    hostFilter: { app_code: '', os_family: '', account: '', agent_status: '', upgrade_status: '' },
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1,
     orgUserQ: '', orgUserForm: null, orgRoleForm: null, orgGroupForm: null,
@@ -1432,7 +1432,8 @@
       state.q = p.q || '';
       state.hostFilter = {
         app_code: p.app_code || '', os_family: p.os_family || '',
-        account: p.account || '', agent_status: p.agent_status || ''
+        account: p.account || '', agent_status: p.agent_status || '',
+        upgrade_status: p.upgrade_status || ''
       };
       state.hostPage = n('page', 1);
     } else if (r.view === 'components') {
@@ -1468,6 +1469,7 @@
       var hf = state.hostFilter || {};
       add('q', state.q); add('app_code', hf.app_code); add('os_family', hf.os_family);
       add('account', hf.account); add('agent_status', hf.agent_status);
+      add('upgrade_status', hf.upgrade_status);
       add('page', state.hostPage > 1 ? state.hostPage : '');
     } else if (state.view === 'components') {
       add('q', state.compQ); add('page', state.compPage > 1 ? state.compPage : '');
@@ -1671,9 +1673,14 @@
     }
     var statusOptions = ['online', 'offline', 'upgrading', 'restarting', 'crash_loop', 'unknown']
       .map(function (s) { return [s, agentStatusText(s)]; });
+    var upgradeStatusOptions = [
+      ['success', '升级成功'],
+      ['failed', '升级失败'],
+      ['none', '未升级']
+    ];
     var clearAll = function () {
       state.q = '';
-      state.hostFilter = { app_code: '', os_family: '', account: '', agent_status: '' };
+      state.hostFilter = { app_code: '', os_family: '', account: '', agent_status: '', upgrade_status: '' };
       state.hostPage = 1;
       loadHosts();
     };
@@ -1681,6 +1688,7 @@
       (qEl = h('input', { value: state.q, placeholder: 'IP/出口 IP/隧道地址/主机名/业务组', 'aria-label': '搜索主机' }, [])),
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
       filterSelect('agent_status', 'Agent 状态', statusOptions),
+      filterSelect('upgrade_status', '升级状态', upgradeStatusOptions),
       filterSelect('app_code', 'app_code', facetOptions('app_code')),
       filterSelect('os_family', 'OS', osFacetOptions()),
       filterSelect('account', '账号', facetOptions('account')),
@@ -1737,6 +1745,7 @@
         h('td', {}, [
           h('span', { class: 'tag' }, [agentStatusText(x.agent_status)]),
           agentBuildLine(x),
+          x.agent_id && !x.agent_update_status ? h('div', { class: 'muted' }, ['自升级：未升级']) : null,
           x.agent_update_status ? h('div', { class: 'muted' }, [
             '自升级：' + cmdStatusText(x.agent_update_status) +
             (x.agent_update_stage ? ' / ' + stageText(x.agent_update_stage) : '') +
@@ -5930,6 +5939,9 @@
     '清除筛选': 'Clear filters', '导出 CSV': 'Export CSV', '详情日志': 'Details',
     '启动': 'Start', '暂停': 'Pause', '推进': 'Promote', '重试': 'Retry',
     '升级 Agent': 'Upgrade Agent', '测试连接': 'Test connection',
+    '升级状态': 'Upgrade status', '升级成功': 'Upgrade succeeded',
+    '升级失败': 'Upgrade failed', '未升级': 'Not upgraded',
+    '自升级：未升级': 'Self-upgrade: not upgraded',
     '保存设置': 'Save settings', '保存策略': 'Save policy', '添加所选成员': 'Add selected',
     '从 FlyIAM 同步组织': 'Sync org from FlyIAM', '从 FlyIAM 同步字段': 'Sync fields from FlyIAM',
     '创建本地账号': 'Create local account', '加载 FlyIAM 用户': 'Load FlyIAM users',
@@ -6273,6 +6285,7 @@
     if (f.os_family) qs.push('os_family=' + encodeURIComponent(f.os_family));
     if (f.account) qs.push('account=' + encodeURIComponent(f.account));
     if (f.agent_status) qs.push('agent_status=' + encodeURIComponent(f.agent_status));
+    if (f.upgrade_status) qs.push('upgrade_status=' + encodeURIComponent(f.upgrade_status));
     return qs;
   }
   // hostFilterActive 是否设置了任何主机筛选条件（关键字或下拉）。

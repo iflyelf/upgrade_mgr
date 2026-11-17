@@ -138,6 +138,25 @@ func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int)
 		args = append(args, statusFilter)
 		i++
 	}
+
+	// upgrade_status 按 Agent 最近一次自升级指令（commands.type='self_update'）筛选：
+	//   success 升级成功；failed/timeout/canceled/rolled_back/expired 升级失败；
+	//   none 未升级（没有 Agent 或从未下发过自升级）。
+	if up := strings.TrimSpace(q.Get("upgrade_status")); up != "" {
+		latest := "(SELECT c.status FROM commands c " +
+			"WHERE c.agent_id = h.agent_id AND c.type='self_update' " +
+			"ORDER BY c.id DESC LIMIT 1)"
+		switch up {
+		case "success":
+			where = append(where, "COALESCE(h.agent_id,'')<>'' AND "+latest+" = 'success'")
+		case "failed":
+			where = append(where, "COALESCE(h.agent_id,'')<>'' AND "+latest+
+				" IN ('failed','timeout','canceled','rolled_back','expired')")
+		case "none":
+			where = append(where, "COALESCE(h.agent_id,'')<>'' AND NOT EXISTS ("+
+				"SELECT 1 FROM commands c WHERE c.agent_id = h.agent_id AND c.type='self_update')")
+		}
+	}
 	return " WHERE " + strings.Join(where, " AND "), args, i
 }
 

@@ -1193,6 +1193,7 @@ Get-Service upgrade-agent
 - **导出 CSV**：按当前筛选条件导出主机（最多 50000 行，UTF-8 BOM，可直接用 Excel 打开）；
 - **导入 CSV**：以 `ip` 为唯一键，已存在主机更新非空单元格，不存在时可创建 `manual` 主机；
 - **批量编辑**：勾选多台主机后，一次修改主机名、业务字段、隧道/连接覆盖以及自定义可选字段。
+- **升级状态筛选**：主机列表支持按 Agent 自升级状态筛选「升级成功 / 升级失败 / 未升级」。
 
 CSV 表头支持英文键（`ip,hostname,account,app_code,biz_group,department,vendor,host_type,tunnel_ip,server_url_override`）
 或常见中文列名。自定义字段使用字段键或字段标签作为列名。`exit_ip` 等只读列导出后导入会被忽略。
@@ -2069,6 +2070,7 @@ GET /api/hosts?page=1&size=50&q=关键字&app_code=&os_family=&account=&agent_st
                                     # q: 关键字（IP/出口IP/隧道地址/主机名/业务组）
                                     # app_code/os_family/account: 精确匹配
                                     # agent_status: 按页面显示的有效状态筛选（online/offline/unknown等）
+                                    # upgrade_status: Agent 自升级状态（success/failed/none）
 GET /api/hosts/facets?fields=app_code,os_family,account
                                     # 主机字段去重值（下拉筛选用）；不传 fields 时取 task.host_selector_fields 配置
 GET /api/hosts/deletable-ids?q=&app_code=  # 当前筛选条件下可删除的主机 ID（排除有未完成任务的）
