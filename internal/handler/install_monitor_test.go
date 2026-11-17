@@ -111,11 +111,14 @@ func TestInstallMonitorTokenLifecycle(t *testing.T) {
 	}
 }
 
-func TestInstallMonitorScriptServing(t *testing.T) {
+func TestInstallMonitorScriptExternalCache(t *testing.T) {
 	sc, _ := installMonitorTestContext(t)
-	rec := callInstallMonitor(t, InstallMonitorScript(sc), http.MethodGet, "/api/external/binary/install-monitor.sh", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/external/binary/install-monitor.sh?local=1", nil)
+	req.SetPathValue("name", "install-monitor.sh")
+	rec := httptest.NewRecorder()
+	ExternalBinaryDownload(sc)(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("脚本应 200，实际 %d", rec.Code)
+		t.Fatalf("脚本应通过外部文件缓存下发，实际 %d: %s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "install-monitor") ||
 		!strings.Contains(rec.Body.String(), "LEGACY-CLEANUP") {

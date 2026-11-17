@@ -269,9 +269,9 @@ func registerRoutes(mux *http.ServeMux, sc *svc.ServiceContext) []middleware.Sto
 	mux.Handle("POST /api/agent/enroll-tokens/batch-delete", middleware.RequireAuth(auth, middleware.RequireAdmin(handler.AutomationEnrollTokenBatchDelete(sc))))
 	// Agent 二进制下载（无鉴权，白名单架构；支持 kernel 参数自动选择构建）
 	mux.HandleFunc("GET /api/agent/binary/{name}", handler.AgentBinaryDownload(sc))
-	// 一体化安装脚本：静态 Linux 脚本 + Windows 安装器 + 永久安装令牌。
-	// 脚本/安装器均从控制台内网地址拉取，不依赖公网。
-	mux.HandleFunc("GET /api/external/binary/install-monitor.sh", handler.InstallMonitorScript(sc))
+	// 一体化安装：Windows 安装器 + 永久安装令牌。
+	// Linux 脚本已加入外部文件白名单（install-monitor.sh），由 ExternalBinaryDownload
+	// 统一缓存/内置兜底；脚本/安装器均从控制台内网地址拉取，不依赖公网。
 	mux.HandleFunc("GET /api/external/binary/install-windows-monitor.exe", handler.InstallWindowsMonitorExe(sc))
 	mux.HandleFunc("GET /api/agent/install-monitor/token", handler.InstallMonitorTokenGet(sc))
 	mux.HandleFunc("POST /api/agent/install-monitor/token",

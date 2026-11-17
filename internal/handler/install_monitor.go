@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/iflyelf/upgrade_mgr/examples"
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/audit"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -184,20 +183,6 @@ func InstallMonitorTokenGet(s *svc.ServiceContext) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(f.Token + "\n"))
-	}
-}
-
-// InstallMonitorScript 下发一体化 Linux 安装脚本（无鉴权，内容为公开脚本）。
-func InstallMonitorScript(s *svc.ServiceContext) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		data := examples.EmbeddedScript("install-monitor.sh")
-		if len(data) == 0 {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-		_, _ = w.Write(data)
 	}
 }
 

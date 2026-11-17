@@ -114,14 +114,66 @@ fetch_token() {
 }
 
 # LEGACY-CLEANUP: 旧监控卸载。确认旧环境全部迁移后，可删除本函数及调用。
+#
+# 逻辑提取自 http://legacy.example.com/get/monitor/install-monitor.sh 的
+# uninstall / pre_install_purge，避免目标机访问不了 qxbdown 时无法清理。
+# 原命令保留备查（不再执行）：
+# printf 'Y\n' | script -q -c "bash -c 'bash <(curl -fsSL http://legacy.example.com/get/monitor/install-monitor.sh) uninstall'" /dev/null
 legacy_cleanup() {
   [ "$ACTION" = "install" ] || [ "$ACTION" = "update" ] || return 0
-  if ! command -v script >/dev/null 2>&1; then
-    warn "未找到 script 命令，跳过旧监控卸载"
-    return 0
+  log "清理旧监控（内置卸载逻辑，不依赖 qxbdown 脚本）..."
+
+  # 旧定时更新任务。
+  if command -v crontab >/dev/null 2>&1; then
+    { crontab -l 2>/dev/null | grep -v "/usr/bin/check_update.sh" | crontab -; } 2>/dev/null || true
+    { crontab -l 2>/dev/null | grep -v "/usr/bin/check_monitor_update.sh" | crontab -; } 2>/dev/null || true
   fi
-  log "尝试卸载旧监控（失败不影响新安装）..."
-  printf 'Y\n' | script -q -c "bash -c 'bash <(curl -fsSL http://legacy.example.com/get/monitor/install-monitor.sh) uninstall'" /dev/null || true
+
+  # 停止旧服务。不 pkill node_exporter，避免误杀新安装的进程。
+  for svc in monitor_manage zabbix_agentd node_exporter; do
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl stop "$svc" >/dev/null 2>&1 || true
+      systemctl disable "$svc" >/dev/null 2>&1 || true
+      systemctl reset-failed "$svc" >/dev/null 2>&1 || true
+    fi
+    if [ -x "/etc/init.d/$svc" ]; then
+      "/etc/init.d/$svc" stop >/dev/null 2>&1 || true
+    fi
+  done
+  pkill -f "monitor_manage" >/dev/null 2>&1 || true
+  pkill -f "zabbix_agent2" >/dev/null 2>&1 || true
+
+  # 只 mask 旧 zabbix 服务；不要 mask node_exporter（新服务同名）。
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl mask monitor_manage >/dev/null 2>&1 || true
+    systemctl mask zabbix_agentd >/dev/null 2>&1 || true
+  fi
+  if command -v chkconfig >/dev/null 2>&1; then
+    for svc in monitor_manage zabbix_agentd node_exporter; do
+      chkconfig --del "$svc" >/dev/null 2>&1 || true
+    done
+  fi
+
+  # 删除旧 init/unit 文件。
+  rm -f /etc/init.d/monitor_manage /etc/init.d/zabbix_agentd /etc/init.d/node_exporter
+  rm -f /etc/systemd/system/monitor_manage.service /etc/systemd/system/zabbix_agentd.service /etc/systemd/system/node_exporter.service
+  rm -f /usr/lib/systemd/system/monitor_manage.service /usr/lib/systemd/system/zabbix_agentd.service /usr/lib/systemd/system/node_exporter.service
+  rm -f /lib/systemd/system/zabbix* /usr/lib/systemd/system/zabbix* /etc/init.d/zabbix*
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed >/dev/null 2>&1 || true
+  fi
+
+  # 旧目录、二进制与配置。不要删除新路径 /opt/monitor/exporter。
+  rm -rf /usr/local/zabbix /etc/zabbix
+  rm -f /usr/bin/zabbix* /usr/sbin/zabbix* /usr/local/bin/zabbix* /bin/zabbix*
+  rm -f /usr/bin/monitor_manage
+  rm -f /usr/bin/check_update.sh /usr/bin/check_monitor_update.sh
+  rm -f /usr/bin/node_exporter /usr/local/bin/node_exporter /usr/local/zabbix/sbin/node_exporter
+  # 旧 zabbix 用户/组。
+  userdel -rf zabbix >/dev/null 2>&1 || true
+  groupdel zabbix >/dev/null 2>&1 || true
+  log "旧监控清理完成"
 }
 
 install_agent() {

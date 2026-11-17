@@ -107,11 +107,11 @@ func TestExternalBinaryDownloadServesCached(t *testing.T) {
 func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 	cfg := config.Default()
 	got := effectiveExternalBinaries(cfg)
-	if len(got) != 10 {
-		t.Fatalf("默认应有 10 条，实际 %d", len(got))
+	if len(got) != 11 {
+		t.Fatalf("默认应有 11 条，实际 %d", len(got))
 	}
 	for _, name := range []string{"windows-exporter-amd64", "windows-exporter-amd64-legacy", "windows-exporter-arm64-legacy",
-		"windows-exporter-install.ps1", "node-exporter-install.sh",
+		"windows-exporter-install.ps1", "node-exporter-install.sh", "install-monitor.sh",
 		"node-exporter-linux-amd64", "node-exporter-linux-arm64", "node-exporter-linux-amd64-legacy", "node-exporter-linux-arm64-legacy"} {
 		if _, ok := got[name]; !ok {
 			t.Fatalf("默认应包含 %s", name)
@@ -124,14 +124,14 @@ func TestEffectiveExternalBinariesFallsBackToDefault(t *testing.T) {
 	// 配置与内置合并：自定义条目追加，内置条目始终存在（早期保存过白名单的部署不会缺新内置条目）。
 	cfg.Server.ExternalBinaries = map[string]string{"only": "https://github.com/x"}
 	got = effectiveExternalBinaries(cfg)
-	if len(got) != 11 || got["only"] == "" || got["node-exporter-install.sh"] == "" {
+	if len(got) != 12 || got["only"] == "" || got["node-exporter-install.sh"] == "" {
 		t.Fatalf("应为内置 + 自定义: %v", got)
 	}
 
 	// 同名配置改写内置地址（名称大小写不敏感，不会出现两条）。
 	cfg.Server.ExternalBinaries = map[string]string{"Node-Exporter-Install.sh": "script:https://github.com/mirror/install.sh"}
 	got = effectiveExternalBinaries(cfg)
-	if len(got) != 10 || got["Node-Exporter-Install.sh"] != "script:https://github.com/mirror/install.sh" {
+	if len(got) != 11 || got["Node-Exporter-Install.sh"] != "script:https://github.com/mirror/install.sh" {
 		t.Fatalf("配置应改写内置地址: %v", got)
 	}
 }

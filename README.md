@@ -2113,7 +2113,8 @@ install-windows-monitor.exe install -y --server http://console.example.com
 
 - Linux 安装 Agent + Node Exporter；Windows 安装 Agent + Windows Exporter；安装/更新始终 `--force` 重新注册主机，可重复执行。
 - 安装/更新会**先安装/更新 Agent，再清理旧监控**，避免旧监控卸载过程中失联；Windows 安装器无参数运行会显示 1/2/3/4 数字菜单。
-- 安装前会尝试清理旧监控：Linux 使用原 `qxbdown` 卸载命令，Windows 清理旧 Zabbix 服务/目录/注册表/计划任务；相关代码带 `LEGACY-CLEANUP` 注释，迁移完成后可删除。
+- 安装前会清理旧监控：Linux 已把原 `qxbdown` 安装脚本的卸载逻辑内置到 `install-monitor.sh`（原命令保留在注释中，不再依赖 qxbdown 脚本）；Windows 清理旧 Zabbix 服务/目录/注册表/计划任务。相关代码带 `LEGACY-CLEANUP` 注释，迁移完成后可删除。
+- `install-monitor.sh` 已加入「外部文件」白名单，可在「运维 → 外部文件」刷新/上传；平台无法出网时自动使用随服务端发布的内置版本，无需手工缓存。
 - 只从控制台内网地址下载，不访问 GitHub；控制台无法出网时请先在「外部文件」上传/缓存 node-exporter、windows-exporter。
 - 永久令牌保存在控制台 `server.agent_binary_dir/.install-monitor/token.json`（0600）；脚本 URL 不变，重新生成会轮换令牌。令牌接口无鉴权，仅限内网部署。
 - Windows 安装器随 Release 发布，也可在服务器执行 `make build-monitor-installer` 生成到 `dist/install-windows-monitor.exe`。
