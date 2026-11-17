@@ -18,6 +18,8 @@ set -eu
 DEFAULT_SERVER="http://console.example.com"
 ACTION="install"
 ASSUME_YES=0
+ACTION_SET=0
+INTERACTIVE=0
 SERVER="${UPGRADE_MGR_EXTERNAL_URL:-${UPGRADE_AGENT_SERVER_URL:-$DEFAULT_SERVER}}"
 TOKEN="${INSTALL_MONITOR_TOKEN:-}"
 ARCH=""
@@ -26,6 +28,9 @@ AGENT_BIN="/usr/local/bin/upgrade-agent"
 usage() {
   cat <<'USAGE'
 用法: install-monitor.sh [install|update|uninstall|status] [-y|--yes] [--server URL] [--token TOKEN] [--arch ARCH]
+
+无参数在终端运行会显示数字菜单（1 安装 / 2 更新 / 3 卸载 / 4 状态 / 0 退出）；
+通过 curl ... | bash 管道执行且未指定动作时，默认执行 install。
 
 动作:
   install     安装/覆盖安装 Agent + Node Exporter（默认）
@@ -48,7 +53,7 @@ die() { printf '[install-monitor] ERROR: %s\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|update|uninstall|status) ACTION="$1" ;;
+    install|update|uninstall|status) ACTION="$1"; ACTION_SET=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
     --server) shift; SERVER="${1:-}" ;;
     --server=*) SERVER="${1#*=}" ;;
@@ -63,6 +68,42 @@ while [ $# -gt 0 ]; do
 done
 
 rotate_server() { SERVER="${SERVER%/}"; }
+
+# choose_action 终端无参数运行时显示数字菜单；提示写 stderr，避免被日志/管道吞掉。
+choose_action() {
+  while :; do
+    printf '\n' >&2
+    printf '========================================\n' >&2
+    printf '         监控一体化安装脚本\n' >&2
+    printf '========================================\n' >&2
+    printf '  1. 安装（Agent + Node Exporter）\n' >&2
+    printf '  2. 更新\n' >&2
+    printf '  3. 卸载\n' >&2
+    printf '  4. 查看状态\n' >&2
+    printf '  0. 退出\n' >&2
+    printf '请输入数字: ' >&2
+    choice=""
+    read -r choice || return 1
+    case "$choice" in
+      1) ACTION="install"; return 0 ;;
+      2) ACTION="update"; return 0 ;;
+      3) ACTION="uninstall"; return 0 ;;
+      4) ACTION="status"; return 0 ;;
+      0|q|Q) return 1 ;;
+      *) printf '无效输入，请重新输入\n' >&2 ;;
+    esac
+  done
+}
+
+if [ "$ACTION_SET" != "1" ]; then
+  if [ -t 0 ]; then
+    INTERACTIVE=1
+    choose_action || exit 0
+  else
+    # curl ... | bash：stdin 是脚本本身，不能读菜单；默认安装。
+    ACTION="install"
+  fi
+fi
 need_root() { [ "$(id -u)" -eq 0 ] || die "请使用 root 执行"; }
 
 download() {
@@ -294,3 +335,8 @@ case "$ACTION" in
     exit 2
     ;;
 esac
+
+if [ "$INTERACTIVE" = "1" ]; then
+  printf '\n按回车键退出...'
+  read -r _ || true
+fi
