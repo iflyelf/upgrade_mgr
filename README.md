@@ -109,7 +109,7 @@ export CONSUL_ENABLED=true CONSUL_ADDRESS=http://10.0.56.118:8500 \
 
 **1. 主机 接入 Linux Agent**
 
-- 在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。
+- 在「主机」页选择 Linux 与一个或多个架构（可多选：amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；一次性令牌会为每个架构分别生成独立令牌，默认 15 分钟有效。
 - 到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。
 - 主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。
 - 「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。
@@ -168,7 +168,7 @@ sudo bash examples/node_exporter/install.sh uninstall -y
 
 **1. 主机 接入 Windows Agent**
 
-- 在「主机」页选择 Windows 与架构（绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」，在目标机以管理员 PowerShell 执行。
+- 在「主机」页选择 Windows 与一个或多个架构（可多选：绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」，在目标机以管理员 PowerShell 执行。
 - Server 2008 R2 ~ Windows 11 通用；2008 R2 + PowerShell 2.0 不支持 TLS 1.2 时，页面命令直接从控制台下载 Agent（HTTP 即可），不依赖 GitHub。
 - Agent 注册为 Windows 服务 upgrade-agent（LocalSystem，失败 5s/10s/30s 自动重启），并安装每分钟运行的计划任务看门狗。
 - 可选 MSI：msiexec /i upgrade-agent-`<版本>`-x64.msi SERVERURL=https://`<控制台>` ENROLLTOKEN=`<令牌>`。
@@ -243,7 +243,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 uninstall -Yes
 
 **1. Host: enroll Linux agent**
 
-- On Hosts, choose Linux and architecture (amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Tokens are one-time and expire in 15 minutes.
+- On Hosts, choose Linux and one or more architectures (multi-select: amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Each architecture gets its own one-time token, valid for 15 minutes.
 - Run the command as root on the target. The agent installs as a systemd service (SysV fallback) and the host appears in the list.
 - Hostname, OS, architecture and egress IP are reported by the agent; multi-NIC hosts are matched by their egress address.
 - Consul sync can also import hosts, but hosts without an agent are skipped when tasks are dispatched.
@@ -302,7 +302,7 @@ sudo bash examples/node_exporter/install.sh uninstall -y
 
 **1. Host: enroll Windows agent**
 
-- On Hosts, choose Windows and architecture (usually amd64; Windows on ARM uses arm64), generate the command and run it in an elevated PowerShell.
+- On Hosts, choose Windows and one or more architectures (multi-select: usually amd64; Windows on ARM uses arm64), generate the command and run it in an elevated PowerShell.
 - Works on Server 2008 R2 – Windows 11. On 2008 R2 + PowerShell 2.0 without TLS 1.2, the command downloads the agent directly from the console over HTTP (no GitHub dependency).
 - The agent registers as the Windows service upgrade-agent (LocalSystem, restart 5s/10s/30s) and installs a per-minute scheduled-task watchdog.
 - Optional MSI: msiexec /i upgrade-agent-`<version>`-x64.msi SERVERURL=https://`<console>` ENROLLTOKEN=`<token>`.
@@ -413,18 +413,21 @@ wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-amd64.exe \
 #   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-amd64.zip"
 # unzip -o /tmp/upgrade-agent-windows-amd64.zip -d /tmp
 
-# 可选：按需补充其他平台/架构（Windows on ARM、Linux arm64、旧内核其他架构）
-# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-arm64.exe \
-#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-arm64.exe"
-# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-arm64.tar.gz \
-#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-arm64.tar.gz"
-# tar -xzf /tmp/upgrade-agent-linux-arm64.tar.gz -C /tmp
+# 1.3 下载 arm64 Agent（Windows on ARM / Linux arm64 / 旧内核 arm64）
+#     接入 arm64 主机前必须放入 dist，否则下载会 404。
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent-windows-arm64.exe \
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-windows-arm64.exe"
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-arm64.tar.gz \
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-arm64.tar.gz"
+tar -xzf /tmp/upgrade-agent-linux-arm64.tar.gz -C /tmp
+wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-arm64-legacy.tar.gz \
+  "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-arm64-legacy.tar.gz"
+tar -xzf /tmp/upgrade-agent-linux-arm64-legacy.tar.gz -C /tmp
+
+# 可选：32 位老内核（CentOS 6 i686 等）
 # wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-386-legacy.tar.gz \
 #   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-386-legacy.tar.gz"
 # tar -xzf /tmp/upgrade-agent-linux-386-legacy.tar.gz -C /tmp
-# wget -q -c --no-check-certificate -O /tmp/upgrade-agent-linux-arm64-legacy.tar.gz \
-#   "https://proxy.xiaonuo.live/?url=https://github.com/iflyelf/upgrade_mgr/releases/latest/download/upgrade-agent-linux-arm64-legacy.tar.gz"
-# tar -xzf /tmp/upgrade-agent-linux-arm64-legacy.tar.gz -C /tmp
 
 # 2. 替换二进制(mv -f 原子覆盖)
 mkdir -p /opt/upgrade-mgr/dist
@@ -436,20 +439,24 @@ mv -f /tmp/upgrade-agent-linux-amd64 /opt/upgrade-mgr/dist/upgrade-agent-linux-a
 [ -f /tmp/upgrade-agent-linux-amd64-legacy ] && \
   mv -f /tmp/upgrade-agent-linux-amd64-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-amd64-legacy
 mv -f /tmp/upgrade-agent-windows-amd64.exe /opt/upgrade-mgr/dist/upgrade-agent-windows-amd64.exe
-# 可选（与上面 1.2 的下载项对应）
-# mv -f /tmp/upgrade-agent-windows-arm64.exe /opt/upgrade-mgr/dist/upgrade-agent-windows-arm64.exe
-# mv -f /tmp/upgrade-agent-linux-arm64 /opt/upgrade-mgr/dist/upgrade-agent-linux-arm64
+# arm64（与上面 1.3 的下载项对应）
+mv -f /tmp/upgrade-agent-windows-arm64.exe /opt/upgrade-mgr/dist/upgrade-agent-windows-arm64.exe
+mv -f /tmp/upgrade-agent-linux-arm64 /opt/upgrade-mgr/dist/upgrade-agent-linux-arm64
+mv -f /tmp/upgrade-agent-linux-arm64-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-arm64-legacy
+# 可选：32 位老内核
 # mv -f /tmp/upgrade-agent-linux-386-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-386-legacy
-# mv -f /tmp/upgrade-agent-linux-arm64-legacy /opt/upgrade-mgr/dist/upgrade-agent-linux-arm64-legacy
 
 # 2.1 确认 dist 目录（控制台的 Agent 下载目录，默认 server.agent_binary_dir=./dist，
 #     systemd 单元里 WorkingDirectory=/opt/upgrade-mgr，所以实际是 /opt/upgrade-mgr/dist）
 ls -l /opt/upgrade-mgr/dist/
 # 应至少包含：
 #   upgrade-agent-linux-amd64                    Linux x86_64（普通构建）
-#   upgrade-agent-linux-amd64-legacy（可选）     CentOS 6 / kernel 2.6.32+
+#   upgrade-agent-linux-arm64                    Linux arm64（鲲鹏/飞腾等）
+#   upgrade-agent-linux-amd64-legacy（可选）     CentOS 6 / kernel 2.6.32+（x86_64）
+#   upgrade-agent-linux-arm64-legacy（可选）     旧内核 arm64
 #   upgrade-agent-windows-amd64.exe              Windows Server 2008 R2 ~ Windows 11（x64）
-# 需要接入 Windows on ARM / Linux arm64 / CentOS 6 其他架构时，再补充对应文件。
+#   upgrade-agent-windows-arm64.exe              Windows on ARM
+# 需要接入 32 位老内核（386-legacy）等其他架构时，再补充对应文件。
 # 缺少目标平台文件时，页面上该主机只会被跳过并提示「二进制不可用 / 下载 404」。
 
 # 3. 准备配置目录和数据库
@@ -2008,7 +2015,7 @@ POST /api/agent/enroll-tokens/batch-delete # 批量删除自动化令牌
 自动化令牌与一次性令牌并存：
 
 - **一次性令牌**：保持原有行为，默认 15 分钟、单次使用、每台机器一个；`consumeEnrollTokenTx` 的单次消费逻辑不变。
-- **自动化令牌**：页面「主机 → 接入主机 → 自动化令牌」生成，可永久有效或自定义到期时间；可设置最大使用次数（0=不限）、来源 CIDR；页面可注销/轮换，注销只阻止新注册，不影响已运行 Agent。
+- **自动化令牌**：页面「主机 → 接入主机 → 自动化令牌」生成，可永久有效或自定义到期时间；可设置最大使用次数（0=不限）、来源 CIDR；生成安装命令时可多选目标架构（同一令牌可用于多个架构的命令）；页面可注销/轮换，注销只阻止新注册，不影响已运行 Agent。
 - 创建时完整 token 只返回一次，列表仅显示 `token_prefix`；数据库只保存 SHA-256。
 - 注册接口按 token 类型消费：一次性令牌检查 `used_at IS NULL`，自动化令牌原子累加 `used_count` 并检查 `max_uses`，两者都受 `enabled/expires_at/CIDR` 约束。
 
@@ -2021,7 +2028,8 @@ POST /api/agent/enroll-tokens/batch-delete # 批量删除自动化令牌
   "max_uses": 0,
   "allowed_cidrs": ["10.0.0.0/8"],
   "os": "linux",
-  "arch": "amd64"
+  "arch": "amd64",
+  "arches": ["amd64", "arm64"]
 }
 ```
 

@@ -111,6 +111,26 @@ func TestIsValidTarget(t *testing.T) {
 	}
 }
 
+func TestParseEnrollArches(t *testing.T) {
+	got, err := parseEnrollArches("linux", "amd64, arm64,amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != "[amd64 arm64]" {
+		t.Fatalf("多架构解析不符: %v", got)
+	}
+	got, err = parseEnrollArches("windows", "")
+	if err != nil || fmt.Sprint(got) != "[amd64]" {
+		t.Fatalf("默认架构应为 amd64: %v err=%v", got, err)
+	}
+	if _, err := parseEnrollArches("windows", "arm"); err == nil {
+		t.Fatal("Windows/arm 应被拒绝")
+	}
+	if _, err := parseEnrollArches("linux", "mips"); err == nil {
+		t.Fatal("未知架构应被拒绝")
+	}
+}
+
 func TestInstallBaseURLPrefersExternalURL(t *testing.T) {
 	r := httptest.NewRequest("GET", "http://internal:8090/api/agent/enroll-token", nil)
 	r.Host = "10.1.230.50:8090"

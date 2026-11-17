@@ -38,9 +38,55 @@ type automationTokenCreateRequest struct {
 	MaxUses      int      `json:"max_uses"`             // 0=不限制
 	AllowedCIDRs []string `json:"allowed_cidrs"`        // 空=不限制来源 IP
 	OS           string   `json:"os"`                   // 仅用于生成安装命令
-	Arch         string   `json:"arch"`                 // 仅用于生成安装命令
+	Arch         string   `json:"arch"`                 // 仅用于生成安装命令（兼容旧客户端，可逗号分隔）
+	Arches       []string `json:"arches,omitempty"`     // 安装命令目标架构（可多选）
 	Force        bool     `json:"force"`                // 安装命令是否带 --force
 	Note         string   `json:"note"`
+}
+
+// agentInstallCommand 单个架构的 Agent 安装命令。
+// 一次性令牌会为每个架构分别生成独立令牌；自动化令牌复用同一个令牌。
+type agentInstallCommand struct {
+	Arch           string `json:"arch"`
+	EnrollToken    string `json:"enroll_token"`
+	InstallCommand string `json:"install_command"`
+}
+
+// maxEnrollArches 单次生成安装命令的架构数上限，避免一次请求创建过多令牌。
+const maxEnrollArches = 10
+
+// parseEnrollArches 解析逗号/空白分隔的架构列表，去重并校验 OS+架构组合。
+func parseEnrollArches(osName, raw string) ([]string, error) {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		raw = "amd64"
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	})
+	seen := map[string]bool{}
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		if !isValidTarget(osName, p) {
+			return nil, fmt.Errorf("不支持的操作系统或架构: %s/%s", osName, p)
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		if !isValidTarget(osName, "amd64") {
+			return nil, fmt.Errorf("不支持的操作系统或架构: %s/amd64", osName)
+		}
+		out = append(out, "amd64")
+	}
+	if len(out) > maxEnrollArches {
+		return nil, fmt.Errorf("一次最多选择 %d 个架构", maxEnrollArches)
+	}
+	return out, nil
 }
 
 // automationTokenDB 同时适配 *sql.DB 与 *sql.Tx。
@@ -95,12 +141,12 @@ func AutomationEnrollTokenCreate(s *svc.ServiceContext) http.HandlerFunc {
 		}
 
 		token, prefix := newAutomationToken()
-		osName, arch, err := normalizeAutomationTarget(req.OS, req.Arch)
+		osName, arches, err := normalizeAutomationTargets(req.OS, req.Arch, req.Arches)
 		if err != nil {
 			httpx.Fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		installCmd, baseURL, err := buildAutomationInstallCommand(s, r, token, osName, arch, req.Force)
+		commands, baseURL, err := buildAutomationInstallCommands(s, r, token, osName, arches, req.Force)
 		if err != nil {
 			httpx.Fail(w, http.StatusInternalServerError, "生成安装命令失败")
 			return
@@ -117,12 +163,13 @@ func AutomationEnrollTokenCreate(s *svc.ServiceContext) http.HandlerFunc {
 			strconv.FormatInt(id, 10), name, nil, map[string]any{
 				"token_type": "automation", "tenant_id": tenantID,
 				"expires_at": expiresAt, "max_uses": req.MaxUses,
-				"allowed_cidrs": cidrs,
+				"allowed_cidrs": cidrs, "arches": arches,
 			}, nil)
 		httpx.OK(w, automationTokenCreatedResponse{
 			ID: id, Token: token, TokenPrefix: prefix, Name: name, TenantID: tenantID,
 			ExpiresAt: expiresAt, MaxUses: req.MaxUses, AllowedCIDRs: cidrs,
-			OS: osName, Arch: arch, InstallCommand: installCmd,
+			OS: osName, Arch: commands[0].Arch, Arches: arches,
+			InstallCommand: commands[0].InstallCommand, Commands: commands,
 			BaseURL: baseURL, CreatedAt: createdAt,
 		})
 	}
@@ -273,14 +320,14 @@ func AutomationEnrollTokenRotate(s *svc.ServiceContext) http.HandlerFunc {
 			httpx.Fail(w, http.StatusBadRequest, "令牌 ID 非法")
 			return
 		}
-		osName, arch, err := normalizeAutomationTarget(r.URL.Query().Get("os"), r.URL.Query().Get("arch"))
+		osName, arches, err := normalizeAutomationTargets(r.URL.Query().Get("os"), r.URL.Query().Get("arch"), nil)
 		if err != nil {
 			httpx.Fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		force := r.URL.Query().Get("force") == "1"
 		token, prefix := newAutomationToken()
-		installCmd, baseURL, err := buildAutomationInstallCommand(s, r, token, osName, arch, force)
+		commands, baseURL, err := buildAutomationInstallCommands(s, r, token, osName, arches, force)
 		if err != nil {
 			httpx.Fail(w, http.StatusInternalServerError, "生成安装命令失败")
 			return
@@ -367,26 +414,29 @@ func AutomationEnrollTokenRotate(s *svc.ServiceContext) http.HandlerFunc {
 		httpx.OK(w, automationTokenCreatedResponse{
 			ID: newID, Token: token, TokenPrefix: prefix, Name: name, TenantID: tenantID,
 			ExpiresAt: newExpiresAt, MaxUses: maxUses, AllowedCIDRs: cidrs,
-			OS: osName, Arch: arch, InstallCommand: installCmd,
+			OS: osName, Arch: commands[0].Arch, Arches: arches,
+			InstallCommand: commands[0].InstallCommand, Commands: commands,
 			BaseURL: baseURL, CreatedAt: newCreatedAt,
 		})
 	}
 }
 
 type automationTokenCreatedResponse struct {
-	ID             int64      `json:"id"`
-	Token          string     `json:"token"`
-	TokenPrefix    string     `json:"token_prefix"`
-	Name           string     `json:"name"`
-	TenantID       int64      `json:"tenant_id"`
-	ExpiresAt      *time.Time `json:"expires_at"`
-	MaxUses        int        `json:"max_uses"`
-	AllowedCIDRs   []string   `json:"allowed_cidrs"`
-	OS             string     `json:"os"`
-	Arch           string     `json:"arch"`
-	InstallCommand string     `json:"install_command"`
-	BaseURL        string     `json:"base_url"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID             int64                 `json:"id"`
+	Token          string                `json:"token"`
+	TokenPrefix    string                `json:"token_prefix"`
+	Name           string                `json:"name"`
+	TenantID       int64                 `json:"tenant_id"`
+	ExpiresAt      *time.Time            `json:"expires_at"`
+	MaxUses        int                   `json:"max_uses"`
+	AllowedCIDRs   []string              `json:"allowed_cidrs"`
+	OS             string                `json:"os"`
+	Arch           string                `json:"arch"`
+	Arches         []string              `json:"arches"`
+	InstallCommand string                `json:"install_command"`
+	Commands       []agentInstallCommand `json:"commands"`
+	BaseURL        string                `json:"base_url"`
+	CreatedAt      time.Time             `json:"created_at"`
 }
 
 func resolveAutomationTenant(r *http.Request, requested int64) (int64, error) {
@@ -484,19 +534,22 @@ func normalizeAutomationCIDRs(raw []string) ([]string, error) {
 	return out, nil
 }
 
-func normalizeAutomationTarget(osName, arch string) (string, string, error) {
+// normalizeAutomationTargets 解析自动化令牌的安装命令目标。
+// arches 优先；兼容旧的 arch 字符串（可逗号分隔）。
+func normalizeAutomationTargets(osName, arch string, arches []string) (string, []string, error) {
 	osName = strings.TrimSpace(strings.ToLower(osName))
 	if osName == "" {
 		osName = "linux"
 	}
-	arch = strings.TrimSpace(strings.ToLower(arch))
-	if arch == "" {
-		arch = "amd64"
+	raw := arch
+	if len(arches) > 0 {
+		raw = strings.Join(arches, ",")
 	}
-	if !isValidTarget(osName, arch) {
-		return "", "", fmt.Errorf("不支持的操作系统或架构")
+	list, err := parseEnrollArches(osName, raw)
+	if err != nil {
+		return "", nil, err
 	}
-	return osName, arch, nil
+	return osName, list, nil
 }
 
 func newAutomationToken() (token, prefix string) {
@@ -531,6 +584,22 @@ func insertAutomationToken(ctx context.Context, db automationTokenDB, token, pre
 		return 0, time.Time{}, err
 	}
 	return id, createdAt, nil
+}
+
+func buildAutomationInstallCommands(s *svc.ServiceContext, r *http.Request, token, osName string, arches []string, force bool) ([]agentInstallCommand, string, error) {
+	commands := make([]agentInstallCommand, 0, len(arches))
+	baseURL := ""
+	for _, arch := range arches {
+		cmd, base, err := buildAutomationInstallCommand(s, r, token, osName, arch, force)
+		if err != nil {
+			return nil, "", err
+		}
+		baseURL = base
+		commands = append(commands, agentInstallCommand{
+			Arch: arch, EnrollToken: token, InstallCommand: cmd,
+		})
+	}
+	return commands, baseURL, nil
 }
 
 func buildAutomationInstallCommand(s *svc.ServiceContext, r *http.Request, token, osName, arch string, force bool) (string, string, error) {

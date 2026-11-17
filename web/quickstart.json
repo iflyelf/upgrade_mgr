@@ -74,13 +74,13 @@
           },
           "lines": {
             "zh": [
-              "在「主机」页选择 Linux 与架构（amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；令牌一次性、默认 15 分钟有效。",
+              "在「主机」页选择 Linux 与一个或多个架构（可多选：amd64 / arm64 / arm；旧内核如 CentOS 6 使用 legacy 包），点「生成接入命令」；一次性令牌会为每个架构分别生成独立令牌，默认 15 分钟有效。",
               "到目标机用 root 执行：Agent 注册为 systemd 服务（无 systemd 自动回退 SysV），主机随即出现在列表。",
               "主机名、OS、ARCH、出口 IP 由 Agent 上报；多网卡主机按实际出口地址匹配任务。",
               "「同步 Consul」也能导入主机，但未安装 Agent 的主机下发任务时会被跳过。"
             ],
             "en": [
-              "On Hosts, choose Linux and architecture (amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Tokens are one-time and expire in 15 minutes.",
+              "On Hosts, choose Linux and one or more architectures (multi-select: amd64 / arm64 / arm; older kernels like CentOS 6 use the legacy build), then click Generate command. Each architecture gets its own one-time token, valid for 15 minutes.",
               "Run the command as root on the target. The agent installs as a systemd service (SysV fallback) and the host appears in the list.",
               "Hostname, OS, architecture and egress IP are reported by the agent; multi-NIC hosts are matched by their egress address.",
               "Consul sync can also import hosts, but hosts without an agent are skipped when tasks are dispatched."
@@ -216,7 +216,7 @@
           },
           "lines": {
             "zh": [
-              "在「主机」页选择 Windows 与架构（绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」，在目标机以管理员 PowerShell 执行。",
+              "在「主机」页选择 Windows 与一个或多个架构（可多选：绝大多数为 amd64；Windows on ARM 选 arm64），点「生成接入命令」，在目标机以管理员 PowerShell 执行。",
               "Server 2008 R2 ~ Windows 11 通用；2008 R2 + PowerShell 2.0 不支持 TLS 1.2 时，页面命令直接从控制台下载 Agent（HTTP 即可），不依赖 GitHub。",
               "Agent 注册为 Windows 服务 upgrade-agent（LocalSystem，失败 5s/10s/30s 自动重启），并安装每分钟运行的计划任务看门狗。",
               "可选 MSI：msiexec /i upgrade-agent-\u003c版本\u003e-x64.msi SERVERURL=https://\u003c控制台\u003e ENROLLTOKEN=\u003c令牌\u003e。",
@@ -224,7 +224,7 @@
               "卸载：\"C:\\Program Files\\upgrade-agent\\upgrade-agent.exe\" uninstall（或 msiexec /x）。"
             ],
             "en": [
-              "On Hosts, choose Windows and architecture (usually amd64; Windows on ARM uses arm64), generate the command and run it in an elevated PowerShell.",
+              "On Hosts, choose Windows and one or more architectures (multi-select: usually amd64; Windows on ARM uses arm64), generate the command and run it in an elevated PowerShell.",
               "Works on Server 2008 R2 – Windows 11. On 2008 R2 + PowerShell 2.0 without TLS 1.2, the command downloads the agent directly from the console over HTTP (no GitHub dependency).",
               "The agent registers as the Windows service upgrade-agent (LocalSystem, restart 5s/10s/30s) and installs a per-minute scheduled-task watchdog.",
               "Optional MSI: msiexec /i upgrade-agent-\u003cversion\u003e-x64.msi SERVERURL=https://\u003cconsole\u003e ENROLLTOKEN=\u003ctoken\u003e.",

@@ -154,7 +154,7 @@ func TestAutomationEnrollTokenAPI(t *testing.T) {
 	}
 
 	createBody := fmt.Sprintf(`{"name":%q,"permanent":true,"max_uses":0,
-		"allowed_cidrs":["10.0.0.0/8"],"os":"linux","arch":"amd64"}`, name)
+		"allowed_cidrs":["10.0.0.0/8"],"os":"linux","arch":"amd64","arches":["amd64","arm64"]}`, name)
 	rec := call(http.MethodPost, "/api/agent/enroll-tokens", createBody, AutomationEnrollTokenCreate(sc), false)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("创建自动化令牌失败 %d: %s", rec.Code, rec.Body.String())
@@ -172,8 +172,16 @@ func TestAutomationEnrollTokenAPI(t *testing.T) {
 	if created.ExpiresAt != nil {
 		t.Fatalf("永久令牌 expires_at 应为 nil: %+v", created.ExpiresAt)
 	}
-	if !strings.Contains(created.InstallCommand, created.Token) {
-		t.Fatalf("安装命令未包含令牌: %s", created.InstallCommand)
+	if len(created.Arches) != 2 || len(created.Commands) != 2 {
+		t.Fatalf("多架构响应不符: arches=%v commands=%v", created.Arches, created.Commands)
+	}
+	for _, c := range created.Commands {
+		if c.EnrollToken != created.Token || !strings.Contains(c.InstallCommand, created.Token) {
+			t.Fatalf("安装命令未包含令牌: %+v", c)
+		}
+		if !strings.Contains(c.InstallCommand, c.Arch) {
+			t.Fatalf("安装命令未包含架构 %s: %s", c.Arch, c.InstallCommand)
+		}
 	}
 
 	// 列表必须能查到，且不回显完整 token。
@@ -212,7 +220,7 @@ func TestAutomationEnrollTokenAPI(t *testing.T) {
 	}
 
 	// 轮换：旧 token 立即失效，新 token 可消费。
-	rec = call(http.MethodPost, "/api/agent/enroll-tokens/"+strconv.FormatInt(created.ID, 10)+"/rotate",
+	rec = call(http.MethodPost, "/api/agent/enroll-tokens/"+strconv.FormatInt(created.ID, 10)+"/rotate?os=linux&arch=amd64,arm64",
 		"", AutomationEnrollTokenRotate(sc), true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("轮换失败 %d: %s", rec.Code, rec.Body.String())
@@ -226,6 +234,9 @@ func TestAutomationEnrollTokenAPI(t *testing.T) {
 	rotated := rotateOut.Data
 	if rotated.ID == created.ID || rotated.Token == created.Token {
 		t.Fatalf("轮换后应生成新令牌: old=%+v new=%+v", created, rotated)
+	}
+	if len(rotated.Commands) != 2 {
+		t.Fatalf("轮换后应返回两个架构的安装命令: %+v", rotated.Commands)
 	}
 	if _, ok := consumeTestToken(t, db, created.Token, "10.1.2.3"); ok {
 		t.Fatal("轮换后的旧 token 不应能消费")
@@ -470,5 +481,45 @@ func TestAutomationEnrollTokenCustomExpiry(t *testing.T) {
 	now := time.Now()
 	if out.Data.ExpiresAt.Before(now.Add(59*time.Minute)) || out.Data.ExpiresAt.After(now.Add(61*time.Minute)) {
 		t.Fatalf("expires_at = %v, want ~1h", out.Data.ExpiresAt)
+	}
+}
+
+// TestAgentEnrollTokenMultiArch 一次性令牌选择多个架构时，每个架构生成独立令牌与命令。
+func TestAgentEnrollTokenMultiArch(t *testing.T) {
+	db, sc := setupHostDB(t)
+	user := hostTestUser(1)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/enroll-token?os=linux&arch=amd64,arm64", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+	AgentEnrollToken(sc)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("多架构一次性令牌生成失败 %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data struct {
+			Arches   []string              `json:"arches"`
+			Commands []agentInstallCommand `json:"commands"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Data.Arches) != 2 || len(out.Data.Commands) != 2 {
+		t.Fatalf("多架构响应不符: %+v", out.Data)
+	}
+	seen := map[string]bool{}
+	for i, c := range out.Data.Commands {
+		token := c.EnrollToken
+		t.Cleanup(func() { db.Exec(`DELETE FROM enroll_tokens WHERE token_hash=$1`, agentgw.HashToken(token)) })
+		if c.Arch != out.Data.Arches[i] || c.EnrollToken == "" {
+			t.Fatalf("命令架构/令牌不符: %+v", c)
+		}
+		if seen[c.EnrollToken] {
+			t.Fatal("每个架构应生成独立的一次性令牌")
+		}
+		seen[c.EnrollToken] = true
+		if !strings.Contains(c.InstallCommand, c.EnrollToken) || !strings.Contains(c.InstallCommand, c.Arch) {
+			t.Fatalf("安装命令内容不符: %s", c.InstallCommand)
+		}
 	}
 }

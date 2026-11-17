@@ -653,25 +653,20 @@ func AgentCommandReport(s *svc.ServiceContext) http.HandlerFunc {
 }
 
 // AgentEnrollToken 生成一次性注册令牌（管理员专用，需认证）。
+//
+// arch 支持逗号分隔的多架构（如 amd64,arm64）：一次性令牌只能用一次，
+// 因此每个架构会分别生成一个独立令牌与安装命令。
 func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := randHex(32)
-		arch := r.URL.Query().Get("arch")
-		if arch == "" {
-			arch = "amd64"
-		}
 		osName := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("os")))
 		if osName == "" {
 			osName = "linux"
 		}
-		arch = strings.TrimSpace(strings.ToLower(arch))
-		// 校验 OS + 架构组合（防注入与无效组合）
-		if !isValidTarget(osName, arch) {
-			httpx.Fail(w, http.StatusBadRequest, "不支持的操作系统或架构")
+		arches, err := parseEnrollArches(osName, r.URL.Query().Get("arch"))
+		if err != nil {
+			httpx.Fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// 持久化：存哈希，15 分钟有效期
-		hash := agentgw.HashToken(token)
 		snap := s.ConfigSnapshot()
 		// TTL 取配置（默认 15m），不再硬编码。
 		ttl := 15 * time.Minute
@@ -696,15 +691,6 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 				}
 			}
 		}
-		_, err := s.DB.ExecContext(r.Context(), `INSERT INTO enroll_tokens (token_hash, expires_at, created_by, tenant_id) VALUES ($1, $2, $3, $4)`,
-			hash, expiresAt, creator, tenantID)
-		if err != nil {
-			auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", err)
-			httpx.Fail(w, http.StatusInternalServerError, "生成令牌失败")
-			return
-		}
-		auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", nil)
-
 		// 使用设置页热更新后的快照，避免直接读共享 Config 产生数据竞争。
 		serverURL := installBaseURL(snap.Server.ExternalURL, r, snap.Server.TrustProxy)
 		// 校验 serverURL（防注入）。Linux 命令走 shell，需要额外转义单引号；
@@ -721,17 +707,51 @@ func AgentEnrollToken(s *svc.ServiceContext) http.HandlerFunc {
 		if variant != "legacy" {
 			variant = ""
 		}
-		installCmd := buildInstallCommand(safeURL, arch, token, force, variant)
-		if osName == "windows" {
-			installCmd = buildWindowsInstallCommand(rawURL, arch, token, force)
+
+		tx, err := s.DB.BeginTx(r.Context(), nil)
+		if err != nil {
+			httpx.FailErr(w, http.StatusInternalServerError, err)
+			return
 		}
+		defer tx.Rollback()
+
+		commands := make([]agentInstallCommand, 0, len(arches))
+		for _, arch := range arches {
+			token := randHex(32)
+			hash := agentgw.HashToken(token)
+			if _, err := tx.ExecContext(r.Context(),
+				`INSERT INTO enroll_tokens (token_hash, expires_at, created_by, tenant_id) VALUES ($1, $2, $3, $4)`,
+				hash, expiresAt, creator, tenantID); err != nil {
+				auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", err)
+				httpx.Fail(w, http.StatusInternalServerError, "生成令牌失败")
+				return
+			}
+			installCmd := buildInstallCommand(safeURL, arch, token, force, variant)
+			if osName == "windows" {
+				installCmd = buildWindowsInstallCommand(rawURL, arch, token, force)
+			}
+			commands = append(commands, agentInstallCommand{
+				Arch: arch, EnrollToken: token, InstallCommand: installCmd,
+			})
+		}
+		if err := tx.Commit(); err != nil {
+			auditOp(s, r, audit.ActionEnrollToken, "enroll_token", "", "", err)
+			httpx.Fail(w, http.StatusInternalServerError, "生成令牌失败")
+			return
+		}
+		auditOpDetails(s, r, audit.ActionEnrollToken, "enroll_token", "", "", nil,
+			map[string]any{"arches": arches}, nil)
+
+		first := commands[0]
 		httpx.OK(w, map[string]any{
-			"enroll_token":    token,
+			"enroll_token":    first.EnrollToken,
 			"expires_in":      int(ttl.Seconds()),
 			"os":              osName,
-			"arch":            arch,
-			"install_command": installCmd,
+			"arch":            first.Arch,
+			"arches":          arches,
+			"install_command": first.InstallCommand,
 			"base_url":        serverURL,
+			"commands":        commands,
 		})
 	}
 }

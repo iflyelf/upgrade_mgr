@@ -116,6 +116,7 @@
     artifactPages: 1, artifactTotal: 0,
     guideOpen: null, guideOS: '', quickstart: undefined, quickstartErr: '', enroll: null,
     enrollMode: 'one_time', automationList: null, automationErr: '', automationLoading: false, automationCreated: null,
+    automationOS: 'linux', automationArches: ['amd64'],
     preview: null, editingComp: null, taskForm: null, uploadComponent: '',
     hostImport: null, hostBatchEdit: null,
     tunnelTest: null,
@@ -2490,10 +2491,36 @@
     ]
   };
 
-  function archOptions(osName) {
-    return (AGENT_ARCHES[osName] || AGENT_ARCHES.linux).map(function (a) {
-      return h('option', { value: a[0] }, [a[1]]);
-    });
+  // archPicker 多选架构：返回可重建的复选框组，切换 OS 时自动裁剪非法架构。
+  // 一次性令牌会为每个架构分别生成独立令牌；自动化令牌复用同一个令牌。
+  function archPicker(osName, selected, onChange) {
+    var box = h('div', { class: 'check-group' }, []);
+    var current = (selected || []).slice();
+    function render(os) {
+      box.textContent = '';
+      var options = AGENT_ARCHES[os] || AGENT_ARCHES.linux;
+      var allowed = options.map(function (a) { return a[0]; });
+      current = current.filter(function (a) { return allowed.indexOf(a) >= 0; });
+      if (!current.length) current = [allowed[0] || 'amd64'];
+      options.forEach(function (a) {
+        var cb = h('input', { type: 'checkbox', checked: current.indexOf(a[0]) >= 0 }, []);
+        cb.onchange = function () {
+          if (cb.checked) {
+            if (current.indexOf(a[0]) < 0) current.push(a[0]);
+          } else {
+            current = current.filter(function (x) { return x !== a[0]; });
+          }
+          if (typeof onChange === 'function') onChange(current.slice());
+        };
+        box.appendChild(h('label', { class: 'check check-row' }, [cb, h('span', {}, [a[1]])]));
+      });
+    }
+    render(osName);
+    return {
+      el: box,
+      setOS: function (os) { render(os); },
+      values: function () { return current.slice(); }
+    };
   }
 
   // enrollCard 包含两种接入令牌：
@@ -2535,38 +2562,44 @@
     var osEl = h('select', { value: (e && e.os) || 'linux' },
       AGENT_OS.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
     var curOS = (e && e.os) || 'linux';
-    var archEl = h('select', { value: (e && e.arch) || 'amd64' }, archOptions(curOS));
+    var picker = archPicker(curOS, (e && e.arches) || ['amd64']);
     // 切换操作系统时同步刷新可选架构：Windows 只有 amd64/arm64，且无 legacy。
     osEl.onchange = function () {
       var next = osEl.value;
-      var keep = archEl.value;
       var allowed = (AGENT_ARCHES[next] || []).map(function (a) { return a[0]; });
-      var arch = allowed.indexOf(keep) >= 0 ? keep : 'amd64';
-      state.enroll = { os: next, arch: arch, force: forceEl.checked, err: '' };
+      var keep = picker.values().filter(function (a) { return allowed.indexOf(a) >= 0; });
+      if (!keep.length) keep = [allowed[0] || 'amd64'];
+      state.enroll = { os: next, arches: keep, force: forceEl.checked, err: '' };
       render();
     };
     return h('div', {}, [
       hint('主机信息来自 Agent 注册：IP 取服务端看到的来源地址，主机名、OS、架构、init 系统由 Agent 上报。所以装好客户端，主机就会带着 IP 出现在列表里。'),
       field('目标操作系统', osEl, 'Windows 支持 Server 2008 R2 ~ Windows 11（amd64/arm64）；Windows 安装命令需在“管理员 PowerShell”中执行。'),
-      field('目标机器架构', archEl, 'Linux 上执行 uname -m：x86_64 选 amd64，aarch64 选 arm64。Windows 绝大多数为 amd64；arm64 仅用于 Windows on ARM。镜像里默认只带构建架构的 Agent，选其他架构下载可能 404。'),
+      field('目标机器架构', picker.el, '可多选：一次性令牌会为每个架构分别生成独立令牌与安装命令。Linux 上执行 uname -m：x86_64 选 amd64，aarch64 选 arm64；Windows 绝大多数为 amd64，arm64 用于 Windows on ARM。镜像/部署目录需包含对应架构的 Agent，否则下载会 404。'),
       field('强制重新注册', forceEl, '勾选后命令会带 --force，覆盖目标机已有 state.json 并重新注册。仅在换服务端、数据库重置或重新接入同一台机器时使用；普通重装请勿勾选。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
           type: 'button', class: 'btn', onclick: function () {
             var osName = osEl.value;
-            var arch = archEl.value;
+            var arches = picker.values();
             var force = forceEl.checked;
-            api('/api/agent/enroll-token?os=' + encodeURIComponent(osName) + '&arch=' + encodeURIComponent(arch) + (force ? '&force=1' : ''), { method: 'POST' })
-              .then(function (d) { state.enroll = { os: osName, arch: arch, force: force, base: d.base_url, cmd: d.install_command, expires: d.expires_in, err: '' }; render(); })
-              .catch(function (err) { state.enroll = { os: osName, arch: arch, force: force, err: err.message }; render(); });
+            if (!arches.length) { alert('请至少选择一个目标架构'); return; }
+            api('/api/agent/enroll-token?os=' + encodeURIComponent(osName) + '&arch=' + encodeURIComponent(arches.join(',')) + (force ? '&force=1' : ''), { method: 'POST' })
+              .then(function (d) {
+                var cmds = d.commands || (d.install_command ? [{ arch: d.arch, install_command: d.install_command }] : []);
+                state.enroll = { os: osName, arches: arches, force: force, base: d.base_url, commands: cmds, expires: d.expires_in, err: '' };
+                render();
+              })
+              .catch(function (err) { state.enroll = { os: osName, arches: arches, force: force, err: err.message }; render(); });
           }
         }, ['生成接入命令'])
       ]),
       e && e.err ? h('div', { class: 'err field', role: 'alert' }, [e.err]) : null,
-      e && e.cmd ? h('div', {}, [
+      e && e.commands && e.commands.length ? h('div', {}, [
         e.base ? hint('安装命令使用地址：' + e.base + '。可在“设置”页修改 server.external_url，保存后立即生效；Nginx 域名场景填 https://your-domain。') : null,
-        hint(((e.os === 'windows') ? '在目标机器用“管理员 PowerShell”执行（令牌一次性使用，' : '在目标机器用 root 执行（令牌一次性使用，') + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）：'),
-        codeBlock(e.cmd, '主机接入命令'),
+        hint(((e.os === 'windows') ? '在目标机器用“管理员 PowerShell”执行（令牌一次性使用，' : '在目标机器用 root 执行（令牌一次性使用，') + Math.round((e.expires || 900) / 60) + ' 分钟内有效，每台机器各生成一次）' +
+          (e.commands.length > 1 ? '。已为 ' + e.commands.length + ' 个架构分别生成独立令牌，请按目标机架构选择对应命令。' : '：')),
+        e.commands.map(function (c) { return codeBlock(c.install_command, '主机接入命令 · ' + c.arch); }),
         e.os === 'windows' ? hint('Windows 安装使用 PowerShell + System.Net.WebClient，兼容 Server 2008 R2 自带的 PowerShell 2.0。cmd 可先执行 powershell -NoProfile -ExecutionPolicy Bypass 再粘贴命令。服务以 LocalSystem 运行，重启后自动恢复。') : null,
         e.force ? hint('当前为强制重新注册命令（含 --force）：会覆盖目标机现有 Agent 身份，旧 Agent 记录将不再被该主机使用。') : null,
         hint('执行完成后点上方“搜索”刷新列表。如果 IP 显示成了代理地址，检查服务端 server.trust_proxy 配置。'),
@@ -2594,24 +2627,25 @@
     };
     var maxUsesEl = h('input', { type: 'number', min: '0', step: '1', value: '0' }, []);
     var cidrEl = h('input', { placeholder: '10.0.0.0/8,192.168.1.0/24' }, []);
-    var osEl = h('select', { value: 'linux' },
+    var osEl = h('select', { value: state.automationOS || 'linux' },
       AGENT_OS.map(function (a) { return h('option', { value: a[0] }, [a[1]]); }));
-    var archEl = h('select', { value: 'amd64' }, archOptions('linux'));
+    var picker = archPicker(state.automationOS || 'linux', state.automationArches || ['amd64'],
+      function (vals) { state.automationArches = vals; });
     osEl.onchange = function () {
-      var next = osEl.value;
-      var keep = archEl.value;
-      var allowed = (AGENT_ARCHES[next] || []).map(function (a) { return a[0]; });
-      archEl.innerHTML = '';
-      archOptions(next).forEach(function (o) { archEl.appendChild(o); });
-      archEl.value = allowed.indexOf(keep) >= 0 ? keep : 'amd64';
+      state.automationOS = osEl.value;
+      picker.setOS(osEl.value);
+      state.automationArches = picker.values();
     };
     var forceEl = h('input', { type: 'checkbox' }, []);
 
+    var createdCmds = created
+      ? (created.commands || (created.install_command ? [{ arch: created.arch, install_command: created.install_command }] : []))
+      : [];
     var createdBlock = created ? h('div', { class: 'field' }, [
       hint('自动化令牌已生成（仅显示一次，请立即复制到自动化平台）：'),
       codeBlock(created.token, '自动化令牌'),
-      created.install_command ? hint('安装命令示例（token 已嵌入）：') : null,
-      created.install_command ? codeBlock(created.install_command, '安装命令示例') : null,
+      createdCmds.length ? hint('安装命令示例（token 已嵌入，可分别用于所选架构）：') : null,
+      createdCmds.map(function (c) { return codeBlock(c.install_command, '安装命令示例 · ' + c.arch); }),
       created.expires_at ? hint('到期时间：' + fmtTime(created.expires_at)) : hint('永久有效：不会自动过期，请妥善保管并定期轮换。'),
       h('button', { type: 'button', class: 'btn ghost small', onclick: function () { state.automationCreated = null; render(); } }, ['关闭提示'])
     ]) : null;
@@ -2661,7 +2695,7 @@
               }, ['注销']) : null,
               x.enabled ? h('button', {
                 type: 'button', class: 'btn ghost small',
-                onclick: function () { rotateAutomationToken(x, osEl.value, archEl.value, forceEl.checked); }
+                onclick: function () { rotateAutomationToken(x, osEl.value, picker.values(), forceEl.checked); }
               }, ['轮换']) : null
             ])
           ];
@@ -2680,7 +2714,7 @@
       field('最大使用次数（0=不限）', maxUsesEl, '达到上限后令牌自动失效；永久令牌建议至少设置来源 CIDR。'),
       field('IP/CIDR 白名单（可选）', cidrEl, '逗号分隔，例如 10.0.0.0/8,192.168.1.0/24；为空表示不限制来源 IP。'),
       field('安装命令目标系统', osEl, '令牌本身与操作系统无关；这里只影响生成的安装命令示例。'),
-      field('安装命令架构', archEl, '仅用于生成安装命令示例，不会限制令牌本身。'),
+      field('安装命令架构', picker.el, '可多选；令牌本身与架构无关，这里只影响生成的安装命令示例。'),
       field('强制重新注册', forceEl, '安装命令是否带 --force；普通接入不要勾选。'),
       h('div', { class: 'toolbar' }, [
         h('button', {
@@ -2690,12 +2724,15 @@
               alert('最大使用次数需为 0 或正整数');
               return;
             }
+            var arches = picker.values();
+            if (!arches.length) { alert('请至少选择一个安装命令架构'); return; }
             var payload = {
               name: nameEl.value,
               max_uses: maxUses,
               allowed_cidrs: cidrEl.value.split(',').map(function (v) { return v.trim(); }).filter(Boolean),
               os: osEl.value,
-              arch: archEl.value,
+              arch: arches[0],
+              arches: arches,
               force: forceEl.checked
             };
             if (expiryEl.value === 'permanent') {
@@ -2761,10 +2798,12 @@
       .catch(function (e) { alert('注销失败: ' + e.message); });
   }
 
-  function rotateAutomationToken(x, osName, arch, force) {
+  function rotateAutomationToken(x, osName, arches, force) {
     if (!confirm('确定轮换令牌“' + (x.name || x.id) + '”吗？旧 token 会立即失效。')) return;
+    var list = Array.isArray(arches) ? arches : String(arches || 'amd64').split(',');
+    var archQS = list.map(function (a) { return String(a).trim(); }).filter(Boolean).join(',') || 'amd64';
     api('/api/agent/enroll-tokens/' + x.id + '/rotate?os=' + encodeURIComponent(osName || 'linux') +
-      '&arch=' + encodeURIComponent(arch || 'amd64') + (force ? '&force=1' : ''), { method: 'POST' })
+      '&arch=' + encodeURIComponent(archQS) + (force ? '&force=1' : ''), { method: 'POST' })
       .then(function (d) {
         state.automationCreated = d;
         state.automationList = null;
