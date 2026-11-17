@@ -172,6 +172,13 @@ uninstall_agent() {
     log "卸载 Agent 服务..."
     "$AGENT_BIN" uninstall || warn "Agent uninstall 返回非 0"
   fi
+  # Agent 二进制缺失时的兜底清理。
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now upgrade-agent 2>/dev/null || true
+  elif command -v service >/dev/null 2>&1; then
+    service upgrade-agent stop 2>/dev/null || true
+  fi
+  rm -f /etc/systemd/system/multi-user.target.wants/upgrade-agent.service
   rm -f "$AGENT_BIN"
   rm -rf /var/lib/upgrade-agent
   rm -f /var/log/upgrade-agent.log
@@ -211,7 +218,7 @@ case "$ACTION" in
     legacy_cleanup
     fetch_token
     install_agent
-    install_node update
+    install_node update || { warn "Node Exporter update 失败，尝试 install"; install_node install; }
     log "更新完成"
     ;;
   uninstall)

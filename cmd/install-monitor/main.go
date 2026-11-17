@@ -321,6 +321,10 @@ func uninstallAgent() {
 			log.Printf("Agent uninstall 返回错误: %v", err)
 		}
 	}
+	// Agent 二进制缺失时的兜底清理。
+	runQuiet("sc", "stop", agentService)
+	runQuiet("sc", "delete", agentService)
+	runQuiet("schtasks", "/delete", "/tn", "upgrade-agent-watchdog", "/f")
 	_ = os.RemoveAll(agentInstallDir)
 	if pd := os.Getenv("ProgramData"); pd != "" {
 		_ = os.RemoveAll(filepath.Join(pd, "upgrade-agent"))
