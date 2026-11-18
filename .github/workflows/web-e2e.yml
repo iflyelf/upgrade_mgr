@@ -45,11 +45,11 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: upgrade_mgr
+          POSTGRES_DB: upgrade_mgr_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d upgrade_mgr"
+          --health-cmd "pg_isready -U postgres -d upgrade_mgr_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -89,7 +89,7 @@ jobs:
             port: 5432
             user: postgres
             password: postgres
-            dbname: upgrade_mgr
+            dbname: upgrade_mgr_test
             sslmode: disable
           auth:
             provider: builtin
@@ -118,7 +118,7 @@ jobs:
         env:
           BASE_URL: http://127.0.0.1:18090
           # 主机批量删除用例需直接写库造数（主机只能由 Agent 注册或同步产生）。
-          E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/upgrade_mgr?sslmode=disable
+          E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/upgrade_mgr_test?sslmode=disable
         run: npx playwright test
 
       - name: 失败时输出服务端日志

@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # legacy 构建额外上报变体，服务端自升级时据此选择同样兼容旧内核的二进制。
 LEGACY_LDFLAGS := $(LDFLAGS) -X main.variant=legacy
 
-.PHONY: all build build-agent test vet fmt tidy cross agent-legacy test-agent-legacy agent-windows test-agent-windows build-monitor-installer clean run
+.PHONY: all build build-agent test test-db vet fmt tidy cross agent-legacy test-agent-legacy agent-windows test-agent-windows build-monitor-installer clean run
 
 all: build
 
@@ -18,6 +18,12 @@ build-agent:
 ## test: 运行单元测试（集成测试需 DATABASE_URL / CONSUL_ADDRESS）
 test:
 	go test ./...
+
+## test-db: 使用独立测试库 upgrade_mgr_test 运行集成测试（推荐）
+## 用法: make test-db TEST_DATABASE_URL="host=... dbname=upgrade_mgr_test ..."
+test-db:
+	@test -n "$(TEST_DATABASE_URL)" || (echo "请设置 TEST_DATABASE_URL，例如：host=127.0.0.1 user=postgres password=postgres dbname=upgrade_mgr_test sslmode=disable"; exit 1)
+	DATABASE_URL="$(TEST_DATABASE_URL)" go test -p 1 ./...
 
 ## docs-quickstart: 由 web/quickstart.yaml 生成页面 JSON 与 README 中英快速上手
 docs-quickstart:

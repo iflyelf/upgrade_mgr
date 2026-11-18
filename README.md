@@ -723,24 +723,32 @@ make test           # 单测（集成测试需 DATABASE_URL / CONSUL_ADDRESS）
 
 ### 测试安全（禁止连接生产配置）
 
-集成测试默认只允许：
+集成测试统一使用独立测试库 **`upgrade_mgr_test`**，默认只允许：
 
 - `localhost` / `127.0.0.1` / `::1` 的数据库（CI 使用一次性 PostgreSQL）；
-- 数据库名包含 `test`，或 DSN 带 `search_path=*test*` 的独立测试 schema。
+- 数据库名包含 `test`（如 `upgrade_mgr_test`），或 DSN 带 `search_path=*test*`
+  的独立测试 schema。
 
-其它情况（包括误把生产 `DATABASE_URL` 导入环境）会在每个用例开始时直接 `SKIP`，
-不会再写入生产 `app_settings`、主机连接地址等配置。临时排查确需对非测试库运行时，
-必须显式设置 `ALLOW_PROD_DB_TESTS=1`，并且用例必须自行快照/恢复。
+其它情况（包括误把生产 `upgrade_mgr` 的 `DATABASE_URL` 导入环境）会在每个用例
+开始时直接 `SKIP`，不会再写入生产 `app_settings`、主机连接地址等配置。临时排查
+确需对非测试库运行时，必须显式设置 `ALLOW_PROD_DB_TESTS=1`，并且用例必须自行
+快照/恢复。
 
-本地隔离示例：
+本地测试库：
 
 ```bash
-psql "$ADMIN_DSN" -c 'CREATE SCHEMA IF NOT EXISTS upgrade_mgr_test'
-DATABASE_URL="host=<db> port=5432 user=<user> password=<pass> dbname=upgrade_mgr sslmode=disable search_path=upgrade_mgr_test,public" \
-  go test -p 1 ./...
+# 首次：创建独立测试库（只需一次）
+createdb -h <db> -U <user> upgrade_mgr_test
+
+# 运行全部集成测试（迁移会自动建表）
+export DATABASE_URL="host=<db> port=5432 user=<user> password=<pass> dbname=upgrade_mgr_test sslmode=disable"
+go test -p 1 ./...
+
+# 或使用 Makefile 目标（内部固定 -p 1）
+make test-db TEST_DATABASE_URL="$DATABASE_URL"
 ```
 
-`-p 1` 串行跑包，避免多个包共用同一测试 schema 时互相清表。测试若必须修改
+`-p 1` 串行跑包，避免多个包共用同一测试库时互相清表。测试若必须修改
 `app_settings` 或主机连接地址，必须用 `t.Cleanup` 快照并恢复原值。
 ```
 
