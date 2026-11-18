@@ -331,7 +331,7 @@ test('主机 CSV 导入与批量编辑', async ({ page }) => {
   await expect(modal).toContainText('新建 1');
   await modal.getByRole('button', { name: '关闭', exact: true }).click();
 
-  const search = page.locator('input[placeholder="IP/出口 IP/隧道地址/主机名/业务组"]');
+  const search = page.locator('input[aria-label="搜索主机"]');
   await search.fill(ip);
   await page.getByRole('button', { name: '搜索', exact: true }).click();
   await expect(page.locator('table')).toContainText(ip);

@@ -45,7 +45,7 @@ test('主机：按筛选条件全选 → 后台删除进度 → 刷新后恢复'
 
     const dialogs = collectDialogs(page);
     await login(page);
-    await page.locator('input[placeholder="IP/出口 IP/隧道地址/主机名/业务组"]').fill(tag);
+    await page.locator('input[aria-label="搜索主机"]').fill(tag);
     await page.getByRole('button', { name: '搜索', exact: true }).click();
     await expect(page.getByText('共 150')).toBeVisible();
 
@@ -110,26 +110,27 @@ test('主机：下拉筛选 + URL 恢复 + 按筛选全选只选中筛选结果'
           FROM generate_series(1,5) g`);
   try {
     await login(page);
-    await page.locator('input[placeholder="IP/出口 IP/隧道地址/主机名/业务组"]').fill(tag);
+    await page.locator('input[aria-label="搜索主机"]').fill(tag);
     await page.getByRole('button', { name: '搜索', exact: true }).click();
     await expect(page.getByText('共 5')).toBeVisible();
 
-    // 下拉筛选：新插入的值会注入为选项（即使不在初始 facets 里）。
-    const appSel = page.getByRole('combobox', { name: '按 app_code 筛选' });
-    await appSel.selectOption(app);
+    // 可搜索筛选框：输入完整 app_code 后回车，即使不在初始 facets 里也能精确筛选。
+    const appInput = page.getByLabel('按 app_code 筛选');
+    await appInput.fill(app);
+    await appInput.press('Enter');
     await expect(page.getByText('共 3')).toBeVisible();
     await expect(page).toHaveURL(new RegExp('app_code=' + app));
 
     // 刷新后筛选条件从 URL 恢复。
     await page.reload();
-    await expect(page.getByRole('combobox', { name: '按 app_code 筛选' })).toHaveValue(app);
+    await expect(page.getByLabel('按 app_code 筛选')).toHaveValue(app);
     await expect(page.getByText('共 3')).toBeVisible();
 
     await page.getByRole('button', { name: '按筛选条件全选' }).click();
     await expect(page.getByText('已按筛选条件选中 3 台可删除主机')).toBeVisible();
 
     await page.getByRole('button', { name: '清除筛选' }).click();
-    await expect(page.getByRole('combobox', { name: '按 app_code 筛选' })).toHaveValue('');
+    await expect(page.getByLabel('按 app_code 筛选')).toHaveValue('');
     await expect(page).not.toHaveURL(/app_code=/);
   } finally {
     psql(`DELETE FROM hosts WHERE hostname='${tag}'`);
