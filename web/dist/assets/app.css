@@ -126,10 +126,8 @@ button.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-sha
 /* 主机页多选标签筛选框：标签 + 输入框 + 候选菜单 */
 .filter-bar { align-items: flex-start; gap: 10px 12px; }
 .tag-filter { display: flex; flex-direction: column; gap: 4px; min-width: 200px; max-width: 300px; flex: 1 1 200px; }
-.tag-filter-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.tag-filter-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
 .tag-filter-label { font-weight: 600; }
-.tag-filter-mode { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
-.tag-filter-mode input { width: auto; margin: 0; padding: 0; }
 .tag-filter-box {
   position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
   min-height: 36px; padding: 4px 6px; border: 1px solid var(--border-color);

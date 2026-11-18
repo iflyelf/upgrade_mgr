@@ -17,19 +17,45 @@ func TestHostFilterSearchableCombo(t *testing.T) {
 	}
 	body := string(src)
 	for _, want := range []string{
-		"function filterTags(key, label, options, remoteField)",
-		"filterTags('app_code', 'app_code'",
-		"filterTags('biz_group', '业务组'",
-		"hostFilterModes",
-		"' 单选'",
+		"function tagFilter(opts)",
+		"hostFilterTag('app_code'",
+		"hostFilterTag('biz_group'",
+		"hostFilterTag('os_family'",
+		"hostFilterTag('account'",
+		"hostFilterTag('agent_status'",
+		"hostFilterTag('upgrade_status'",
 		"addAll('biz_group'",
 		"asList(p.biz_group)",
 		"/api/hosts/facets?fields=",
 		"&q=",
 		"&limit=200",
+		"tag-filter-box",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("app.js 缺少主机筛选搜索/业务组关键逻辑: %q", want)
+		}
+	}
+	// 筛选框只保留多选标签（选一个即单选），不再有额外的「单选」复选框。
+	for _, banned := range []string{"tag-filter-mode", "hostFilterModes", "筛选单选模式"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("app.js 不应再包含单选开关逻辑: %q", banned)
+		}
+	}
+}
+
+// TestTaskHostFilterUsesTagFilter 任务页主机筛选必须与主机页共用同一个可搜索标签框。
+func TestTaskHostFilterUsesTagFilter(t *testing.T) {
+	src, err := os.ReadFile("dist/assets/app.js")
+	if err != nil {
+		t.Fatalf("读取 app.js 失败: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "var picker = tagFilter({") {
+		t.Error("任务页主机筛选未复用 tagFilter")
+	}
+	for _, banned := range []string{"filterModes", "筛选单选模式"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("任务页不应再包含单选模式逻辑: %q", banned)
 		}
 	}
 }

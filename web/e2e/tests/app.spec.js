@@ -37,46 +37,44 @@ test('登录后导航与 URL 刷新保持页面', async ({ page }) => {
   await expect(page.getByRole('heading', { name: '创建任务' })).toBeVisible();
 });
 
-test('任务主机筛选：多选/单选切换 + 预览/创建重渲染后条件不丢失', async ({ page }) => {
+test('任务主机筛选：可搜索多选标签 + 预览/创建重渲染后条件不丢失', async ({ page }) => {
   await login(page);
   await page.locator('.main-nav').getByRole('button', { name: '任务', exact: true }).click();
   await expect(page.getByRole('heading', { name: '创建任务' })).toBeVisible();
 
-  // 主机字段筛选（默认 task.host_selector_fields 含 app_code）默认多选、支持手填。
-  const appInput = page.getByPlaceholder('选择或输入 App Code（可多选） 后回车');
+  // 与主机页共用标签框：输入关键字会触发 facets 远程搜索。
+  const appInput = page.getByLabel('按 App Code 筛选');
   await expect(appInput).toBeVisible();
-  await appInput.fill('E2E_PAY');
+  const facetReq = page.waitForResponse((r) =>
+    r.url().includes('/api/hosts/facets') && r.url().includes('q=E2E_P'));
+  await appInput.fill('E2E_P');
+  await facetReq;
   await appInput.press('Enter');
-  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_PAY');
+  await expect(page.locator('.tag-filter-values .tag').first()).toContainText('E2E_PAY');
 
-  // 切换为单选：标题右侧勾选「单选」，已选值保留且只允许一个。
-  await page.getByRole('checkbox', { name: 'App Code筛选单选模式' }).check();
-  const singleInput = page.getByPlaceholder('选择或输入 App Code（单选） 后回车');
-  await expect(singleInput).toBeVisible();
-  await expect(page.locator('.tag-picker-values .tag')).toHaveCount(1);
-  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_PAY');
+  // 再添加一个值：标签框天然支持多选，选一个即为单选。
+  await appInput.fill('E2E_ORD');
+  await appInput.press('Enter');
+  await expect(page.locator('.tag-filter-values .tag')).toHaveCount(2);
 
-  // 单选模式下再填一个值，应替换旧值而不是累加。
-  await singleInput.fill('E2E_ORD');
-  await singleInput.press('Enter');
-  await expect(page.locator('.tag-picker-values .tag')).toHaveCount(1);
-  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
-
-  // 刷新页面后，草稿（含单选模式与已选值）应从 localStorage 恢复。
+  // 刷新页面后，草稿中的多选条件应从 localStorage 恢复。
   await page.reload();
   await expect(page.getByRole('heading', { name: '创建任务' })).toBeVisible();
-  await expect(page.getByRole('checkbox', { name: 'App Code筛选单选模式' })).toBeChecked();
-  await expect(page.getByPlaceholder('选择或输入 App Code（单选） 后回车')).toBeVisible();
-  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
+  await expect(page.locator('.tag-filter-values .tag')).toHaveCount(2);
+
+  // 点标签 × 移除一个值。
+  await page.locator('.tag-filter-values .tag', { hasText: 'E2E_ORD' }).locator('.tag-x').click();
+  await expect(page.locator('.tag-filter-values .tag')).toHaveCount(1);
+  await expect(page.locator('.tag-filter-values .tag').first()).toContainText('E2E_PAY');
 
   // 未选组件时预览会在本地校验失败并触发 render，已填筛选值应保留。
   await page.getByRole('button', { name: '预览', exact: true }).click();
   await expect(page.locator('.err.field')).toContainText('请先选择组件');
-  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
+  await expect(page.locator('.tag-filter-values .tag').first()).toContainText('E2E_PAY');
 
   // 再点创建同样会重渲染，筛选值不能丢。
   await page.getByRole('button', { name: '创建任务', exact: true }).click();
-  await expect(page.locator('.tag-picker-values .tag').first()).toContainText('E2E_ORD');
+  await expect(page.locator('.tag-filter-values .tag').first()).toContainText('E2E_PAY');
 });
 
 test('任务主机筛选：修改条件后清除过期预览', async ({ page }) => {

@@ -138,7 +138,7 @@ test('主机：下拉筛选 + URL 恢复 + 按筛选全选只选中筛选结果'
 });
 
 
-test('主机：筛选支持多选标签与单选开关', async ({ page }) => {
+test('主机：筛选支持多选标签（选一个即为单选）', async ({ page }) => {
   test.skip(!DB_URL, '未设置 E2E_DATABASE_URL，跳过主机多选筛选用例');
   const tag = 'e2e-hmulti-' + Date.now();
   const app1 = 'E2EM1' + Date.now();
@@ -169,8 +169,9 @@ test('主机：筛选支持多选标签与单选开关', async ({ page }) => {
     await expect(page.locator('.tag-filter[data-key="app_code"] .tag')).toHaveCount(2);
     await expect(page.getByText('共 4')).toBeVisible();
 
-    // 勾选「单选」后只保留一个值。
-    await page.locator('.tag-filter[data-key="app_code"] input[type="checkbox"]').check();
+    // 点标签 × 移除一个值，筛选立即生效（只留一个即为单选）。
+    await page.locator('.tag-filter[data-key="app_code"] .tag', { hasText: app2 })
+      .locator('.tag-x').click();
     await expect(page.locator('.tag-filter[data-key="app_code"] .tag')).toHaveCount(1);
     await expect(page.getByText('共 2')).toBeVisible();
   } finally {

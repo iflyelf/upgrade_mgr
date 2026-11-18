@@ -149,7 +149,6 @@
     flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
     hostFacets: null, hostListFacets: null,
     hostFilter: { app_code: [], biz_group: [], os_family: [], account: [], agent_status: [], upgrade_status: [] },
-    hostFilterModes: {},
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1,
     orgUserQ: '', orgUserForm: null, orgRoleForm: null, orgGroupForm: null,
@@ -202,7 +201,7 @@
   function hint(text) { return h('div', { class: 'hint' }, [text]); }
 
   // 任务创建表单草稿：按登录用户保存在 localStorage，刷新页面后恢复
-  // （含主机筛选已选值、单选/多选模式以及命令脚本等输入）。
+  // （含主机筛选已选值以及命令脚本等输入）。
   var TASK_DRAFT_KEY = 'upgrade_mgr_task_draft_v1';
   function taskDraftKey() {
     var u = state.user && (state.user.Username || state.user.username);
@@ -1641,6 +1640,195 @@
     return parts.join(' / ') || '-';
   }
 
+  // tagFilter 可搜索的多选标签筛选框（主机页与任务页共用）。
+  //
+  // opts:
+  //   label        标题/占位文案
+  //   candidates   初始候选值 [[value,label]|string]
+  //   initial      已选值数组
+  //   remoteField  非空时输入关键字请求 facets（app_code 等大候选值场景）
+  //   onChange(vals) 值变化（不重建页面，供表单实时保存）
+  //   onCommit(vals) 回车/失焦/移除标签时提交（主机页用来触发列表刷新）
+  // 返回 { el, getValues() }；getValues 会补交输入框中尚未回车的值。
+  function tagFilter(opts) {
+    opts = opts || {};
+    var label = opts.label || '筛选';
+    var values = asList(opts.initial).slice();
+    var local = opts.candidates || [];
+    var lastRaw = local;
+    var dirty = false;
+    var focused = false;
+
+    var tagsEl = h('div', { class: 'tag-filter-values' });
+    var input = h('input', {
+      class: 'tag-filter-input', autocomplete: 'off',
+      placeholder: label + '：全部', 'aria-label': '按 ' + label + ' 筛选'
+    });
+    var menu = h('div', { class: 'combo-menu', hidden: 'hidden' });
+    var box = h('div', { class: 'tag-filter-box' }, [tagsEl, input, menu]);
+    var wrap = h('div', { class: 'tag-filter', 'data-key': opts.key || null }, [
+      h('div', { class: 'tag-filter-head' }, [
+        h('span', { class: 'tag-filter-label' }, [label])
+      ]),
+      box
+    ]);
+    var timer = null, seq = 0;
+
+    function notify() {
+      if (typeof opts.onChange === 'function') opts.onChange(values.slice());
+    }
+    function commit() {
+      dirty = false;
+      if (typeof opts.onCommit === 'function') opts.onCommit(values.slice());
+    }
+    function renderTags() {
+      tagsEl.textContent = '';
+      values.forEach(function (v, i) {
+        tagsEl.appendChild(h('span', { class: 'tag' }, [
+          v,
+          h('button', {
+            class: 'tag-x', type: 'button', title: '移除', 'aria-label': '移除 ' + v,
+            // preventDefault 避免先触发输入框 blur 导致整体重绘、点击丢失。
+            onmousedown: function (ev) { ev.preventDefault(); },
+            onclick: function () {
+              values.splice(i, 1);
+              renderTags();
+              notify();
+              commit();
+            }
+          }, ['×'])
+        ]));
+      });
+      input.placeholder = values.length ? '继续添加…' : (label + '：全部');
+    }
+    function norm(list) {
+      return (list || []).map(function (o) {
+        if (Object.prototype.toString.call(o) === '[object Array]') {
+          return { v: String(o[0]), t: String(o[1]) };
+        }
+        return { v: String(o), t: String(o) };
+      });
+    }
+    function optNode(value, text) {
+      var on = value ? values.indexOf(value) >= 0 : values.length === 0;
+      return h('div', {
+        class: 'combo-opt' + (on ? ' active' : ''),
+        'data-value': value
+      }, [(value && on ? '✓ ' : '') + text]);
+    }
+    function show(list) {
+      lastRaw = list || [];
+      // 失焦后远程搜索结果到达时不要重新弹开菜单。
+      if (!focused) { menu.hidden = true; return; }
+      var nodes = norm(lastRaw);
+      menu.innerHTML = '';
+      menu.appendChild(optNode('', label + '：全部'));
+      nodes.forEach(function (o) { menu.appendChild(optNode(o.v, o.t)); });
+      if (!nodes.length) {
+        menu.appendChild(h('div', { class: 'combo-empty' }, ['无匹配项，输入完整值后回车']));
+      }
+      menu.hidden = false;
+    }
+    function close() { menu.hidden = true; }
+    function filterLocal(kw) {
+      kw = String(kw || '').trim().toLowerCase();
+      if (!kw) return local;
+      return local.filter(function (o) {
+        var v = Object.prototype.toString.call(o) === '[object Array]' ? o : [o, o];
+        return String(v[0]).toLowerCase().indexOf(kw) >= 0 ||
+          String(v[1]).toLowerCase().indexOf(kw) >= 0;
+      }).slice(0, 300);
+    }
+    function pick(v) {
+      if (!v) {
+        values = [];
+      } else {
+        var idx = values.indexOf(v);
+        if (idx >= 0) values.splice(idx, 1);
+        else values.push(v);
+      }
+      dirty = true;
+      renderTags();
+      show(lastRaw);
+      notify();
+    }
+    function addTyped(raw) {
+      raw = String(raw || '');
+      // 命中候选时整体作为一个值（业务组可能含空格）；否则只按逗号拆分。
+      var hit = norm(local).concat(norm(lastRaw)).some(function (o) { return o.v === raw; });
+      var parts = raw && hit ? [raw] : raw.split(/[,，]+/);
+      parts.forEach(function (v) {
+        v = v.trim();
+        if (v && values.indexOf(v) < 0) values.push(v);
+      });
+      input.value = '';
+      if (parts.some(function (v) { return v.trim(); })) dirty = true;
+      renderTags();
+      show(lastRaw);
+      notify();
+    }
+    function remoteSearch(kw) {
+      var my = ++seq;
+      api('/api/hosts/facets?fields=' + encodeURIComponent(opts.remoteField) +
+          '&q=' + encodeURIComponent(kw) + '&limit=200')
+        .then(function (d) {
+          if (my !== seq) return;
+          show((((d || {}).values) || {})[opts.remoteField] || []);
+        })
+        .catch(function () {});
+    }
+    input.onfocus = function () {
+      focused = true;
+      show(opts.remoteField ? lastRaw : filterLocal(input.value));
+    };
+    input.oninput = function () {
+      if (!opts.remoteField) { show(filterLocal(input.value)); return; }
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () { remoteSearch(input.value.trim()); }, 250);
+    };
+    input.onkeydown = function (ev) {
+      if (ev.key === 'Escape') {
+        values = asList(opts.initial).slice();
+        dirty = false;
+        renderTags();
+        close();
+        input.blur();
+        return;
+      }
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      var typed = String(input.value || '').trim();
+      if (typed) addTyped(typed);
+      commit();
+    };
+    input.onblur = function () {
+      focused = false;
+      setTimeout(function () {
+        close();
+        if (dirty) commit();
+      }, 150);
+    };
+    menu.onmousedown = function (ev) {
+      ev.preventDefault();
+      var t = ev.target;
+      while (t && t !== menu) {
+        if (t.getAttribute && t.getAttribute('data-value') !== null) {
+          return pick(t.getAttribute('data-value'));
+        }
+        t = t.parentNode;
+      }
+    };
+    renderTags();
+    return {
+      el: wrap,
+      getValues: function () {
+        var typed = String(input.value || '').trim();
+        if (typed) addTyped(typed);
+        return values.slice();
+      }
+    };
+  }
+
   function hostsView() {
     var qEl;
     var doSearch = function () {
@@ -1657,192 +1845,6 @@
     }
     var hf = state.hostFilter || (state.hostFilter = {});
     var facetVals = (state.hostListFacets && state.hostListFacets.values) || {};
-    // filterTags 可搜索的多选标签筛选框：
-    //   - 输入关键字即时过滤；app_code/业务组/账号按需请求服务端；
-    //   - 回车/选择候选添加标签，点标签 × 移除；
-    //   - 每项可勾选「单选」，勾选后只保留一个值（与任务页主机筛选一致）。
-    function filterTags(key, label, options, remoteField) {
-      var multi = state.hostFilterModes[key] !== false;
-      var values = asList(hf[key]).slice();
-      var local = options || [];
-      var lastRaw = local;
-      var dirty = false;
-      var focused = false;
-
-      var tagsEl = h('div', { class: 'tag-filter-values' });
-      var input = h('input', {
-        class: 'tag-filter-input', autocomplete: 'off',
-        placeholder: label + '：全部', 'aria-label': '按 ' + label + ' 筛选'
-      });
-      var menu = h('div', { class: 'combo-menu', hidden: 'hidden' });
-      var box = h('div', { class: 'tag-filter-box' }, [tagsEl, input, menu]);
-      var modeEl = h('input', {
-        type: 'checkbox', checked: !multi,
-        onchange: function () {
-          state.hostFilterModes[key] = !modeEl.checked;
-          if (modeEl.checked && values.length > 1) values = values.slice(0, 1);
-          apply();
-        }
-      });
-      var wrap = h('div', { class: 'tag-filter', 'data-key': key }, [
-        h('div', { class: 'tag-filter-head' }, [
-          h('span', { class: 'tag-filter-label' }, [label]),
-          h('label', { class: 'tag-filter-mode', title: '勾选后该筛选只保留一个值' }, [modeEl, ' 单选'])
-        ]),
-        box
-      ]);
-      var timer = null, seq = 0;
-
-      function renderTags() {
-        tagsEl.textContent = '';
-        values.forEach(function (v, i) {
-          tagsEl.appendChild(h('span', { class: 'tag' }, [
-            v,
-            h('button', {
-              class: 'tag-x', type: 'button', title: '移除', 'aria-label': '移除 ' + v,
-              // preventDefault 避免先触发输入框 blur 导致整体重绘、点击丢失。
-              onmousedown: function (ev) { ev.preventDefault(); },
-              onclick: function () {
-                values.splice(i, 1);
-                dirty = true;
-                renderTags();
-                apply();
-              }
-            }, ['×'])
-          ]));
-        });
-        input.placeholder = values.length ? '继续添加…' : (label + '：全部');
-      }
-      function norm(list) {
-        return (list || []).map(function (o) {
-          if (Object.prototype.toString.call(o) === '[object Array]') {
-            return { v: String(o[0]), t: String(o[1]) };
-          }
-          return { v: String(o), t: String(o) };
-        });
-      }
-      function optNode(value, text) {
-        var on = value ? values.indexOf(value) >= 0 : values.length === 0;
-        return h('div', {
-          class: 'combo-opt' + (on ? ' active' : ''),
-          'data-value': value
-        }, [(multi && value && on ? '✓ ' : '') + text]);
-      }
-      function show(list) {
-        lastRaw = list || [];
-        // 失焦后远程搜索结果到达时不要重新弹开菜单。
-        if (!focused) { menu.hidden = true; return; }
-        var opts = norm(lastRaw);
-        menu.innerHTML = '';
-        menu.appendChild(optNode('', label + '：全部'));
-        opts.forEach(function (o) { menu.appendChild(optNode(o.v, o.t)); });
-        if (!opts.length) {
-          menu.appendChild(h('div', { class: 'combo-empty' }, ['无匹配项，输入完整值后回车']));
-        }
-        menu.hidden = false;
-      }
-      function close() { menu.hidden = true; }
-      function filterLocal(kw) {
-        kw = String(kw || '').trim().toLowerCase();
-        if (!kw) return local;
-        return local.filter(function (o) {
-          var v = Object.prototype.toString.call(o) === '[object Array]' ? o : [o, o];
-          return String(v[0]).toLowerCase().indexOf(kw) >= 0 ||
-            String(v[1]).toLowerCase().indexOf(kw) >= 0;
-        }).slice(0, 300);
-      }
-      function apply() {
-        if (!multi && values.length > 1) values = values.slice(0, 1);
-        hf[key] = values.slice();
-        dirty = false;
-        state.hostPage = 1;
-        loadHosts();
-      }
-      function pick(v) {
-        if (!v) {
-          values = [];
-        } else if (!multi) {
-          values = [v];
-        } else {
-          var idx = values.indexOf(v);
-          if (idx >= 0) values.splice(idx, 1);
-          else values.push(v);
-        }
-        dirty = true;
-        renderTags();
-        show(lastRaw);
-        if (!multi) apply();
-      }
-      function addTyped(raw) {
-        raw = String(raw || '');
-        // 命中候选时整体作为一个值（业务组可能含空格）；否则只按逗号拆分。
-        var hit = norm(local).concat(norm(lastRaw)).some(function (o) { return o.v === raw; });
-        var parts = raw && hit ? [raw] : raw.split(/[,，]+/);
-        parts.forEach(function (v) {
-          v = v.trim();
-          if (!v) return;
-          if (!multi) values = [v];
-          else if (values.indexOf(v) < 0) values.push(v);
-        });
-        input.value = '';
-        dirty = true;
-        renderTags();
-        show(lastRaw);
-      }
-      function remoteSearch(kw) {
-        var my = ++seq;
-        api('/api/hosts/facets?fields=' + encodeURIComponent(remoteField) +
-            '&q=' + encodeURIComponent(kw) + '&limit=200')
-          .then(function (d) {
-            if (my !== seq) return;
-            show((((d || {}).values) || {})[remoteField] || []);
-          })
-          .catch(function () {});
-      }
-      input.onfocus = function () {
-        focused = true;
-        show(remoteField ? lastRaw : filterLocal(input.value));
-      };
-      input.oninput = function () {
-        if (!remoteField) { show(filterLocal(input.value)); return; }
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(function () { remoteSearch(input.value.trim()); }, 250);
-      };
-      input.onkeydown = function (ev) {
-        if (ev.key === 'Escape') {
-          values = asList(hf[key]).slice();
-          dirty = false;
-          renderTags();
-          close();
-          input.blur();
-          return;
-        }
-        if (ev.key !== 'Enter') return;
-        ev.preventDefault();
-        var typed = String(input.value || '').trim();
-        if (typed) addTyped(typed);
-        apply();
-      };
-      input.onblur = function () {
-        focused = false;
-        setTimeout(function () {
-          close();
-          if (dirty) apply();
-        }, 150);
-      };
-      menu.onmousedown = function (ev) {
-        ev.preventDefault();
-        var t = ev.target;
-        while (t && t !== menu) {
-          if (t.getAttribute && t.getAttribute('data-value') !== null) {
-            return pick(t.getAttribute('data-value'));
-          }
-          t = t.parentNode;
-        }
-      };
-      renderTags();
-      return wrap;
-    }
     function facetOptions(key) {
       return (facetVals[key] || []).map(function (v) { return [v, v]; });
     }
@@ -1896,14 +1898,29 @@
       h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
     ]);
     qEl.onkeydown = function (ev) { if (ev.key === 'Enter') doSearch(); };
-    // 筛选标签框单独一行：支持输入搜索、多选标签和每项「单选」开关。
+    // 筛选标签框单独一行：支持输入搜索与多选，选择即生效。
+    function hostFilterTag(key, label, options, remoteField) {
+      return tagFilter({
+        key: key,
+        label: label,
+        candidates: options,
+        initial: hf[key],
+        remoteField: remoteField,
+        onChange: function (vals) { hf[key] = vals; },
+        onCommit: function (vals) {
+          hf[key] = vals;
+          state.hostPage = 1;
+          loadHosts();
+        }
+      }).el;
+    }
     var filterBar = h('div', { class: 'toolbar filter-bar' }, [
-      filterTags('agent_status', 'Agent 状态', statusOptions),
-      filterTags('upgrade_status', '升级状态', upgradeStatusOptions),
-      filterTags('app_code', 'app_code', facetOptions('app_code'), 'app_code'),
-      filterTags('biz_group', '业务组', facetOptions('biz_group'), 'biz_group'),
-      filterTags('os_family', 'OS', osFacetOptions()),
-      filterTags('account', '账号', facetOptions('account'), 'account')
+      hostFilterTag('agent_status', 'Agent 状态', statusOptions),
+      hostFilterTag('upgrade_status', '升级状态', upgradeStatusOptions),
+      hostFilterTag('app_code', 'app_code', facetOptions('app_code'), 'app_code'),
+      hostFilterTag('biz_group', '业务组', facetOptions('biz_group'), 'biz_group'),
+      hostFilterTag('os_family', 'OS', osFacetOptions()),
+      hostFilterTag('account', '账号', facetOptions('account'), 'account')
     ]);
 
     var listHostDefs = (state.hostFieldDefs || [])
@@ -7586,22 +7603,22 @@
     return mask;
   }
 
-  // HOST_FILTER_FIELDS 任务主机筛选字段元数据（label + 默认是否单选）。
+  // HOST_FILTER_FIELDS 任务主机筛选字段元数据（仅 label；支持多选）。
   // 新增字段：后端 hosts 列存在且 host_facets.go 白名单放行后，
   // 只需在此补充一条即可自动获得下拉选择、手填与模式切换。
   var HOST_FILTER_FIELDS = {
     app_code: { label: 'App Code' },
     biz_group: { label: '业务组' },
-    os_family: { label: '操作系统', single: true },
-    os_type: { label: '系统类型', single: true },
+    os_family: { label: '操作系统' },
+    os_type: { label: '系统类型' },
     account: { label: '账号' },
     department: { label: '部门' },
     vendor: { label: '厂商' },
     arch: { label: '架构' },
-    host_type: { label: '主机类型', single: true }
+    host_type: { label: '主机类型' }
   };
   function hostFilterMeta(col) {
-    return HOST_FILTER_FIELDS[col] || { label: col, single: false };
+    return HOST_FILTER_FIELDS[col] || { label: col };
   }
 
   function tasksView() {
@@ -7628,17 +7645,16 @@
     });
 
     // 表单值放在 state.taskForm 里：预览会触发 render，靠它保留用户输入。
-    // 首次进入时合并 localStorage 草稿，刷新页面后仍保留已填内容与单选/多选模式。
+    // 首次进入时合并 localStorage 草稿，刷新页面后仍保留已填内容。
     var f = state.taskForm || (state.taskForm = Object.assign({
       kind: 'upgrade', name: '', component_id: '', version: '', ip_expr: '',
       script: '', interpreter: '', args: '', stdin: '', tty: false, timeout: '10m',
       mode: 'count', batch_size: '10', canary_count: '1', auto_promote: true,
-      filters: {}, filterModes: {}
+      filters: {}
     }, loadTaskDraft() || {}));
     if (!f.kind) f.kind = 'upgrade';
     if (!isAdmin() && f.kind === 'command') f.kind = 'upgrade';
     if (!f.filters) f.filters = {};
-    if (!f.filterModes) f.filterModes = {};
 
     function versionsFor(cid) {
       var out = [];
@@ -7784,64 +7800,35 @@
       if (box && box.parentNode) box.parentNode.removeChild(box);
     }
 
-    // 构建字段选择器（多个 tagPicker）
-    // 默认模式来自 HOST_FILTER_FIELDS；用户可在每个字段标题右侧勾选/取消「单选」自由切换。
+    // 构建字段选择器（与主机页共用可搜索的多选标签框，不再单独提供单选开关：
+    // 只选一个值即为单选，选多个即为多选）。
     var facets = state.hostFacets || { fields: [], values: {} };
     var fieldPickers = {};
     var fieldPickerEls = [];
 
-    // filterField 在字段标题右侧提供「单选」开关。
-    function filterField(label, modeEl, input, hintText) {
-      if (!input.id) input.id = 'f' + (++fieldSeq);
-      return h('div', { class: 'field' }, [
-        h('div', { class: 'field-head' }, [
-          h('label', { for: input.id }, [label]),
-          h('label', { class: 'field-mode', title: '勾选后该字段只允许一个值' }, [modeEl, ' 单选'])
-        ]),
-        input,
-        hintText ? hint(hintText) : null
-      ]);
-    }
-
     facets.fields.forEach(function (col) {
       var meta = hostFilterMeta(col);
       var label = meta.label;
-      var configured = f.filterModes[col];
-      var multi = configured === undefined ? !meta.single : !!configured;
-      var picker = tagPicker(
-        facets.values[col] || [],
-        '选择或输入 ' + label + (multi ? '（可多选）' : '（单选）') + ' 后回车',
-        {
-          initial: f.filters[col] || [],
-          multi: multi,
-          // app_code/业务组等候选值可能很多：输入时按需向服务端搜索。
-          remoteField: col,
-          // 立即写回 taskForm：预览/自动刷新会触发 render，靠它恢复已选值。
-          onChange: function (vals) {
-            if (vals.length > 0) f.filters[col] = vals;
-            else delete f.filters[col];
-            invalidatePreview();
-            saveTaskDraft(f);
-          }
-        }
-      );
-      fieldPickers[col] = picker;
-      var singleEl = h('input', {
-        type: 'checkbox', checked: !multi,
-        'aria-label': label + '筛选单选模式',
-        onchange: function () {
-          // 先合入尚未回车的输入，再按新模式裁剪已选值。
-          picker.getValues();
-          f.filterModes[col] = !singleEl.checked;
-          if (singleEl.checked && (f.filters[col] || []).length > 1) {
-            f.filters[col] = f.filters[col].slice(0, 1);
-          }
+      var picker = tagFilter({
+        key: col,
+        label: label,
+        candidates: facets.values[col] || [],
+        initial: f.filters[col] || [],
+        // app_code/业务组等候选值可能很多：输入时按需向服务端搜索。
+        remoteField: col,
+        // 立即写回 taskForm：预览/自动刷新会触发 render，靠它恢复已选值。
+        onChange: function (vals) {
+          if (vals.length > 0) f.filters[col] = vals;
+          else delete f.filters[col];
           invalidatePreview();
-          render();
+          saveTaskDraft(f);
         }
-      }, []);
-      fieldPickerEls.push(filterField(label, singleEl, picker.el,
-        (multi ? '多选' : '单选') + '，留空表示不限；可从下拉选择或手填。'));
+      });
+      fieldPickers[col] = picker;
+      fieldPickerEls.push(h('div', { class: 'field' }, [
+        picker.el,
+        hint('支持输入搜索与多选；只选一个即为单选。留空表示不限。')
+      ]));
     });
 
     // 提交前收集 filters（补上用户尚未回车确认的输入）
@@ -8066,7 +8053,7 @@
       // 主机字段筛选（如果配置了可选字段）
       fieldPickerEls.length > 0 ? h('div', { class: 'field-group' }, [
         h('h4', {}, ['主机筛选（可选）']),
-        hint('按主机字段筛选（部分字段单选，其余可多选）；留空表示不限。与 IP 段取交集。')
+        hint('按主机字段筛选：支持输入搜索与多选（只选一个即为单选）；留空表示不限。与 IP 段取交集。')
       ].concat(fieldPickerEls)) : null,
       f.kind === 'command' ? field('命令脚本', scriptEl,
         '脚本会以文件形式交给解释器执行，支持管道、重定向与进程替换。需要交互确认时填写标准输入，必要时勾选伪终端。') : null,
