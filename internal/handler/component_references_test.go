@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,14 +17,13 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestComponentReferences 验证删除前引用查询接口返回任务明细与阻断信息。
 func TestComponentReferences(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)

@@ -3,20 +3,18 @@ package fielddef
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 
 	_ "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 func setupDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)

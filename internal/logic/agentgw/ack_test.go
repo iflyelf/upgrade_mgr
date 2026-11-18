@@ -3,10 +3,11 @@ package agentgw
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 
 	_ "github.com/lib/pq"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestAckOwnership 验证 Ack 只能确认自己的指令，不能篡改他人指令。
@@ -14,10 +15,7 @@ import (
 // 背景：cmdID 为 BIGSERIAL（连续可猜），若不校验归属，任何已认证 Agent
 // 都能枚举 ID 篡改其它主机的升级状态（谎报成功/失败）。
 func TestAckOwnership(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)

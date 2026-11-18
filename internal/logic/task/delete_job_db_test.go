@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestDeleteJobLifecycle 异步删除作业：
@@ -21,10 +22,7 @@ import (
 //   - 执行结束状态为 done，进度与结果持久化；
 //   - 停止请求让未处理完的作业以 canceled 结束。
 func TestDeleteJobLifecycle(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)

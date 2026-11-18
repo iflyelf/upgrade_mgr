@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +15,8 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestCreateCommandTask 验证一次性命令任务：
@@ -23,10 +24,7 @@ import (
 //   - 编排器下发 run_command 指令，载荷携带脚本；
 //   - 未声明 run_command 能力的 Agent 被跳过并写入原因。
 func TestCreateCommandTask(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)
@@ -152,10 +150,7 @@ func TestCreateCommandTask(t *testing.T) {
 
 // TestCreateCommandTaskValidation 校验命令任务的入参约束。
 func TestCreateCommandTaskValidation(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)

@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"database/sql"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
 	"os"
 	"testing"
 	"time"
@@ -15,10 +16,10 @@ import (
 // TestSyncFromConsulReal 对接真实 Consul 与 DB，验证主机与业务分组同步。
 // 需要 DATABASE_URL + CONSUL_ADDRESS(+CONSUL_TOKEN)；未设置则跳过。
 func TestSyncFromConsulReal(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := testutil.DSN(t)
 	addr := os.Getenv("CONSUL_ADDRESS")
-	if dsn == "" || addr == "" {
-		t.Skip("未设置 DATABASE_URL / CONSUL_ADDRESS，跳过 Consul 同步集成测试")
+	if addr == "" {
+		t.Skip("未设置 CONSUL_ADDRESS，跳过 Consul 同步集成测试")
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

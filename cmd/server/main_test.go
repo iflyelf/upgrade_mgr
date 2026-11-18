@@ -13,15 +13,13 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
 )
 
 // TestServerIntegration 端到端验证：独立启动（无 Consul）、登录、鉴权、主机、设置。
 // 需要 DATABASE_URL；未设置则跳过。
 func TestServerIntegration(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过集成测试")
-	}
+	testutil.DSN(t)
 	os.Setenv("AUTH_PROVIDER", "builtin")
 	os.Setenv("ADMIN_USERNAME", "admin")
 	os.Setenv("ADMIN_PASSWORD", "admin123")

@@ -4,19 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestTryLock 需要真实 PostgreSQL；未设置 DATABASE_URL 时跳过。
 func TestTryLock(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过 advisory lock 集成测试")
-	}
+	dsn := testutil.DSN(t)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -77,10 +75,7 @@ func TestKeyFromString(t *testing.T) {
 // TestTryManySharedExclusive 验证“组件共享锁 + 制品独占锁”：
 // 不同制品可并行，同一制品串行；组件独占锁会阻塞所有共享锁。
 func TestTryManySharedExclusive(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

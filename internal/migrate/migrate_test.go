@@ -3,17 +3,14 @@ package migrate
 import (
 	"context"
 	"database/sql"
-	"os"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
 	"testing"
 
 	_ "github.com/lib/pq"
 )
 
 func TestAutoMigrate(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		t.Skip("DATABASE_URL 未设置，跳过测试")
-	}
+	dbURL := testutil.DSN(t)
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -105,10 +102,7 @@ func TestAutoMigrate(t *testing.T) {
 }
 
 func TestMigratorStatus(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		t.Skip("DATABASE_URL 未设置，跳过测试")
-	}
+	dbURL := testutil.DSN(t)
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +12,8 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestUpdateStageLogsAndTaskHostStage 验证 Agent 阶段上报同时更新：
@@ -23,10 +24,7 @@ import (
 //
 // 指令进入终态后只更新主机阶段，不再追加日志，避免重复噪声。
 func TestUpdateStageLogsAndTaskHostStage(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)

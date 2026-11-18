@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -12,15 +11,14 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestApplyIsAtomic 批量保存必须整体成功或整体回滚：
 // 第二项写库失败时，第一项不能已经落库，也不能已经写回内存配置。
 func TestApplyIsAtomic(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

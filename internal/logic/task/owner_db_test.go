@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -16,14 +15,13 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestTaskOwnerOnly 非管理员只能操作自己创建的任务（开关可控）。
 func TestTaskOwnerOnly(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
@@ -86,10 +84,7 @@ func TestTaskOwnerOnly(t *testing.T) {
 
 // TestCreatedByWritten 创建任务时 created_by/updated_by 均写入。
 func TestCreatedByWritten(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -139,10 +134,7 @@ func TestCreatedByWritten(t *testing.T) {
 
 // TestTaskOwnerOffTeamShare 团队策略 off：同团队成员可操作，其他人仍拒绝。
 func TestTaskOwnerOffTeamShare(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -195,10 +187,7 @@ func TestTaskOwnerOffTeamShare(t *testing.T) {
 
 // TestTaskDeployRecheck 非管理员再次操作命令任务时被拒绝；管理员放行。
 func TestTaskDeployRecheck(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -239,10 +228,7 @@ func TestTaskDeployRecheck(t *testing.T) {
 
 // TestPreviewHostGroupScope 预览也不能越过团队授权的主机分组。
 func TestPreviewHostGroupScope(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -303,10 +289,7 @@ func TestPreviewHostGroupScope(t *testing.T) {
 
 // TestUpdatedByOnActions 启动/暂停/取消记录最后操作人；后台调用保留原值。
 func TestUpdatedByOnActions(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

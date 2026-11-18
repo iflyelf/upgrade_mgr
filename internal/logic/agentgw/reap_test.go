@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -12,16 +11,15 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestFinalizeCompletedStageAndSyncTaskHost 覆盖旧 Agent 的卡单：
 // 阶段日志已经走到“验证版本/完成”，但最终 report 丢失；对账后应补记成功，
 // 并把 task_hosts 从 running 同步为 success。
 func TestFinalizeCompletedStageAndSyncTaskHost(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
-	"os"
 	"testing"
 	"time"
 
@@ -14,6 +12,7 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/logic/artifact"
 	"github.com/iflyelf/upgrade_mgr/internal/setting"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
 )
 
 // TestEnsureSessionSecretPersists 验证空 SESSION_SECRET 生成一次并持久化，
@@ -21,10 +20,7 @@ import (
 //
 // 使用独立 schema，避免影响 public.app_settings。
 func TestEnsureSessionSecretPersists(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过会话密钥集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)
@@ -149,10 +145,7 @@ func TestReloadArtifactSettingsHot(t *testing.T) {
 // openSettingsTestDB 创建独立 schema 的 app_settings，避免影响 public 表。
 func openSettingsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过设置同步集成测试")
-	}
+	dsn := testutil.DSN(t)
 	admin, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -162,16 +155,7 @@ func openSettingsTestDB(t *testing.T) *sql.DB {
 		admin.Close()
 		t.Fatal(err)
 	}
-	u, err := url.Parse(dsn)
-	if err != nil {
-		admin.Exec(`DROP SCHEMA ` + schema + ` CASCADE`)
-		admin.Close()
-		t.Fatal(err)
-	}
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("postgres", u.String())
+	db, err := sql.Open("postgres", testutil.WithSearchPath(dsn, schema))
 	if err != nil {
 		admin.Exec(`DROP SCHEMA ` + schema + ` CASCADE`)
 		admin.Close()

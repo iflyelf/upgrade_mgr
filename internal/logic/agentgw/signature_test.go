@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -14,16 +13,15 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/signer"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestDequeueSendsLegacyAndV2Signature 验证服务端同时下发两套签名：
 //   - signature   只签 ID，旧 Agent 可直接校验，服务端升级无需重装；
 //   - signature_v2 签 ID|类型|过期时间，新 Agent 优先使用。
 func TestDequeueSendsLegacyAndV2Signature(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
@@ -92,10 +90,7 @@ func TestDequeueSendsLegacyAndV2Signature(t *testing.T) {
 // TestDequeueUsesAdvertisedLegacySignature 验证服务端按 Agent 上报的能力选择
 // legacy signature 的 Path，而不是依赖 Agent 版本推断。
 func TestDequeueUsesAdvertisedLegacySignature(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
@@ -192,10 +187,7 @@ func TestDequeueUsesAdvertisedLegacySignature(t *testing.T) {
 // `"command":{"script":""}`；服务端必须按同样字节签名，否则 Agent 会一直拒绝
 // self_update（报 “signer: 签名不匹配”），导致该版本无法自我升级。
 func TestDequeueSignsLegacyCommandField(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)

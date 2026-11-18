@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -14,6 +13,8 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestRetryFailedAndStuckHosts 验证「重新执行」只重置失败/卡住主机：
@@ -22,10 +23,7 @@ import (
 //   - 旧活动指令被取消，避免撞唯一索引；
 //   - 批次和任务状态回到可推进状态。
 func TestRetryFailedAndStuckHosts(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

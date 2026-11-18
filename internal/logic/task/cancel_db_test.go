@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -12,6 +11,8 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestCancelMarksBatchesCommandsAndHosts 验证取消任务时：
@@ -22,10 +23,7 @@ import (
 //
 // 任务详情页依赖这些状态判断“执行到哪一步”，否则取消后仍会显示执行中。
 func TestCancelMarksBatchesCommandsAndHosts(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)

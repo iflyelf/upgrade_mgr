@@ -4,21 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestCleanupMissingHosts 验证自动清理只删除「纯 Consul 且已不在本轮清单」的主机。
 func TestCleanupMissingHosts(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过 Consul 清理集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
@@ -164,10 +162,7 @@ func TestCleanupMissingHosts(t *testing.T) {
 
 // TestCleanupMissingMgrHosts 验证 consul_mgr 清理只影响当前服务组。
 func TestCleanupMissingMgrHosts(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过 consul_mgr 清理集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)
@@ -245,10 +240,7 @@ func TestCleanupMissingMgrHosts(t *testing.T) {
 
 // TestCleanupMissingMgrServiceHosts 验证按服务名称清理只影响该服务范围。
 func TestCleanupMissingMgrServiceHosts(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过 consul_mgr 按服务清理集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)

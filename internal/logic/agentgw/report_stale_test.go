@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -12,6 +11,8 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 type fakeConsul struct {
@@ -29,10 +30,7 @@ func (f *fakeConsul) WriteServiceMeta(serviceID, key, value string) error {
 //     task_host，也不能写 Consul；
 //   - 同一 task_host 已有更新的活动指令时，旧终态上报同样忽略。
 func TestReportDuplicateFinalConsulAndStaleGuard(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,15 +18,14 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/logic/component"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
 	"github.com/iflyelf/upgrade_mgr/internal/rbac"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestTenantIsolation_Components 验证租户隔离真实生效：
 // A 租户用户看不到、改不了、删不掉 B 租户的组件；superadmin 可跨租户。
 func TestTenantIsolation_Components(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

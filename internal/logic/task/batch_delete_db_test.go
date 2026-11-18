@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -12,6 +11,8 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestBatchDeleteSetBased 按集合删除时逐个任务的判定与单个 Delete 一致：
@@ -20,10 +21,7 @@ import (
 //   - 终态但仍有未完成指令 → 拒绝；
 //   - 其他租户 / 不存在 → 视为不存在。
 func TestBatchDeleteSetBased(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)

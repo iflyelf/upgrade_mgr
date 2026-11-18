@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +16,8 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 func TestNormalizeHostFields(t *testing.T) {
@@ -52,10 +53,7 @@ func TestNormalizeHostFields(t *testing.T) {
 // setupHostDB 连接测试库并自动迁移；未设置 DATABASE_URL 时跳过。
 func setupHostDB(t *testing.T) (*sql.DB, *svc.ServiceContext) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过主机管理集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("连接数据库失败: %v", err)

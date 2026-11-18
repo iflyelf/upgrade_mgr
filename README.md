@@ -720,6 +720,28 @@ make test-agent-legacy  # 用 Go 1.23 跑 Agent 测试，防止误用 1.24+ API
 make agent-windows  # 用 Go 1.20 编译 Windows Agent（amd64/arm64）到 dist/*.exe
 make test-agent-windows # 用 Go 1.20 交叉编译 + vet 校验 Windows Agent
 make test           # 单测（集成测试需 DATABASE_URL / CONSUL_ADDRESS）
+
+### 测试安全（禁止连接生产配置）
+
+集成测试默认只允许：
+
+- `localhost` / `127.0.0.1` / `::1` 的数据库（CI 使用一次性 PostgreSQL）；
+- 数据库名包含 `test`，或 DSN 带 `search_path=*test*` 的独立测试 schema。
+
+其它情况（包括误把生产 `DATABASE_URL` 导入环境）会在每个用例开始时直接 `SKIP`，
+不会再写入生产 `app_settings`、主机连接地址等配置。临时排查确需对非测试库运行时，
+必须显式设置 `ALLOW_PROD_DB_TESTS=1`，并且用例必须自行快照/恢复。
+
+本地隔离示例：
+
+```bash
+psql "$ADMIN_DSN" -c 'CREATE SCHEMA IF NOT EXISTS upgrade_mgr_test'
+DATABASE_URL="host=<db> port=5432 user=<user> password=<pass> dbname=upgrade_mgr sslmode=disable search_path=upgrade_mgr_test,public" \
+  go test -p 1 ./...
+```
+
+`-p 1` 串行跑包，避免多个包共用同一测试 schema 时互相清表。测试若必须修改
+`app_settings` 或主机连接地址，必须用 `t.Cleanup` 快照并恢复原值。
 ```
 
 ### CentOS 6 / 老内核 Agent

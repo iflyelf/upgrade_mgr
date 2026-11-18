@@ -18,14 +18,13 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/pglock"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 func openArtifactDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

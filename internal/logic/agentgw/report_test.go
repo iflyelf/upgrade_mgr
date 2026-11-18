@@ -3,22 +3,20 @@ package agentgw
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 
 	_ "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestReportTargetsCorrectCommand 验证 Report 按 cmdID 精确定位：
 //  1. 同一 Agent 有多条在途指令时，不会把结果写到错误的指令上（串号）；
 //  2. 跨 Agent 上报被拒绝（越权）。
 func TestReportTargetsCorrectCommand(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

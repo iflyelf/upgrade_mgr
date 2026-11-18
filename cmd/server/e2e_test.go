@@ -18,15 +18,13 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/config"
 	"github.com/iflyelf/upgrade_mgr/internal/handler"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
 )
 
 // TestUpgradeClosedLoop 端到端：创建组件→上传制品→注册 Agent→建任务→启动→
 // Agent 长轮询取件→执行替换→上报，最终校验目标文件被替换为新版本内容。
 func TestUpgradeClosedLoop(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过端到端测试")
-	}
+	testutil.DSN(t)
 	os.Setenv("AUTH_PROVIDER", "builtin")
 	os.Setenv("ADMIN_PASSWORD", "admin123")
 	os.Setenv("SESSION_SECRET", "e2e-test-secret-at-least-16bytes")

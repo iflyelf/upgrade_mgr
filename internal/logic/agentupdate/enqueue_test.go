@@ -14,15 +14,14 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/scope"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestEnqueueDedupAndCurrent 验证按主机下发 self_update：
 // 已是最新哈希时跳过；下发一次后再次下发会被在途指令去重。
 func TestEnqueueDedupAndCurrent(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

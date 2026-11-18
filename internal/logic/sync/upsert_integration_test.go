@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
@@ -12,6 +11,8 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/logic/hostfieldmap"
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestUpsertWithMappings 验证「映射驱动的 upsert」真实落库行为。
@@ -20,10 +21,7 @@ import (
 // 必须确认内置列与自定义字段都能写对，且 overwrite 语义符合预期。
 // 需要 DATABASE_URL；未设置则跳过（不需要 Consul）。
 func TestUpsertWithMappings(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过 upsert 集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -152,10 +150,7 @@ func TestUpsertWithMappings(t *testing.T) {
 // TestConsulHostnameAuthoritative 验证 Consul/consul_mgr 的 hostname 映射默认覆盖，
 // 同步会用清单主机名覆盖 Agent 上报值。
 func TestConsulHostnameAuthoritative(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过 hostname 覆盖测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -209,10 +204,7 @@ func TestConsulHostnameAuthoritative(t *testing.T) {
 // TestConsulMappedFieldsUpdate 验证默认映射为覆盖模式：
 // Consul/consul_mgr 标签值变化后，下次同步会自动更新已有主机的业务字段。
 func TestConsulMappedFieldsUpdate(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过映射更新测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)

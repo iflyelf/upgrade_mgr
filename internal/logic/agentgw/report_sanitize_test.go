@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,16 +12,15 @@ import (
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
 	"github.com/iflyelf/upgrade_mgr/internal/protocol"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestReportSanitizesLogAndFinishesTaskHost 覆盖线上卡单的根因：
 // 旧 Agent 的最终日志可能包含 NUL/非法 UTF-8，版本命令输出可能超过 VARCHAR(64)。
 // 旧实现会让整个 Report 事务失败，commands/task_hosts 永久停在 running。
 func TestReportSanitizesLogAndFinishesTaskHost(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

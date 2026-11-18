@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -12,15 +11,14 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // openDB 连接测试库；未配置则跳过。
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)

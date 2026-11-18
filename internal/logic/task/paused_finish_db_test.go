@@ -4,23 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
 
 	"github.com/iflyelf/upgrade_mgr/internal/migrate"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestPausedTaskFinishesWhenAllBatchesDone 复现并防止回归：
 // auto_promote=false 时最后一批完成后任务是 paused，编排器此前只扫描 running，
 // 导致任务永远显示「已暂停」，实际已全部完成。
 func TestPausedTaskFinishesWhenAllBatchesDone(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)
@@ -85,10 +83,7 @@ func TestPausedTaskFinishesWhenAllBatchesDone(t *testing.T) {
 
 // TestPausedTaskNotAutoDispatched paused 任务不得自动下发下一批。
 func TestPausedTaskNotAutoDispatched(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL，跳过数据库集成测试")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)

@@ -9,14 +9,13 @@ import (
 	"testing"
 
 	_ "github.com/lib/pq"
+	"github.com/iflyelf/upgrade_mgr/internal/testutil"
+
 )
 
 // TestPurgeByComponent 验证：制品文件被真实删除；越界路径被拒绝（不删库外文件）。
 func TestPurgeByComponent(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("未设置 DATABASE_URL")
-	}
+	dsn := testutil.DSN(t)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatal(err)
