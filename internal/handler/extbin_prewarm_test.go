@@ -16,7 +16,7 @@ import (
 
 // TestPrewarmExternalBinaries 预热：未缓存的条目自动下载；已上传离线文件或缓存未过期的跳过。
 //
-// 上游域名只放行 127.0.0.1：内置条目（github.com）在域名校验处立即失败，测试不访问外网。
+// 内置条目自身域名始终放行，为避免测试访问外网，这里先把内置条目的缓存写成未过期。
 func TestPrewarmExternalBinaries(t *testing.T) {
 	var hits int32
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +48,24 @@ func TestPrewarmExternalBinaries(t *testing.T) {
 	cached := externalBinaryCachePath(dir, extbin.Entry{Name: "cached-script.sh", Script: true})
 	os.MkdirAll(filepath.Dir(cached), 0755)
 	os.WriteFile(cached, []byte("#!/bin/sh\n"), 0644)
+
+	// 内置条目（安装脚本/官方二进制）域名隐式放行，预热会尝试访问外网；
+	// 预置未过期缓存，保证用例只访问本地 httptest 上游。
+	defaults, err := extbin.Parse(extbin.DefaultBinaries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	customNames := map[string]bool{
+		"fresh-script.sh": true, "local-script.sh": true, "cached-script.sh": true,
+	}
+	for _, e := range defaults {
+		if customNames[e.Name] {
+			continue
+		}
+		p := externalBinaryCachePath(dir, e)
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte("cached"), 0644)
+	}
 
 	if n := prewarmExternalBinaries(context.Background(), sc); n != 1 {
 		t.Fatalf("应只下载 1 个条目，实际 %d", n)

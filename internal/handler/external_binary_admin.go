@@ -378,7 +378,7 @@ func TestExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 				log.Printf("⚠️ 清除外部文件缓存失败 %s: %v", target, rmErr)
 			}
 		}
-		probe := probeExternalBinary(probeCtx, *entry, effectiveExternalHosts(cfg), externalAllowRule(cfg),
+		probe := probeExternalBinary(probeCtx, *entry, externalAllowedHosts(cfg, *entry), externalAllowRule(cfg),
 			effectiveExternalProxy(cfg), effectiveExternalProxyHosts(cfg))
 		probe.Name = res.Name
 		probe.URL = entry.URL
@@ -430,7 +430,7 @@ func RefreshExternalBinary(s *svc.ServiceContext) http.HandlerFunc {
 		}
 		start := time.Now()
 		if err := fetchExternalBinary(r.Context(), entry.URL, target, entry.Script,
-			effectiveExternalHosts(cfg), externalAllowRule(cfg),
+			externalAllowedHosts(cfg, *entry), externalAllowRule(cfg),
 			effectiveExternalProxy(cfg), effectiveExternalProxyHosts(cfg)); err != nil {
 			metrics.ExternalBinaryRequests.WithLabelValues(name, "refresh_error").Inc()
 			metrics.ExternalBinaryDuration.WithLabelValues(name, "error").
@@ -468,7 +468,6 @@ func RefreshAllExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 		baseDir := externalBinaryBaseDir(cfg)
-		hosts := effectiveExternalHosts(cfg)
 		rule := externalAllowRule(cfg)
 		proxyBase := effectiveExternalProxy(cfg)
 		proxyHosts := effectiveExternalProxyHosts(cfg)
@@ -496,7 +495,7 @@ func RefreshAllExternalBinaries(s *svc.ServiceContext) http.HandlerFunc {
 					return
 				}
 				if fetchErr := fetchExternalBinary(r.Context(), e.URL, target, e.Script,
-					hosts, rule, proxyBase, proxyHosts); fetchErr != nil {
+					externalAllowedHosts(cfg, e), rule, proxyBase, proxyHosts); fetchErr != nil {
 					res.Error = fetchErr.Error()
 					return
 				}

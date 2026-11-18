@@ -57,7 +57,6 @@ func prewarmExternalBinaries(ctx context.Context, s *svc.ServiceContext) int {
 	}
 	baseDir := externalBinaryBaseDir(cfg)
 	ttl := effectiveExternalTTL(cfg)
-	hosts := effectiveExternalHosts(cfg)
 	rule := externalAllowRule(cfg)
 	proxyBase := effectiveExternalProxy(cfg)
 	proxyHosts := effectiveExternalProxyHosts(cfg)
@@ -75,7 +74,7 @@ func prewarmExternalBinaries(ctx context.Context, s *svc.ServiceContext) int {
 			continue
 		}
 		// 目录由 fetchExternalBinaryOnce 创建；下载走同一把文件锁，与主机请求不会重复下载。
-		if err := downloadWithLock(ctx, target, e, hosts, rule, proxyBase, proxyHosts, ttl); err != nil {
+		if err := downloadWithLock(ctx, target, e, externalAllowedHosts(cfg, e), rule, proxyBase, proxyHosts, ttl); err != nil {
 			if ctx.Err() == nil {
 				log.Printf("⚠️ 外部文件预热 %s 失败（可在「外部文件代缓存」上传离线文件）: %v", e.Name, err)
 				metrics.ExternalBinaryRequests.WithLabelValues(e.Name, "prewarm_error").Inc()

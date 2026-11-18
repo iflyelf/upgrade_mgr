@@ -58,6 +58,21 @@ func effectiveExternalHosts(cfg *config.Config) []string {
 	return extbin.DefaultHosts
 }
 
+// externalAllowedHosts 返回本次下载允许的上游域名。
+//
+// 内置条目（安装脚本、官方资产）的固定域名始终放行：管理员收紧 hosts 时，
+// 不会因为漏写 raw.githubusercontent.com 把全部主机接入脚本一起弄坏；
+// 自定义条目仍严格按配置白名单校验。
+func externalAllowedHosts(cfg *config.Config, asset extbin.Entry) []string {
+	hosts := append([]string{}, effectiveExternalHosts(cfg)...)
+	if isDefaultEntry(asset) {
+		if u, err := neturl.Parse(asset.URL); err == nil && u.Hostname() != "" {
+			hosts = append(hosts, u.Hostname())
+		}
+	}
+	return hosts
+}
+
 // effectiveExternalProxy 返回加速代理地址；空表示直连。
 func effectiveExternalProxy(cfg *config.Config) string {
 	if cfg == nil {
@@ -212,7 +227,7 @@ func ExternalBinaryDownload(s *svc.ServiceContext) http.HandlerFunc {
 			// 同一文件并发请求只下载一次：锁只覆盖下载阶段，拿到后立即释放，
 			// 后续 ServeContent 流式输出不持锁（否则大文件会阻塞同文件的其它请求）。
 			if fetchErr := downloadWithLock(r.Context(), target, *asset,
-				effectiveExternalHosts(cfg), externalAllowRule(cfg),
+				externalAllowedHosts(cfg, *asset), externalAllowRule(cfg),
 				effectiveExternalProxy(cfg), effectiveExternalProxyHosts(cfg), ttl); fetchErr != nil {
 				log.Printf("⚠️ 下载外部文件失败 %s (%s): %v", name, asset.URL, fetchErr)
 				// 上游不可达：已有（过期）缓存或内置脚本都比直接失败好。

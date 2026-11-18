@@ -3148,6 +3148,9 @@ MIT © iflyelf
   白名单为空时回退内置默认（windows_exporter amd64/arm64 + install.ps1），升级不断流。
 - 新增 `server.external_binary_hosts`（上游域名白名单，默认 github.com /
   raw.githubusercontent.com / proxy.xiaonuo.live）与 `server.external_binary_ttl`（默认 24h）。
+- 内置条目（`install-monitor.sh`、node/windows exporter 安装脚本及官方二进制）的固定上游域名
+  **始终隐式放行**：即使把 hosts 收紧为只有 `github.com`，也能从 `raw.githubusercontent.com`
+  更新；自定义条目仍严格受白名单限制。
 - 2026-10-26 起新增 `server.external_binary_proxy` / `server.external_binary_proxy_hosts`：
   默认缓存下载先走 `https://proxy.xiaonuo.live/proxy?url=`，失败再直连兜底；
   设置页可改代理地址/域名，留空代理地址表示完全直连。
