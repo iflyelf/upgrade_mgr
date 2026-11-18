@@ -49,6 +49,8 @@ test('任务主机筛选：可搜索多选标签 + 预览/创建重渲染后条�
     r.url().includes('/api/hosts/facets') && r.url().includes('q=E2E_P'));
   await appInput.fill('E2E_P');
   await facetReq;
+  // 搜索验证后补全完整值再回车，避免把搜索关键字当成标签。
+  await appInput.fill('E2E_PAY');
   await appInput.press('Enter');
   await expect(page.locator('.tag-filter-values .tag').first()).toContainText('E2E_PAY');
 
@@ -104,7 +106,7 @@ test('任务主机筛选：修改条件后清除过期预览', async ({ page }) 
     await expect(page.locator('#task-preview-box')).toContainText('预览：命中');
 
     // 修改主机筛选条件后，旧预览必须立即消失，避免展示过期命中数。
-    const appInput = page.getByPlaceholder('选择或输入 App Code（可多选） 后回车');
+    const appInput = page.getByLabel('按 App Code 筛选');
     await appInput.fill('E2E_STALE');
     await appInput.press('Enter');
     await expect(page.locator('#task-preview-box')).toHaveCount(0);

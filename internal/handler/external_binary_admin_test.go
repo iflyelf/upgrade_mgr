@@ -25,6 +25,34 @@ import (
 func newExtbinContext(t *testing.T, dir string) (*svc.ServiceContext, *config.Config) {
 	t.Helper()
 	db, sc := setupHostDB(t)
+	// 本组用例会通过设置服务写入 app_settings；测试库可能就是生产库，
+	// 必须快照并恢复，避免 keep-a/keep-b 之类的测试条目污染页面。
+	settingKeys := []string{
+		"server.external_binaries", "server.external_binary_hosts",
+		"server.external_binary_ttl", "server.external_binary_allow_private",
+		"server.external_binary_allow_cidrs",
+	}
+	type savedSetting struct {
+		key, value string
+		ok         bool
+	}
+	saved := make([]savedSetting, 0, len(settingKeys))
+	for _, k := range settingKeys {
+		var v string
+		err := db.QueryRow(`SELECT value FROM app_settings WHERE key=$1`, k).Scan(&v)
+		saved = append(saved, savedSetting{key: k, value: v, ok: err == nil})
+	}
+	t.Cleanup(func() {
+		for _, s := range saved {
+			if s.ok {
+				db.Exec(`INSERT INTO app_settings (key,value,updated_at) VALUES ($1,$2,NOW())
+				         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
+					s.key, s.value)
+			} else {
+				db.Exec(`DELETE FROM app_settings WHERE key=$1`, s.key)
+			}
+		}
+	})
 	cfg := config.Default()
 	cfg.Server.AgentBinaryDir = dir
 	cfg.Server.ExternalBinaries = map[string]string{
