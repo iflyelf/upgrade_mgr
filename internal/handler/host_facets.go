@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/iflyelf/upgrade_mgr/internal/pkg/httpx"
@@ -48,11 +49,43 @@ func HostFacets(s *svc.ServiceContext) http.HandlerFunc {
 			return
 		}
 
+		// 主机页 app_code/业务组等候选值可能非常多：支持关键字过滤 + 限制返回条数，
+		// 前端输入时按需请求（配合 pg_trgm 索引，避免一次拉取全量拖慢页面）。
+		// limit 不传时保持原有「返回全部」行为（任务页选主机依赖完整候选值）；
+		// 主机页显式传 limit，并在输入关键字时带 q 按需搜索。
+		kw := strings.TrimSpace(r.URL.Query().Get("q"))
+		limit := 0
+		if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				limit = n
+			}
+		}
+		if limit < 0 {
+			limit = 0
+		}
+		if limit > 1000 {
+			limit = 1000
+		}
+
 		tCond, tArgs := reqScope(r).Where("", 1)
 		values := make(map[string][]string, len(fields))
+		truncated := make(map[string]bool, len(fields))
 		for _, col := range fields {
-			q := "SELECT DISTINCT " + col + " FROM hosts WHERE COALESCE(" + col + ",'') <> '' AND " + tCond + " ORDER BY 1"
-			rows, err := s.DB.QueryContext(r.Context(), q, tArgs...)
+			q := "SELECT DISTINCT " + col + " FROM hosts WHERE COALESCE(" + col + ",'') <> '' AND " + tCond
+			args := append([]any{}, tArgs...)
+			if kw != "" {
+				q += " AND " + col + " ILIKE $" + strconv.Itoa(len(args)+1)
+				args = append(args, "%"+kw+"%")
+			}
+			// 多取一条用于判断是否还有更多候选值（前端可提示继续输入缩小范围）。
+			if limit > 0 {
+				q += " ORDER BY 1 LIMIT $" + strconv.Itoa(len(args)+1)
+				args = append(args, limit+1)
+			} else {
+				q += " ORDER BY 1"
+			}
+
+			rows, err := s.DB.QueryContext(r.Context(), q, args...)
 			if err != nil {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
@@ -71,9 +104,16 @@ func HostFacets(s *svc.ServiceContext) http.HandlerFunc {
 				httpx.FailErr(w, http.StatusInternalServerError, err)
 				return
 			}
+			if limit > 0 && len(list) > limit {
+				list = list[:limit]
+				truncated[col] = true
+			}
 			values[col] = list
 		}
 
-		httpx.OK(w, map[string]any{"fields": fields, "values": values})
+		httpx.OK(w, map[string]any{
+			"fields": fields, "values": values, "truncated": truncated,
+			"q": kw, "limit": limit,
+		})
 	}
 }

@@ -118,27 +118,28 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 	busy := insertBusyHost(t, db, tag)
 	noUpdate, _ := insertTestHost(t, db, 1) // 有 Agent 但从未自升级
 	other, _ := insertTestHost(t, db, 1)    // 不匹配关键字，任何用例都不应出现
+	biz1, biz2 := tag+"-B1", tag+"-B2"
 	seed := []struct {
-		id                         int64
-		app, osFamily, acct, state string
-		agent                      bool
-		seenAgo                    string // last_seen 距今时长；空表示无 Agent（NULL）
+		id                              int64
+		app, biz, osFamily, acct, state string
+		agent                           bool
+		seenAgo                         string // last_seen 距今时长；空表示无 Agent（NULL）
 	}{
-		{online, "APP-A", "centos", "acc1", "online", true, "0 seconds"},
-		{idle, "APP-B", "ubuntu", "acc2", "unknown", false, ""},
-		{stale, "APP-B", "centos", "acc2", "online", true, "1 hour"},
-		{busy, "APP-A", "ubuntu", "acc1", "online", true, "0 seconds"},
-		{noUpdate, "APP-A", "ubuntu", "acc1", "online", true, "0 seconds"},
+		{online, "APP-A", biz1, "centos", "acc1", "online", true, "0 seconds"},
+		{idle, "APP-B", biz2, "ubuntu", "acc2", "unknown", false, ""},
+		{stale, "APP-B", biz2, "centos", "acc2", "online", true, "1 hour"},
+		{busy, "APP-A", biz1, "ubuntu", "acc1", "online", true, "0 seconds"},
+		{noUpdate, "APP-A", biz1, "ubuntu", "acc1", "online", true, "0 seconds"},
 	}
 	for _, h := range seed {
 		agentID := ""
 		if h.agent {
 			agentID = fmt.Sprintf("%s-agent-%d", tag, h.id)
 		}
-		if _, err := db.Exec(`UPDATE hosts SET hostname=$2, app_code=$3, os_family=$4, account=$5,
-			agent_status=$6, agent_id=$7::varchar,
-			last_seen=CASE WHEN $8::text='' THEN NULL ELSE NOW() - $8::text::interval END WHERE id=$1`,
-			h.id, tag, h.app, h.osFamily, h.acct, h.state, agentID, h.seenAgo); err != nil {
+		if _, err := db.Exec(`UPDATE hosts SET hostname=$2, app_code=$3, biz_group=$4, os_family=$5, account=$6,
+			agent_status=$7, agent_id=$8::varchar,
+			last_seen=CASE WHEN $9::text='' THEN NULL ELSE NOW() - $9::text::interval END WHERE id=$1`,
+			h.id, tag, h.app, h.biz, h.osFamily, h.acct, h.state, agentID, h.seenAgo); err != nil {
 			t.Fatalf("初始化主机 %d 失败: %v", h.id, err)
 		}
 	}
@@ -169,6 +170,7 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 	}{
 		{"q", tag, []int64{online, idle, stale, busy, noUpdate}},
 		{"app_code", "APP-A", []int64{online, busy, noUpdate}},
+		{"biz_group", biz1, []int64{online, busy, noUpdate}},
 		{"os_family", "ubuntu", []int64{idle, busy, noUpdate}},
 		{"account", "acc2", []int64{idle, stale}},
 		{"agent_status", "online", []int64{online, busy, noUpdate}},

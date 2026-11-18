@@ -8,8 +8,8 @@
 #   bash install-monitor.sh status --server ...
 #
 # 说明：
-#   - 脚本通过 /api/agent/install-monitor/token 读取控制台生成的永久自动化令牌；
-#     令牌在页面「接入主机 → 生成接入脚本」中生成/轮换，脚本 URL 本身不变。
+#   - 脚本通过 /api/agent/install-monitor/token 读取永久自动化令牌；
+#     控制台会按需自动创建，无需先在页面点「生成接入脚本」，URL 本身不变。
 #   - 安装/更新始终带 --force，重复执行会强制重新注册主机。
 #   - 仅使用控制台内网地址下载 Agent / Node Exporter，不访问 GitHub。
 #   - 如果控制台未配置 server.external_url，请用 --server 指定可访问地址。
@@ -41,7 +41,7 @@ usage() {
 选项:
   -y, --yes       卸载时跳过确认
   --server URL    控制台地址（默认读取 UPGRADE_MGR_EXTERNAL_URL，最后回退内置地址）
-  --token TOKEN   直接指定接入令牌（默认从控制台 /api/agent/install-monitor/token 获取）
+  --token TOKEN   直接指定接入令牌（默认从控制台自动获取，控制台会自动创建）
   --arch ARCH     强制指定架构（amd64/arm64/arm/386；默认 uname -m）
   -h, --help      显示帮助
 USAGE
@@ -142,15 +142,112 @@ detect_arch() {
   log "目标架构: $ARCH"
 }
 
+# ---- 监控指标探测（带超时，避免异常端口导致脚本卡死）----
+MONITOR_PORT="${MONITOR_PORT:-16666}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-3}"
+PROBE_RETRIES="${PROBE_RETRIES:-10}"
+PROBE_URL="http://127.0.0.1:${MONITOR_PORT}/metrics"
+
+port_listening() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${MONITOR_PORT}$"
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -q ":${MONITOR_PORT}$"
+  else
+    return 1
+  fi
+}
+
+port_owner_hint() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep ":${MONITOR_PORT}" | head -n 3 || true
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltnp 2>/dev/null | grep ":${MONITOR_PORT}" | head -n 3 || true
+  fi
+}
+
+node_service_active() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl is-active --quiet node_exporter 2>/dev/null
+  elif command -v service >/dev/null 2>&1; then
+    service node_exporter status >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+# check_port_conflict 安装前提示 16666 端口占用；不阻断安装，完成后由探测给出结论。
+check_port_conflict() {
+  port_listening || return 0
+  if node_service_active; then
+    log "端口 ${MONITOR_PORT} 已由现有 node_exporter 监听（更新场景正常）"
+    return 0
+  fi
+  warn "端口 ${MONITOR_PORT} 已被其它程序占用，Node Exporter 可能无法启动"
+  port_owner_hint
+  warn "继续安装，完成后会自动探测 ${PROBE_URL} 并给出结果"
+}
+
+fetch_metrics() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --connect-timeout 2 --max-time "$PROBE_TIMEOUT" "$PROBE_URL" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T "$PROBE_TIMEOUT" -O - "$PROBE_URL" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+# probe_metrics 最多重试 PROBE_RETRIES 次，每次单请求超时 PROBE_TIMEOUT 秒。
+probe_metrics() {
+  i=0
+  while [ "$i" -lt "$PROBE_RETRIES" ]; do
+    i=$((i + 1))
+    if body="$(fetch_metrics)" && printf '%s' "$body" | grep -Eq '^(node_|windows_)'; then
+      log "指标探测成功（第 ${i} 次）：${PROBE_URL}"
+      printf '%s\n' "$body" | grep -E '^(node_|windows_)' | head -n 3 || true
+      return 0
+    fi
+    if [ "$i" -lt "$PROBE_RETRIES" ]; then sleep 1; fi
+  done
+  return 1
+}
+
+# verify_or_fail 安装/更新结束后给出明确的成功或失败结论，失败时打印诊断信息。
+verify_or_fail() {
+  if probe_metrics; then
+    log "✅ $1成功：Agent 已接入，监控指标正常"
+    return 0
+  fi
+  warn "❌ 监控指标探测失败：${PROBE_URL}（重试 ${PROBE_RETRIES} 次，每次超时 ${PROBE_TIMEOUT}s）"
+  if port_listening; then
+    warn "端口 ${MONITOR_PORT} 正在监听，但 /metrics 不可用或返回内容异常，可能是其它程序占用"
+  else
+    warn "端口 ${MONITOR_PORT} 未监听，Node Exporter 可能未启动"
+  fi
+  port_owner_hint
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl status node_exporter --no-pager -l 2>/dev/null | sed -n '1,15p' || true
+    journalctl -u node_exporter -n 20 --no-pager 2>/dev/null || true
+  else
+    service node_exporter status 2>/dev/null | sed -n '1,15p' || true
+    tail -n 20 /var/log/node_exporter.log 2>/dev/null || true
+  fi
+  die "$1失败：监控指标不可用（Agent 已安装，可远程排查后重试）"
+}
+
 fetch_token() {
   [ -n "$TOKEN" ] && return 0
   log "读取控制台永久接入令牌: $SERVER/api/agent/install-monitor/token"
   raw="$(download "$SERVER/api/agent/install-monitor/token" 2>/dev/null || true)"
   TOKEN="$(printf '%s' "$raw" | tr -d '\r\n')"
-  [ -n "$TOKEN" ] || die "未获取到接入令牌，请先在控制台「接入主机 → 生成接入脚本」生成"
+  [ -n "$TOKEN" ] || die "未获取到接入令牌：请确认控制台可访问且数据库正常（令牌会自动创建，无需人工生成）"
   case "$TOKEN" in
     enr_auto_*) ;;
-    *) die "控制台返回的接入令牌格式不正确，请重新生成接入脚本" ;;
+    *)
+      [ -z "$raw" ] || warn "控制台返回: $(printf '%s' "$raw" | head -c 300)"
+      die "控制台未返回有效接入令牌：请确认控制台可访问且数据库正常（令牌会自动创建，无需人工生成）"
+      ;;
   esac
 }
 
@@ -292,6 +389,12 @@ status() {
   else
     service node_exporter status 2>/dev/null | sed -n '1,8p' || true
   fi
+  check_port_conflict
+  if probe_metrics; then
+    log "指标探测: 正常（${PROBE_URL}）"
+  else
+    warn "指标探测: 失败（${PROBE_URL}，可执行 install/update 重试）"
+  fi
 }
 
 rotate_server
@@ -300,21 +403,23 @@ case "$ACTION" in
     need_root
     detect_arch
     fetch_token
+    check_port_conflict
     # 先装/更新 Agent，确保旧监控卸载期间仍能保持平台连接（防止失联）。
     install_agent
     legacy_cleanup
     install_node install
-    log "安装完成"
+    verify_or_fail "安装"
     ;;
   update)
     need_root
     detect_arch
     fetch_token
+    check_port_conflict
     # 先更新 Agent，再清理旧监控。
     install_agent
     legacy_cleanup
     install_node update || { warn "Node Exporter update 失败，尝试 install"; install_node install; }
-    log "更新完成"
+    verify_or_fail "更新"
     ;;
   uninstall)
     need_root

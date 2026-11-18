@@ -16,9 +16,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -37,11 +39,13 @@ const (
 	exporterInstall  = `C:\monitor\exporter`
 	exporterExePath  = `C:\monitor\exporter\windows_exporter.exe`
 	maxDownloadBytes = 200 << 20
+	exporterPort     = 16666
 )
 
 var (
-	logFile *os.File
-	opts    options
+	logFile         *os.File
+	opts            options
+	interactiveMode bool
 )
 
 type options struct {
@@ -57,6 +61,7 @@ func main() {
 	if logFile != nil {
 		defer logFile.Close()
 	}
+	interactiveMode = len(os.Args) <= 1
 	o, err := parseArgs(os.Args[1:])
 	if err != nil {
 		usage()
@@ -87,15 +92,17 @@ func main() {
 		token := resolveToken()
 		installAgent(token)
 		legacyCleanup(true)
+		checkExporterPort()
 		installExporter("install")
-		log.Printf("安装完成")
+		verifyExporter("安装")
 	case "update":
 		// 先更新 Agent；更新时保留现有 windows_exporter 服务/注册表。
 		token := resolveToken()
 		installAgent(token)
 		legacyCleanup(false)
+		checkExporterPort()
 		installExporter("update")
-		log.Printf("更新完成")
+		verifyExporter("更新")
 	case "uninstall":
 		if !opts.Yes {
 			if !confirm("确定卸载 upgrade-agent 与 windows_exporter，并清理旧监控吗？输入 yes 继续: ") {
@@ -291,14 +298,14 @@ func resolveToken() string {
 	}
 	body, err := downloadString(opts.Server + "/api/agent/install-monitor/token")
 	if err != nil {
-		fatal("未获取到接入令牌，请先在控制台「接入主机 → 生成接入脚本」生成: %v", err)
+		fatal("未获取到接入令牌（控制台会自动创建，请检查控制台是否可访问、数据库是否正常）: %v", err)
 	}
 	token := strings.TrimSpace(body)
 	if token == "" {
-		fatal("控制台返回的接入令牌为空，请重新生成接入脚本")
+		fatal("控制台返回的接入令牌为空，请检查控制台日志和数据库连接")
 	}
 	if !strings.HasPrefix(token, "enr_auto_") {
-		fatal("控制台返回的接入令牌格式不正确，请重新生成接入脚本")
+		fatal("控制台未返回有效接入令牌（令牌会自动创建，无需人工生成）；返回内容: %.200s", token)
 	}
 	return token
 }
@@ -338,6 +345,85 @@ func installExporter(action string) {
 	log.Printf("执行 Windows Exporter %s（%s）...", action, binURL)
 	must(run(powershellPath(), "-NoProfile", "-ExecutionPolicy", "Bypass",
 		"-File", ps1, action, "-Yes", "-InstallDir", exporterInstall, "-BinaryUrl", binURL))
+}
+
+// portInUse 检测本机端口是否已有程序监听（1 秒超时，避免探测卡死）。
+func portInUse(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// checkExporterPort 安装前提示 16666 端口占用；不阻断安装，完成后由探测给出结论。
+func checkExporterPort() {
+	if !portInUse(exporterPort) {
+		return
+	}
+	if !serviceMissing(exporterService) {
+		log.Printf("端口 %d 已由现有 %s 服务监听（更新场景正常）", exporterPort, exporterService)
+		return
+	}
+	log.Printf("WARN: 端口 %d 已被其它程序占用，Windows Exporter 可能无法启动", exporterPort)
+	if out, err := exec.Command("cmd", "/c",
+		fmt.Sprintf("netstat -ano | findstr :%d", exporterPort)).CombinedOutput(); err == nil {
+		log.Printf("端口占用:\n%s", strings.TrimSpace(string(out)))
+	}
+}
+
+// probeExporterMetrics 带超时和重试地探测 /metrics，避免服务异常时安装器卡死。
+func probeExporterMetrics() error {
+	client := &http.Client{Timeout: 3 * time.Second}
+	url := fmt.Sprintf("http://127.0.0.1:%d/metrics", exporterPort)
+	var lastErr error
+	for i := 1; i <= 10; i++ {
+		resp, err := client.Get(url)
+		if err == nil {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			if readErr == nil && resp.StatusCode == http.StatusOK &&
+				bytes.Contains(body, []byte("windows_")) {
+				log.Printf("指标探测成功（第 %d 次）：%s", i, url)
+				return nil
+			}
+			if readErr != nil {
+				lastErr = readErr
+			} else {
+				lastErr = fmt.Errorf("HTTP %d 或返回内容不含 windows_ 指标", resp.StatusCode)
+			}
+		} else {
+			lastErr = err
+		}
+		if i < 10 {
+			time.Sleep(time.Second)
+		}
+	}
+	return fmt.Errorf("%s 重试 10 次仍不可用: %v", url, lastErr)
+}
+
+// verifyExporter 安装/更新结束后给出明确的成功或失败结论，失败时打印诊断信息。
+func verifyExporter(action string) {
+	if err := probeExporterMetrics(); err == nil {
+		log.Printf("✅ %s成功：Agent 已接入，监控指标正常", action)
+		return
+	} else {
+		log.Printf("WARN: 监控指标探测失败: %v", err)
+		if portInUse(exporterPort) {
+			log.Printf("端口 %d 正在监听，但 /metrics 不可用或内容异常，可能是其它程序占用", exporterPort)
+		} else {
+			log.Printf("端口 %d 未监听，Windows Exporter 服务可能未启动", exporterPort)
+		}
+	}
+	if out, err := exec.Command("sc", "query", exporterService).CombinedOutput(); err == nil {
+		log.Printf("服务状态:\n%s", strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("cmd", "/c",
+		fmt.Sprintf("netstat -ano | findstr :%d", exporterPort)).CombinedOutput(); err == nil {
+		log.Printf("端口占用:\n%s", strings.TrimSpace(string(out)))
+	}
+	fatal("%s失败：Windows Exporter 指标不可用（Agent 已安装，可远程排查后重试）", action)
 }
 
 func uninstallExporter() {
@@ -400,6 +486,14 @@ func printStatus() {
 	if fileExists(exporterExePath) {
 		if out, err := exec.Command(exporterExePath, "--version").CombinedOutput(); err == nil {
 			log.Printf("Windows Exporter 版本: %s", strings.TrimSpace(string(out)))
+		}
+	}
+	if !serviceMissing(exporterService) {
+		checkExporterPort()
+		if err := probeExporterMetrics(); err == nil {
+			log.Printf("指标探测: 正常（http://127.0.0.1:%d/metrics）", exporterPort)
+		} else {
+			log.Printf("指标探测: 失败（%v）", err)
 		}
 	}
 }
@@ -615,6 +709,11 @@ func fatal(format string, args ...any) {
 	fmt.Fprintln(os.Stderr, msg)
 	if logFile != nil {
 		fmt.Fprintf(os.Stderr, "详细日志: %s\n", logFile.Name())
+	}
+	if interactiveMode {
+		fmt.Print("\n按回车键退出...")
+		var dummy string
+		_, _ = fmt.Scanln(&dummy)
 	}
 	os.Exit(1)
 }

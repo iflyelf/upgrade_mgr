@@ -68,3 +68,61 @@ func TestHostFacetsFieldsParam(t *testing.T) {
 		t.Fatalf("未配置时应为空: %v", fields)
 	}
 }
+
+// TestHostFacetsSearchAndLimit 主机页 app_code / 业务组候选值支持关键字搜索与条数限制。
+//
+// 候选值很多时前端按输入搜索，避免一次拉取全量；limit 不传时仍返回全部，
+// 保持任务页选主机依赖的原有行为。
+func TestHostFacetsSearchAndLimit(t *testing.T) {
+	db, sc := setupHostDB(t)
+	tag := fmt.Sprintf("FCS-%d", time.Now().UnixNano())
+	vals := []string{tag + "-A", tag + "-B", tag + "-C"}
+	for _, v := range vals {
+		id, _ := insertTestHost(t, db, 1)
+		if _, err := db.Exec(`UPDATE hosts SET app_code=$2, biz_group=$2 WHERE id=$1`, id, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	call := func(query string) (map[string][]string, map[string]bool) {
+		req := httptest.NewRequest(http.MethodGet, "/api/hosts/facets"+query, nil)
+		req = req.WithContext(auth.WithUser(req.Context(), hostTestUser(1)))
+		rec := httptest.NewRecorder()
+		HostFacets(sc)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("应 200，实际 %d: %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Data struct {
+				Values    map[string][]string `json:"values"`
+				Truncated map[string]bool     `json:"truncated"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out.Data.Values, out.Data.Truncated
+	}
+
+	// 关键字命中单个值。
+	values, _ := call("?fields=app_code&q=" + tag + "-A")
+	if got := values["app_code"]; len(got) != 1 || got[0] != tag+"-A" {
+		t.Fatalf("关键字搜索结果不符: %v", got)
+	}
+
+	// 同一搜索词 + limit=2：只返回 2 条并标记 truncated。
+	values, truncated := call("?fields=app_code,biz_group&q=" + tag + "&limit=2")
+	if len(values["app_code"]) != 2 || len(values["biz_group"]) != 2 {
+		t.Fatalf("limit 未生效: %v", values)
+	}
+	if !truncated["app_code"] || !truncated["biz_group"] {
+		t.Fatalf("应标记 truncated: %v", truncated)
+	}
+
+	// 不传 limit 时返回全部（原有行为）。
+	values, truncated = call("?fields=app_code,biz_group&q=" + tag)
+	if len(values["app_code"]) != len(vals) || len(values["biz_group"]) != len(vals) {
+		t.Fatalf("未传 limit 应返回全部: %v", values)
+	}
+	if truncated["app_code"] || truncated["biz_group"] {
+		t.Fatalf("未传 limit 不应标记 truncated: %v", truncated)
+	}
+}

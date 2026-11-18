@@ -112,11 +112,14 @@ func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int)
 				" OR h.tunnel_ip ILIKE $"+strconv.Itoa(i)+
 				" OR h.server_url_override ILIKE $"+strconv.Itoa(i)+
 				" OR h.hostname ILIKE $"+strconv.Itoa(i)+
+				" OR h.app_code ILIKE $"+strconv.Itoa(i)+
+				" OR h.account ILIKE $"+strconv.Itoa(i)+
 				" OR h.biz_group ILIKE $"+strconv.Itoa(i)+")")
 		args = append(args, "%"+kw+"%")
 		i++
 	}
 	add("h.app_code = ", q.Get("app_code"))
+	add("h.biz_group = ", q.Get("biz_group"))
 	// OS 筛选与列表展示一致：优先发行版族 os_family（rhel/debian 等），
 	// 没有 Agent 信息的清单主机回退到 os_type（linux/windows）。
 	if v := strings.TrimSpace(q.Get("os_family")); v != "" {

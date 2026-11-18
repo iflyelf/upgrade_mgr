@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iflyelf/upgrade_mgr/internal/auth"
 	"github.com/iflyelf/upgrade_mgr/internal/config"
+	"github.com/iflyelf/upgrade_mgr/internal/logic/agentgw"
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
 
@@ -21,6 +24,13 @@ func installMonitorTestContext(t *testing.T) (*svc.ServiceContext, string) {
 	dir := t.TempDir()
 	cfg := &config.Config{}
 	cfg.Server.AgentBinaryDir = dir
+	// 每个测试使用独立的设置键：集成测试可能连生产库，绝不能覆盖真实安装令牌。
+	oldKey := installMonitorTokenSettingKey
+	installMonitorTokenSettingKey = fmt.Sprintf("agent.install_monitor_token_test_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM app_settings WHERE key=$1`, installMonitorTokenSettingKey)
+		installMonitorTokenSettingKey = oldKey
+	})
 	return &svc.ServiceContext{DB: db, Config: cfg}, dir
 }
 
@@ -76,10 +86,41 @@ func readInstallMonitorTokenHTTP(t *testing.T, sc *svc.ServiceContext) string {
 func TestInstallMonitorTokenLifecycle(t *testing.T) {
 	sc, dir := installMonitorTestContext(t)
 
-	// 未生成时脚本读取应 404。
-	rec := callInstallMonitor(t, InstallMonitorTokenGet(sc), http.MethodGet, "/api/agent/install-monitor/token", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("未生成时应 404，实际 %d", rec.Code)
+	// 未生成时脚本读取应自动创建令牌（无需人工点「生成接入脚本」）。
+	autoToken := readInstallMonitorTokenHTTP(t, sc)
+	if _, ok := consumeTestToken(t, sc.DB, autoToken, "10.1.2.3"); !ok {
+		t.Fatal("自动创建的令牌应可用于接入")
+	}
+	var autoID int64
+	if err := sc.DB.QueryRow(`SELECT id FROM enroll_tokens WHERE token_hash=$1`,
+		agentgw.HashToken(autoToken)).Scan(&autoID); err != nil {
+		t.Fatalf("自动创建的令牌未落库: %v", err)
+	}
+	t.Cleanup(func() { sc.DB.Exec(`DELETE FROM enroll_tokens WHERE id=$1`, autoID) })
+
+	// 页面 ?format=json 自动展示命令：返回 URL 与令牌前缀，不泄露完整令牌。
+	infoRec := callInstallMonitor(t, InstallMonitorTokenGet(sc), http.MethodGet,
+		"/api/agent/install-monitor/token?format=json", nil)
+	if infoRec.Code != http.StatusOK {
+		t.Fatalf("读取脚本信息失败 %d: %s", infoRec.Code, infoRec.Body.String())
+	}
+	if strings.Contains(infoRec.Body.String(), autoToken) {
+		t.Fatal("格式化响应不应包含完整令牌")
+	}
+	var scriptInfo struct {
+		Data struct {
+			TokenPrefix string `json:"token_prefix"`
+			LinuxURL    string `json:"linux_url"`
+			WindowsURL  string `json:"windows_url"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(infoRec.Body.Bytes(), &scriptInfo); err != nil {
+		t.Fatal(err)
+	}
+	if scriptInfo.Data.TokenPrefix == "" ||
+		!strings.Contains(scriptInfo.Data.LinuxURL, "install-monitor.sh") ||
+		!strings.Contains(scriptInfo.Data.WindowsURL, "install-windows-monitor.exe") {
+		t.Fatalf("脚本信息不完整: %+v", scriptInfo.Data)
 	}
 
 	firstID := createInstallMonitorToken(t, sc)
@@ -144,5 +185,22 @@ func TestInstallWindowsMonitorExeServing(t *testing.T) {
 	}
 	if string(rec.Body.Bytes()) != string(data) {
 		t.Fatal("下载内容不符")
+	}
+}
+
+// TestInstallMonitorTokenSurvivesMissingFile 多副本部署下，令牌以数据库为准：
+// 某个副本没有本地令牌文件时，脚本仍能读取到同一个令牌。
+func TestInstallMonitorTokenSurvivesMissingFile(t *testing.T) {
+	sc, dir := installMonitorTestContext(t)
+	id := createInstallMonitorToken(t, sc)
+	t.Cleanup(func() { sc.DB.Exec(`DELETE FROM enroll_tokens WHERE id=$1`, id) })
+
+	first := readInstallMonitorTokenHTTP(t, sc)
+	if err := os.RemoveAll(filepath.Join(dir, ".install-monitor")); err != nil {
+		t.Fatal(err)
+	}
+	second := readInstallMonitorTokenHTTP(t, sc)
+	if second != first {
+		t.Fatal("移除本地文件后应从数据库读到同一个令牌（多副本场景）")
 	}
 }

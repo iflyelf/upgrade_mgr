@@ -123,6 +123,19 @@ button.btn.danger:hover, a.btn.danger:hover { background: color-mix(in srgb, var
 button.btn.small, a.btn.small { padding: 4px 8px; font-size: 12px; }
 button.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+/* 可搜索筛选框：输入框 + 相对定位的候选菜单 */
+.combo { position: relative; display: inline-block; min-width: 150px; max-width: 260px; }
+.combo-input { width: 100%; box-sizing: border-box; }
+.combo-menu {
+  position: absolute; z-index: 40; top: calc(100% + 2px); left: 0; right: 0;
+  max-height: 260px; overflow: auto; padding: 4px;
+  background: var(--card-bg); border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.combo-opt { padding: 6px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.combo-opt:hover, .combo-opt.active { background: var(--panel-bg); }
+.combo-opt[data-value=""] { color: var(--text-secondary); }
+.combo-empty { padding: 6px 8px; color: var(--text-secondary); font-size: 12px; }
 .pager {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color);
@@ -361,6 +374,7 @@ th { position: relative; }
   .grid2 { grid-template-columns: 1fr; }
   .toolbar { flex-wrap: wrap; gap: 8px; }
   .toolbar > input, .toolbar > select { width: 100%; min-width: 0; }
+  .toolbar > .combo { width: 100%; max-width: none; }
   .modal { width: calc(100vw - 16px); max-height: 92vh; }
   .pager { flex-wrap: wrap; gap: 6px; }
   .table-tools-cols { gap: 6px 10px; }
