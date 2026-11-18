@@ -114,24 +114,65 @@ test('主机：下拉筛选 + URL 恢复 + 按筛选全选只选中筛选结果'
     await page.getByRole('button', { name: '搜索', exact: true }).click();
     await expect(page.getByText('共 5')).toBeVisible();
 
-    // 可搜索筛选框：输入完整 app_code 后回车，即使不在初始 facets 里也能精确筛选。
-    const appInput = page.getByLabel('按 app_code 筛选');
-    await appInput.fill(app);
-    await appInput.press('Enter');
+    // 可搜索标签框：输入完整 app_code 后回车，即使不在初始 facets 里也能精确筛选。
+    const appBox = page.locator('.tag-filter[data-key="app_code"]');
+    await appBox.getByLabel('按 app_code 筛选').fill(app);
+    await appBox.getByLabel('按 app_code 筛选').press('Enter');
     await expect(page.getByText('共 3')).toBeVisible();
     await expect(page).toHaveURL(new RegExp('app_code=' + app));
 
-    // 刷新后筛选条件从 URL 恢复。
+    // 刷新后筛选条件从 URL 恢复为标签。
     await page.reload();
-    await expect(page.getByLabel('按 app_code 筛选')).toHaveValue(app);
+    await expect(page.locator('.tag-filter[data-key="app_code"] .tag', { hasText: app })).toBeVisible();
     await expect(page.getByText('共 3')).toBeVisible();
 
     await page.getByRole('button', { name: '按筛选条件全选' }).click();
     await expect(page.getByText('已按筛选条件选中 3 台可删除主机')).toBeVisible();
 
     await page.getByRole('button', { name: '清除筛选' }).click();
-    await expect(page.getByLabel('按 app_code 筛选')).toHaveValue('');
+    await expect(page.locator('.tag-filter[data-key="app_code"] .tag')).toHaveCount(0);
     await expect(page).not.toHaveURL(/app_code=/);
+  } finally {
+    psql(`DELETE FROM hosts WHERE hostname='${tag}'`);
+  }
+});
+
+
+test('主机：筛选支持多选标签与单选开关', async ({ page }) => {
+  test.skip(!DB_URL, '未设置 E2E_DATABASE_URL，跳过主机多选筛选用例');
+  const tag = 'e2e-hmulti-' + Date.now();
+  const app1 = 'E2EM1' + Date.now();
+  const app2 = 'E2EM2' + Date.now();
+  psql(`INSERT INTO hosts (ip, hostname, app_code, tenant_id, source)
+        SELECT '${tag}-' || g, '${tag}',
+               CASE WHEN g <= 2 THEN '${app1}' WHEN g <= 4 THEN '${app2}' ELSE 'OTHER' END,
+               1, 'manual'
+          FROM generate_series(1,5) g`);
+  try {
+    await login(page);
+    await page.locator('input[aria-label="搜索主机"]').fill(tag);
+    await page.getByRole('button', { name: '搜索', exact: true }).click();
+    await expect(page.getByText('共 5')).toBeVisible();
+
+    const appInput = page.locator('.tag-filter[data-key="app_code"]').getByLabel('按 app_code 筛选');
+    await appInput.fill(app1);
+    await appInput.press('Enter');
+    await appInput.fill(app2);
+    await appInput.press('Enter');
+    await expect(page.getByText('共 4')).toBeVisible();
+    await expect(page.locator('.tag-filter[data-key="app_code"] .tag')).toHaveCount(2);
+    await expect(page).toHaveURL(new RegExp('app_code=' + app1));
+    await expect(page).toHaveURL(new RegExp('app_code=' + app2));
+
+    // 刷新后两个标签都从 URL 恢复。
+    await page.reload();
+    await expect(page.locator('.tag-filter[data-key="app_code"] .tag')).toHaveCount(2);
+    await expect(page.getByText('共 4')).toBeVisible();
+
+    // 勾选「单选」后只保留一个值。
+    await page.locator('.tag-filter[data-key="app_code"] input[type="checkbox"]').check();
+    await expect(page.locator('.tag-filter[data-key="app_code"] .tag')).toHaveCount(1);
+    await expect(page.getByText('共 2')).toBeVisible();
   } finally {
     psql(`DELETE FROM hosts WHERE hostname='${tag}'`);
   }

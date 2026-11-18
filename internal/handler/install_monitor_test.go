@@ -26,10 +26,14 @@ func installMonitorTestContext(t *testing.T) (*svc.ServiceContext, string) {
 	cfg.Server.AgentBinaryDir = dir
 	// 每个测试使用独立的设置键：集成测试可能连生产库，绝不能覆盖真实安装令牌。
 	oldKey := installMonitorTokenSettingKey
-	installMonitorTokenSettingKey = fmt.Sprintf("agent.install_monitor_token_test_%d", time.Now().UnixNano())
+	oldName := installMonitorTokenName
+	sfx := time.Now().UnixNano()
+	installMonitorTokenSettingKey = fmt.Sprintf("agent.install_monitor_token_test_%d", sfx)
+	installMonitorTokenName = fmt.Sprintf("install-monitor-test-%d", sfx)
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM app_settings WHERE key=$1`, installMonitorTokenSettingKey)
 		installMonitorTokenSettingKey = oldKey
+		installMonitorTokenName = oldName
 	})
 	return &svc.ServiceContext{DB: db, Config: cfg}, dir
 }
@@ -149,6 +153,15 @@ func TestInstallMonitorTokenLifecycle(t *testing.T) {
 	}
 	if _, ok := consumeTestToken(t, sc.DB, secondToken, "10.1.2.3"); !ok {
 		t.Fatal("轮换后的新令牌应可消费")
+	}
+	// 同一时间只保留一个可用安装令牌，其余会被自动停用并由维护任务清理。
+	var enabled int
+	if err := sc.DB.QueryRow(`SELECT COUNT(*) FROM enroll_tokens WHERE name=$1 AND enabled`,
+		installMonitorTokenName).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 1 {
+		t.Fatalf("应只有 1 个可用安装令牌，实际 %d", enabled)
 	}
 }
 

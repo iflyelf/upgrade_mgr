@@ -17,14 +17,16 @@ func TestHostFilterSearchableCombo(t *testing.T) {
 	}
 	body := string(src)
 	for _, want := range []string{
-		"function filterCombo(key, label, options, remoteField)",
-		"filterCombo('app_code', 'app_code'",
-		"filterCombo('biz_group', '业务组'",
+		"function filterTags(key, label, options, remoteField)",
+		"filterTags('app_code', 'app_code'",
+		"filterTags('biz_group', '业务组'",
+		"hostFilterModes",
+		"' 单选'",
+		"addAll('biz_group'",
+		"asList(p.biz_group)",
 		"/api/hosts/facets?fields=",
 		"&q=",
 		"&limit=200",
-		"biz_group: p.biz_group || ''",
-		"'biz_group=' + encodeURIComponent(f.biz_group)",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("app.js 缺少主机筛选搜索/业务组关键逻辑: %q", want)

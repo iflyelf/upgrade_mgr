@@ -86,6 +86,23 @@ func hostOfflineAfter(s *svc.ServiceContext) time.Duration {
 //
 // 列表与「按筛选条件全选」共用，保证两者命中的主机集合一致。
 // 返回 WHERE 子句、参数，以及下一个可用的占位符序号。
+// filterValues 解析多选筛选参数：兼容重复参数（a=1&a=2）与逗号分隔，去空去重。
+func filterValues(r *http.Request, key string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range r.URL.Query()[key] {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int) {
 	offlineInterval := fmt.Sprintf("'%.0f seconds'", hostOfflineAfter(s).Seconds())
 
@@ -97,14 +114,6 @@ func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int)
 		args  = append([]any{}, tArgs...)
 		i     = len(tArgs) + 1
 	)
-	add := func(cond, val string) {
-		if val == "" {
-			return
-		}
-		where = append(where, cond+"$"+strconv.Itoa(i))
-		args = append(args, val)
-		i++
-	}
 	if kw := strings.TrimSpace(q.Get("q")); kw != "" {
 		// 出口 IP / 隧道地址也参与搜索：运维通常按实际业务网地址找主机。
 		where = append(where,
@@ -118,46 +127,62 @@ func hostListFilter(s *svc.ServiceContext, r *http.Request) (string, []any, int)
 		args = append(args, "%"+kw+"%")
 		i++
 	}
-	add("h.app_code = ", q.Get("app_code"))
-	add("h.biz_group = ", q.Get("biz_group"))
-	// OS 筛选与列表展示一致：优先发行版族 os_family（rhel/debian 等），
-	// 没有 Agent 信息的清单主机回退到 os_type（linux/windows）。
-	if v := strings.TrimSpace(q.Get("os_family")); v != "" {
-		where = append(where, "(h.os_family=$"+strconv.Itoa(i)+
-			" OR (COALESCE(h.os_family,'')='' AND h.os_type=$"+strconv.Itoa(i)+"))")
-		args = append(args, v)
+	// 多选筛选：值来自标签框，支持重复参数与逗号分隔。
+	addMulti := func(cond string, vals []string) {
+		if len(vals) == 0 {
+			return
+		}
+		where = append(where, cond+" = ANY($"+strconv.Itoa(i)+")")
+		args = append(args, pq.Array(vals))
 		i++
 	}
-	add("h.account = ", q.Get("account"))
+	addMulti("h.app_code", filterValues(r, "app_code"))
+	addMulti("h.biz_group", filterValues(r, "biz_group"))
+	// OS 筛选与列表展示一致：优先发行版族 os_family（rhel/debian 等），
+	// 没有 Agent 信息的清单主机回退到 os_type（linux/windows）。
+	if osVals := filterValues(r, "os_family"); len(osVals) > 0 {
+		p := "$" + strconv.Itoa(i)
+		where = append(where, "(h.os_family = ANY("+p+")"+
+			" OR (COALESCE(h.os_family,'')='' AND h.os_type = ANY("+p+")))")
+		args = append(args, pq.Array(osVals))
+		i++
+	}
+	addMulti("h.account", filterValues(r, "account"))
 
 	// agent_status 按「页面显示的有效状态」过滤，与 ListHosts 的计算规则一致：
 	// 有 Agent 且心跳超时 → offline；否则取库里的状态，空值视为 unknown。
 	// 未接入 Agent 的主机（如 Consul 同步）显示「未知」，因此按 unknown 筛选命中，而不是 offline。
-	if statusFilter := strings.TrimSpace(q.Get("agent_status")); statusFilter != "" {
+	if statusVals := filterValues(r, "agent_status"); len(statusVals) > 0 {
 		where = append(where, "(CASE WHEN h.maintenance_until IS NOT NULL AND h.maintenance_until > NOW() "+
 			"THEN COALESCE(NULLIF(h.agent_status,''),'upgrading') "+
 			"WHEN COALESCE(h.agent_id,'')<>'' AND (h.last_seen IS NULL OR h.last_seen < NOW() - INTERVAL "+
-			offlineInterval+") THEN 'offline' ELSE COALESCE(NULLIF(h.agent_status,''),'unknown') END)=$"+strconv.Itoa(i))
-		args = append(args, statusFilter)
+			offlineInterval+") THEN 'offline' ELSE COALESCE(NULLIF(h.agent_status,''),'unknown') END)=ANY($"+strconv.Itoa(i)+")")
+		args = append(args, pq.Array(statusVals))
 		i++
 	}
 
 	// upgrade_status 按 Agent 最近一次自升级指令（commands.type='self_update'）筛选：
 	//   success 升级成功；failed/timeout/canceled/rolled_back/expired 升级失败；
 	//   none 未升级（没有 Agent 或从未下发过自升级）。
-	if up := strings.TrimSpace(q.Get("upgrade_status")); up != "" {
+	if ups := filterValues(r, "upgrade_status"); len(ups) > 0 {
 		latest := "(SELECT c.status FROM commands c " +
 			"WHERE c.agent_id = h.agent_id AND c.type='self_update' " +
 			"ORDER BY c.id DESC LIMIT 1)"
-		switch up {
-		case "success":
-			where = append(where, "COALESCE(h.agent_id,'')<>'' AND "+latest+" = 'success'")
-		case "failed":
-			where = append(where, "COALESCE(h.agent_id,'')<>'' AND "+latest+
-				" IN ('failed','timeout','canceled','rolled_back','expired')")
-		case "none":
-			where = append(where, "COALESCE(h.agent_id,'')<>'' AND NOT EXISTS ("+
-				"SELECT 1 FROM commands c WHERE c.agent_id = h.agent_id AND c.type='self_update')")
+		var parts []string
+		for _, up := range ups {
+			switch up {
+			case "success":
+				parts = append(parts, "COALESCE(h.agent_id,'')<>'' AND "+latest+" = 'success'")
+			case "failed":
+				parts = append(parts, "COALESCE(h.agent_id,'')<>'' AND "+latest+
+					" IN ('failed','timeout','canceled','rolled_back','expired')")
+			case "none":
+				parts = append(parts, "COALESCE(h.agent_id,'')<>'' AND NOT EXISTS ("+
+					"SELECT 1 FROM commands c WHERE c.agent_id = h.agent_id AND c.type='self_update')")
+			}
+		}
+		if len(parts) > 0 {
+			where = append(where, "("+strings.Join(parts, " OR ")+")")
 		}
 	}
 	return " WHERE " + strings.Join(where, " AND "), args, i

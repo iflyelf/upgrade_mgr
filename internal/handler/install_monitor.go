@@ -59,6 +59,9 @@ func installMonitorTokenPath(s *svc.ServiceContext) (string, error) {
 // 读取令牌的副本可能不是同一个实例，本地文件会读不到（提示「未获取到接入令牌」）。
 var installMonitorTokenSettingKey = "agent.install_monitor_token"
 
+// installMonitorTokenName 令牌名称；测试会覆盖为独立名称，避免影响真实令牌。
+var installMonitorTokenName = "install-monitor"
+
 // installMonitorTokenMu 串行化「首次自动创建」，避免并发脚本同时生成多个令牌。
 var installMonitorTokenMu sync.Mutex
 
@@ -193,7 +196,7 @@ func ensureInstallMonitorToken(ctx context.Context, s *svc.ServiceContext) (*ins
 
 	token, prefix := newAutomationToken()
 	id, createdAt, err := insertAutomationToken(ctx, s.DB, token, prefix, tenantID,
-		"install-monitor", "一体化安装脚本（首次执行自动创建）", "system", nil, 0, nil)
+		installMonitorTokenName, "一体化安装脚本（首次执行自动创建）", "system", nil, 0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("自动创建接入令牌失败: %w", err)
 	}
@@ -204,8 +207,25 @@ func ensureInstallMonitorToken(ctx context.Context, s *svc.ServiceContext) (*ins
 			 WHERE id=$1`, id)
 		return nil, fmt.Errorf("保存接入令牌失败: %w", err)
 	}
+	revokeOtherInstallMonitorTokens(ctx, s, id)
 	log.Printf("ℹ️ 已自动创建一体化安装脚本令牌（id=%d），脚本执行无需人工生成", id)
 	return f, nil
+}
+
+// revokeOtherInstallMonitorTokens 确保同一时间只有一个可用的安装脚本令牌。
+//
+// 并发创建/历史重复令牌会留下多个 enabled 的永久令牌，这里统一停用；
+// 停用后由每日维护任务在保留期后自动删除，无需人工清理。
+func revokeOtherInstallMonitorTokens(ctx context.Context, s *svc.ServiceContext, keepID int64) {
+	if s == nil || s.DB == nil || keepID <= 0 {
+		return
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+		UPDATE enroll_tokens SET enabled=false, revoked_at=NOW(), revoked_by='system'
+		 WHERE token_type='automation' AND name=$2
+		   AND id<>$1 AND enabled`, keepID, installMonitorTokenName); err != nil {
+		log.Printf("⚠️ 停用旧安装令牌失败: %v", err)
+	}
 }
 
 // installMonitorPublicInfo 返回页面展示所需的安装脚本信息（不含完整令牌）。
@@ -251,7 +271,7 @@ func InstallMonitorTokenCreate(s *svc.ServiceContext) http.HandlerFunc {
 		old, _ := readInstallMonitorToken(r.Context(), s)
 		token, prefix := newAutomationToken()
 		id, createdAt, err := insertAutomationToken(r.Context(), s.DB, token, prefix,
-			tenantID, "install-monitor", "一体化安装脚本（永久）", creator, nil, 0, nil)
+			tenantID, installMonitorTokenName, "一体化安装脚本（永久）", creator, nil, 0, nil)
 		if err != nil {
 			auditOpDetails(s, r, audit.ActionEnrollToken, "install_monitor", "", "install-monitor", err, nil, nil)
 			httpx.FailErr(w, http.StatusInternalServerError, err)
@@ -275,6 +295,7 @@ func InstallMonitorTokenCreate(s *svc.ServiceContext) http.HandlerFunc {
 				 WHERE id=$1 AND token_type='automation' AND tenant_id=$3`,
 				old.ID, creator, tenantID)
 		}
+		revokeOtherInstallMonitorTokens(r.Context(), s, id)
 		auditOpDetails(s, r, audit.ActionEnrollToken, "install_monitor",
 			strconv.FormatInt(id, 10), "install-monitor", nil, map[string]any{
 				"token_type": "automation", "permanent": true,

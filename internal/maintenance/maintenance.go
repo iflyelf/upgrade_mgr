@@ -65,6 +65,23 @@ func (m *Maintainer) CleanupAIActions(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// CleanupEnrollTokens 删除已注销/过期/已用尽超过保留期（7 天）的注册令牌。
+//
+// 只清理失效令牌：enabled=true 且未过期、未用尽的令牌（如一体化安装脚本的
+// 永久令牌）永远保留，避免影响正在使用的自动化接入。
+func (m *Maintainer) CleanupEnrollTokens(ctx context.Context) (int64, error) {
+	res, err := m.db.ExecContext(ctx, `
+		DELETE FROM enroll_tokens
+		WHERE (enabled = FALSE AND COALESCE(revoked_at, created_at) < NOW() - INTERVAL '7 days')
+		   OR (expires_at IS NOT NULL AND expires_at < NOW() - INTERVAL '7 days')
+		   OR (max_uses > 0 AND used_count >= max_uses AND created_at < NOW() - INTERVAL '7 days')`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // Start 启动自动维护任务（每日凌晨 2 点执行）。
 func (m *Maintainer) Start(ctx context.Context) {
 	go m.scheduleLoop(ctx)
@@ -142,6 +159,13 @@ func (m *Maintainer) runMaintenance(ctx context.Context) {
 		log.Printf("⚠️ 清理 AI 操作失败: %v", err)
 	} else if n > 0 {
 		log.Printf("🗑️ 清理过期 AI 操作: %d 个", n)
+	}
+
+	// 3.3 清理已注销/过期/用尽的注册令牌（保留 7 天）
+	if n, err := m.CleanupEnrollTokens(ctx); err != nil {
+		log.Printf("⚠️ 清理注册令牌失败: %v", err)
+	} else if n > 0 {
+		log.Printf("🗑️ 清理注册令牌: %d 个", n)
 	}
 
 	// 4. 归档旧任务（保留 90 天）

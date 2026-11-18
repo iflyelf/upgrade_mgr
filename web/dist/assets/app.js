@@ -148,7 +148,8 @@
     orgSelTeam: null, orgTeamMembers: null, orgTeamPerms: null, orgNewField: null,
     flyiamUsers: null, flyiamQuery: '', flyiamErr: '', hostGroupOptions: [],
     hostFacets: null, hostListFacets: null,
-    hostFilter: { app_code: '', biz_group: '', os_family: '', account: '', agent_status: '', upgrade_status: '' },
+    hostFilter: { app_code: [], biz_group: [], os_family: [], account: [], agent_status: [], upgrade_status: [] },
+    hostFilterModes: {},
     extbinDraft: null, extbinHosts: null, extbinTTL: null,
     extbinAllowPrivate: null, extbinCIDRs: null, extbinQuery: '', extbinPage: 1,
     orgUserQ: '', orgUserForm: null, orgRoleForm: null, orgGroupForm: null,
@@ -1419,10 +1420,24 @@
       raw.slice(idx + 1).split('&').forEach(function (kv) {
         if (!kv) return;
         var p = kv.split('=');
-        try { params[decodeURIComponent(p[0])] = decodeURIComponent((p[1] || '').replace(/\+/g, ' ')); } catch (e) {}
+        try {
+          var k = decodeURIComponent(p[0]);
+          var v = decodeURIComponent((p[1] || '').replace(/\+/g, ' '));
+          // 多选筛选用重复参数（app_code=A&app_code=B）：同一 key 聚合成数组。
+          if (params[k] === undefined) params[k] = v;
+          else if (Object.prototype.toString.call(params[k]) === '[object Array]') params[k].push(v);
+          else params[k] = [params[k], v];
+        } catch (e) {}
       });
     }
     return { view: view, params: params };
+  }
+
+  // asList 把筛选值统一成非空数组：兼容 URL 单值与多值。
+  function asList(v) {
+    var arr = Object.prototype.toString.call(v) === '[object Array]' ? v : [v];
+    return arr.map(function (x) { return String(x == null ? '' : x).trim(); })
+      .filter(function (x) { return x !== ''; });
   }
 
   function applyHashToState(r) {
@@ -1431,9 +1446,9 @@
     if (r.view === 'hosts') {
       state.q = p.q || '';
       state.hostFilter = {
-        app_code: p.app_code || '', biz_group: p.biz_group || '',
-        os_family: p.os_family || '', account: p.account || '',
-        agent_status: p.agent_status || '', upgrade_status: p.upgrade_status || ''
+        app_code: asList(p.app_code), biz_group: asList(p.biz_group),
+        os_family: asList(p.os_family), account: asList(p.account),
+        agent_status: asList(p.agent_status), upgrade_status: asList(p.upgrade_status)
       };
       state.hostPage = n('page', 1);
     } else if (r.view === 'components') {
@@ -1467,9 +1482,13 @@
     var add = function (k, v) { if (v !== '' && v != null) qs.push(k + '=' + encodeURIComponent(v)); };
     if (state.view === 'hosts') {
       var hf = state.hostFilter || {};
-      add('q', state.q); add('app_code', hf.app_code); add('os_family', hf.os_family);
-      add('account', hf.account); add('agent_status', hf.agent_status);
-      add('upgrade_status', hf.upgrade_status);
+      var addAll = function (k, list) {
+        asList(list).forEach(function (v) { qs.push(k + '=' + encodeURIComponent(v)); });
+      };
+      add('q', state.q);
+      addAll('app_code', hf.app_code); addAll('biz_group', hf.biz_group);
+      addAll('os_family', hf.os_family); addAll('account', hf.account);
+      addAll('agent_status', hf.agent_status); addAll('upgrade_status', hf.upgrade_status);
       add('page', state.hostPage > 1 ? state.hostPage : '');
     } else if (state.view === 'components') {
       add('q', state.compQ); add('page', state.compPage > 1 ? state.compPage : '');
@@ -1638,22 +1657,62 @@
     }
     var hf = state.hostFilter || (state.hostFilter = {});
     var facetVals = (state.hostListFacets && state.hostListFacets.values) || {};
-    // filterCombo 可搜索筛选框：输入关键字即时过滤；候选值很多时（app_code/
-    // 业务组/账号）按需请求服务端，避免页面一次加载全量候选值。
-    function filterCombo(key, label, options, remoteField) {
-      var cur = hf[key] || '';
+    // filterTags 可搜索的多选标签筛选框：
+    //   - 输入关键字即时过滤；app_code/业务组/账号按需请求服务端；
+    //   - 回车/选择候选添加标签，点标签 × 移除；
+    //   - 每项可勾选「单选」，勾选后只保留一个值（与任务页主机筛选一致）。
+    function filterTags(key, label, options, remoteField) {
+      var multi = state.hostFilterModes[key] !== false;
+      var values = asList(hf[key]).slice();
       var local = options || [];
-      var wrap = h('div', { class: 'combo' });
+      var lastRaw = local;
+      var dirty = false;
+      var focused = false;
+
+      var tagsEl = h('div', { class: 'tag-filter-values' });
       var input = h('input', {
-        class: 'combo-input', value: cur, autocomplete: 'off',
+        class: 'tag-filter-input', autocomplete: 'off',
         placeholder: label + '：全部', 'aria-label': '按 ' + label + ' 筛选'
       });
       var menu = h('div', { class: 'combo-menu', hidden: 'hidden' });
-      wrap.appendChild(input);
-      wrap.appendChild(menu);
+      var box = h('div', { class: 'tag-filter-box' }, [tagsEl, input, menu]);
+      var modeEl = h('input', {
+        type: 'checkbox', checked: !multi,
+        onchange: function () {
+          state.hostFilterModes[key] = !modeEl.checked;
+          if (modeEl.checked && values.length > 1) values = values.slice(0, 1);
+          apply();
+        }
+      });
+      var wrap = h('div', { class: 'tag-filter', 'data-key': key }, [
+        h('div', { class: 'tag-filter-head' }, [
+          h('span', { class: 'tag-filter-label' }, [label]),
+          h('label', { class: 'tag-filter-mode', title: '勾选后该筛选只保留一个值' }, [modeEl, ' 单选'])
+        ]),
+        box
+      ]);
       var timer = null, seq = 0;
 
-      // norm 兼容 [值, 显示文本] 与纯字符串两种候选格式。
+      function renderTags() {
+        tagsEl.textContent = '';
+        values.forEach(function (v, i) {
+          tagsEl.appendChild(h('span', { class: 'tag' }, [
+            v,
+            h('button', {
+              class: 'tag-x', type: 'button', title: '移除', 'aria-label': '移除 ' + v,
+              // preventDefault 避免先触发输入框 blur 导致整体重绘、点击丢失。
+              onmousedown: function (ev) { ev.preventDefault(); },
+              onclick: function () {
+                values.splice(i, 1);
+                dirty = true;
+                renderTags();
+                apply();
+              }
+            }, ['×'])
+          ]));
+        });
+        input.placeholder = values.length ? '继续添加…' : (label + '：全部');
+      }
       function norm(list) {
         return (list || []).map(function (o) {
           if (Object.prototype.toString.call(o) === '[object Array]') {
@@ -1663,17 +1722,17 @@
         });
       }
       function optNode(value, text) {
+        var on = value ? values.indexOf(value) >= 0 : values.length === 0;
         return h('div', {
-          class: 'combo-opt' + (value === cur ? ' active' : ''),
+          class: 'combo-opt' + (on ? ' active' : ''),
           'data-value': value
-        }, [text]);
+        }, [(multi && value && on ? '✓ ' : '') + text]);
       }
       function show(list) {
-        var opts = norm(list);
-        // 当前值不在候选里（如从 URL 带入或候选被截断）时也保留，避免显示与筛选不一致。
-        if (cur && !opts.some(function (o) { return o.v === cur; })) {
-          opts = [{ v: cur, t: cur }].concat(opts);
-        }
+        lastRaw = list || [];
+        // 失焦后远程搜索结果到达时不要重新弹开菜单。
+        if (!focused) { menu.hidden = true; return; }
+        var opts = norm(lastRaw);
         menu.innerHTML = '';
         menu.appendChild(optNode('', label + '：全部'));
         opts.forEach(function (o) { menu.appendChild(optNode(o.v, o.t)); });
@@ -1692,12 +1751,43 @@
             String(v[1]).toLowerCase().indexOf(kw) >= 0;
         }).slice(0, 300);
       }
-      function choose(v) {
-        hf[key] = v || '';
-        input.value = hf[key];
-        close();
+      function apply() {
+        if (!multi && values.length > 1) values = values.slice(0, 1);
+        hf[key] = values.slice();
+        dirty = false;
         state.hostPage = 1;
         loadHosts();
+      }
+      function pick(v) {
+        if (!v) {
+          values = [];
+        } else if (!multi) {
+          values = [v];
+        } else {
+          var idx = values.indexOf(v);
+          if (idx >= 0) values.splice(idx, 1);
+          else values.push(v);
+        }
+        dirty = true;
+        renderTags();
+        show(lastRaw);
+        if (!multi) apply();
+      }
+      function addTyped(raw) {
+        raw = String(raw || '');
+        // 命中候选时整体作为一个值（业务组可能含空格）；否则只按逗号拆分。
+        var hit = norm(local).concat(norm(lastRaw)).some(function (o) { return o.v === raw; });
+        var parts = raw && hit ? [raw] : raw.split(/[,，]+/);
+        parts.forEach(function (v) {
+          v = v.trim();
+          if (!v) return;
+          if (!multi) values = [v];
+          else if (values.indexOf(v) < 0) values.push(v);
+        });
+        input.value = '';
+        dirty = true;
+        renderTags();
+        show(lastRaw);
       }
       function remoteSearch(kw) {
         var my = ++seq;
@@ -1709,43 +1799,48 @@
           })
           .catch(function () {});
       }
-      input.onfocus = function () { show(remoteField ? local : filterLocal('')); };
+      input.onfocus = function () {
+        focused = true;
+        show(remoteField ? lastRaw : filterLocal(input.value));
+      };
       input.oninput = function () {
         if (!remoteField) { show(filterLocal(input.value)); return; }
         if (timer) clearTimeout(timer);
         timer = setTimeout(function () { remoteSearch(input.value.trim()); }, 250);
       };
       input.onkeydown = function (ev) {
-        if (ev.key === 'Escape') { input.value = cur; close(); input.blur(); return; }
+        if (ev.key === 'Escape') {
+          values = asList(hf[key]).slice();
+          dirty = false;
+          renderTags();
+          close();
+          input.blur();
+          return;
+        }
         if (ev.key !== 'Enter') return;
         ev.preventDefault();
         var typed = String(input.value || '').trim();
-        if (typed === '') return choose('');
-        var nodes = menu.querySelectorAll('.combo-opt');
-        for (var i = 0; i < nodes.length; i++) {
-          if ((nodes[i].getAttribute('data-value') || '') === typed) return choose(typed);
-        }
-        // 候选被截断时允许直接回车按完整值精确筛选。
-        var first = menu.querySelector('.combo-opt[data-value]:not([data-value=""])');
-        if (first) return choose(first.getAttribute('data-value'));
-        choose(typed);
+        if (typed) addTyped(typed);
+        apply();
       };
       input.onblur = function () {
+        focused = false;
         setTimeout(function () {
           close();
-          input.value = hf[key] || '';
-        }, 120);
+          if (dirty) apply();
+        }, 150);
       };
       menu.onmousedown = function (ev) {
         ev.preventDefault();
         var t = ev.target;
         while (t && t !== menu) {
           if (t.getAttribute && t.getAttribute('data-value') !== null) {
-            return choose(t.getAttribute('data-value'));
+            return pick(t.getAttribute('data-value'));
           }
           t = t.parentNode;
         }
       };
+      renderTags();
       return wrap;
     }
     function facetOptions(key) {
@@ -1773,19 +1868,13 @@
     ];
     var clearAll = function () {
       state.q = '';
-      state.hostFilter = { app_code: '', biz_group: '', os_family: '', account: '', agent_status: '', upgrade_status: '' };
+      state.hostFilter = { app_code: [], biz_group: [], os_family: [], account: [], agent_status: [], upgrade_status: [] };
       state.hostPage = 1;
       loadHosts();
     };
     var toolbar = h('div', { class: 'toolbar' }, [
       (qEl = h('input', { value: state.q, placeholder: 'IP/出口 IP/隧道地址/主机名/app_code/账号/业务组', 'aria-label': '搜索主机' }, [])),
       h('button', { class: 'btn', onclick: doSearch }, ['搜索']),
-      filterCombo('agent_status', 'Agent 状态', statusOptions),
-      filterCombo('upgrade_status', '升级状态', upgradeStatusOptions),
-      filterCombo('app_code', 'app_code', facetOptions('app_code'), 'app_code'),
-      filterCombo('biz_group', '业务组', facetOptions('biz_group'), 'biz_group'),
-      filterCombo('os_family', 'OS', osFacetOptions()),
-      filterCombo('account', '账号', facetOptions('account'), 'account'),
       hostFilterActive() ? h('button', { class: 'btn ghost', onclick: clearAll }, ['清除筛选']) : null,
       isAdmin() ? h('button', { class: 'btn', onclick: openCreateHost }, ['新增主机']) : null,
       isAdmin() ? h('a', {
@@ -1807,6 +1896,15 @@
       h('span', { class: 'muted auto-refresh-tip' }, ['● 自动刷新中'])
     ]);
     qEl.onkeydown = function (ev) { if (ev.key === 'Enter') doSearch(); };
+    // 筛选标签框单独一行：支持输入搜索、多选标签和每项「单选」开关。
+    var filterBar = h('div', { class: 'toolbar filter-bar' }, [
+      filterTags('agent_status', 'Agent 状态', statusOptions),
+      filterTags('upgrade_status', '升级状态', upgradeStatusOptions),
+      filterTags('app_code', 'app_code', facetOptions('app_code'), 'app_code'),
+      filterTags('biz_group', '业务组', facetOptions('biz_group'), 'biz_group'),
+      filterTags('os_family', 'OS', osFacetOptions()),
+      filterTags('account', '账号', facetOptions('account'), 'account')
+    ]);
 
     var listHostDefs = (state.hostFieldDefs || [])
       .filter(function (d) { return d.showInList; })
@@ -1896,6 +1994,7 @@
         : null,
       h('div', { class: 'card' }, [
         toolbar,
+        filterBar,
         hostSel && (state.hosts.length || hostSel.progress) ? hostSel.bar : null,
         hostSel ? hostSel.progress : null,
         (function () {
@@ -4976,6 +5075,9 @@
         return h('option', { value: g }, [g]);
       })
     ));
+    var datalistEl = h('datalist', { id: listID }, (candidates || []).map(function (g) {
+      return h('option', { value: g }, []);
+    }));
     var inputEl = h('input', {
       list: listID,
       placeholder: placeholder || '选择或输入后回车添加',
@@ -4983,6 +5085,35 @@
         if (e.key === 'Enter') { e.preventDefault(); add(inputEl.value); }
       }
     }, []);
+
+    // setCandidates 更新下拉候选（远程搜索时按输入关键字刷新）。
+    function setCandidates(list) {
+      candidates = list || [];
+      while (selectEl.options.length > 1) selectEl.remove(1);
+      candidates.forEach(function (g) {
+        selectEl.appendChild(h('option', { value: g }, [g]));
+      });
+      datalistEl.textContent = '';
+      candidates.forEach(function (g) {
+        datalistEl.appendChild(h('option', { value: g }, []));
+      });
+    }
+    var remoteTimer = null, remoteSeq = 0;
+    if (opts.remoteField) {
+      inputEl.oninput = function () {
+        if (remoteTimer) clearTimeout(remoteTimer);
+        remoteTimer = setTimeout(function () {
+          var my = ++remoteSeq;
+          api('/api/hosts/facets?fields=' + encodeURIComponent(opts.remoteField) +
+              '&q=' + encodeURIComponent(inputEl.value.trim()) + '&limit=200')
+            .then(function (d) {
+              if (my !== remoteSeq) return;
+              setCandidates((((d || {}).values) || {})[opts.remoteField] || []);
+            })
+            .catch(function () {});
+        }, 250);
+      };
+    }
     var addBtn = h('button', {
       class: 'btn ghost small', type: 'button', title: '添加',
       onclick: function () { add(inputEl.value); }
@@ -5031,11 +5162,9 @@
       el: h('div', { class: 'tag-picker' }, [
         tagsEl,
         h('div', { class: 'toolbar' }, [
-          (candidates && candidates.length) ? selectEl : null,
+          (opts.remoteField || (candidates && candidates.length)) ? selectEl : null,
           inputEl,
-          h('datalist', { id: listID }, (candidates || []).map(function (g) {
-            return h('option', { value: g }, []);
-          })),
+          datalistEl,
           addBtn
         ])
       ]),
@@ -6445,12 +6574,15 @@
     var f = state.hostFilter || {};
     var qs = [];
     if (state.q) qs.push('q=' + encodeURIComponent(state.q));
-    if (f.app_code) qs.push('app_code=' + encodeURIComponent(f.app_code));
-    if (f.os_family) qs.push('os_family=' + encodeURIComponent(f.os_family));
-    if (f.account) qs.push('account=' + encodeURIComponent(f.account));
-    if (f.biz_group) qs.push('biz_group=' + encodeURIComponent(f.biz_group));
-    if (f.agent_status) qs.push('agent_status=' + encodeURIComponent(f.agent_status));
-    if (f.upgrade_status) qs.push('upgrade_status=' + encodeURIComponent(f.upgrade_status));
+    var addAll = function (k, list) {
+      asList(list).forEach(function (v) { qs.push(k + '=' + encodeURIComponent(v)); });
+    };
+    addAll('app_code', f.app_code);
+    addAll('biz_group', f.biz_group);
+    addAll('os_family', f.os_family);
+    addAll('account', f.account);
+    addAll('agent_status', f.agent_status);
+    addAll('upgrade_status', f.upgrade_status);
     return qs;
   }
   // hostFilterActive 是否设置了任何主机筛选条件（关键字或下拉）。
@@ -7485,7 +7617,7 @@
     }
     // 加载主机字段选项（任务筛选用）
     if (state.hostFacets === null) {
-      api('/api/hosts/facets')
+      api('/api/hosts/facets?limit=300')
         .then(function (d) { state.hostFacets = d || { fields: [], values: {} }; render(); })
         .catch(function () { state.hostFacets = { fields: [], values: {} }; });
     }
@@ -7682,6 +7814,8 @@
         {
           initial: f.filters[col] || [],
           multi: multi,
+          // app_code/业务组等候选值可能很多：输入时按需向服务端搜索。
+          remoteField: col,
           // 立即写回 taskForm：预览/自动刷新会触发 render，靠它恢复已选值。
           onChange: function (vals) {
             if (vals.length > 0) f.filters[col] = vals;

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,20 +38,36 @@ func hostFilterParams(t *testing.T) []string {
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
-			if !ok || len(call.Args) != 1 {
+			if !ok {
+				return true
+			}
+			// filterValues(r, "key")：多选筛选参数（两个参数，先于单参数检查）。
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "filterValues" && len(call.Args) == 2 {
+				if lit, ok := call.Args[1].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if v, err := strconv.Unquote(lit.Value); err == nil {
+						seen[v] = true
+					}
+				}
+				return true
+			}
+			if len(call.Args) != 1 {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Get" {
+			if !ok {
 				return true
 			}
-			if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "q" {
-				return true
-			}
-			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				if v, err := strconv.Unquote(lit.Value); err == nil {
-					seen[v] = true
+			// 兼容两种写法：q.Get("key") 与 filterValues(r, "key")（多选）。
+			if sel.Sel.Name == "Get" {
+				if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "q" {
+					return true
 				}
+				if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if v, err := strconv.Unquote(lit.Value); err == nil {
+						seen[v] = true
+					}
+				}
+				return true
 			}
 			return true
 		})
@@ -83,14 +100,18 @@ func TestHostFilterQSKnownToBackend(t *testing.T) {
 	for _, p := range hostFilterParams(t) {
 		backend[p] = true
 	}
-	// 匹配 'name=' + ... 与 'name=固定值' 两种写法。
-	keys := regexp.MustCompile(`'([a-z_]+)=`).FindAllSubmatch(body[1], -1)
+	// 匹配 'name=' + ...、'name=固定值' 以及多选 addAll('name') 三种写法。
+	keys := regexp.MustCompile(`(?:'([a-z_]+)=|addAll\('([a-z_]+)')`).FindAllSubmatch(body[1], -1)
 	if len(keys) == 0 {
 		t.Fatal("hostFilterQS() 中没有识别到任何参数，请同步更新本测试")
 	}
 	for _, k := range keys {
-		if !backend[string(k[1])] {
-			t.Errorf("前端 hostFilterQS() 发送了 %q，但后端 hostListFilter 不支持", k[1])
+		key := string(k[1])
+		if key == "" {
+			key = string(k[2])
+		}
+		if !backend[key] {
+			t.Errorf("前端 hostFilterQS() 发送了 %q，但后端 hostListFilter 不支持", key)
 		}
 	}
 }
@@ -166,19 +187,24 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 	cases := []struct {
 		param string
 		value string
-		want  []int64 // 列表应命中的主机（含 busy）
+		multi []string // 非空时按多选参数发送（重复 key）
+		want  []int64  // 列表应命中的主机（含 busy）
 	}{
-		{"q", tag, []int64{online, idle, stale, busy, noUpdate}},
-		{"app_code", "APP-A", []int64{online, busy, noUpdate}},
-		{"biz_group", biz1, []int64{online, busy, noUpdate}},
-		{"os_family", "ubuntu", []int64{idle, busy, noUpdate}},
-		{"account", "acc2", []int64{idle, stale}},
-		{"agent_status", "online", []int64{online, busy, noUpdate}},
-		{"agent_status", "offline", []int64{stale}},
-		{"agent_status", "unknown", []int64{idle}},
-		{"upgrade_status", "success", []int64{online, busy}},
-		{"upgrade_status", "failed", []int64{stale}},
-		{"upgrade_status", "none", []int64{noUpdate}},
+		{"q", tag, nil, []int64{online, idle, stale, busy, noUpdate}},
+		{"app_code", "APP-A", nil, []int64{online, busy, noUpdate}},
+		{"biz_group", biz1, nil, []int64{online, busy, noUpdate}},
+		{"os_family", "ubuntu", nil, []int64{idle, busy, noUpdate}},
+		{"account", "acc2", nil, []int64{idle, stale}},
+		{"agent_status", "online", nil, []int64{online, busy, noUpdate}},
+		{"agent_status", "offline", nil, []int64{stale}},
+		{"agent_status", "unknown", nil, []int64{idle}},
+		{"upgrade_status", "success", nil, []int64{online, busy}},
+		{"upgrade_status", "failed", nil, []int64{stale}},
+		{"upgrade_status", "none", nil, []int64{noUpdate}},
+		// 多选：重复参数应取并集。
+		{"app_code", "", []string{"APP-A", "APP-B"}, []int64{online, idle, stale, busy, noUpdate}},
+		{"agent_status", "", []string{"offline", "unknown"}, []int64{idle, stale}},
+		{"upgrade_status", "", []string{"failed", "none"}, []int64{stale, noUpdate}},
 	}
 
 	// 覆盖检查：hostListFilter 支持的每个参数都至少有一个用例。
@@ -205,10 +231,18 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		t.Run(c.param+"="+c.value, func(t *testing.T) {
+		name := c.param + "=" + c.value
+		if len(c.multi) > 0 {
+			name = c.param + "=" + strings.Join(c.multi, ",")
+		}
+		t.Run(name, func(t *testing.T) {
 			v := url.Values{}
 			v.Set("q", tag) // 关键字隔离本测试数据；q 用例本身就是只带 q
-			if c.param != "q" {
+			if len(c.multi) > 0 {
+				for _, x := range c.multi {
+					v.Add(c.param, x)
+				}
+			} else if c.param != "q" {
 				v.Set(c.param, c.value)
 			}
 
@@ -228,9 +262,21 @@ func TestHostFilterListMatchesDeletable(t *testing.T) {
 				if h.ID == other {
 					t.Fatalf("不匹配关键字的主机 %d 出现在列表中", other)
 				}
-				// 按状态筛选时，列表显示的状态必须就是筛选值（筛选与显示同一规则）。
-				if c.param == "agent_status" && h.AgentStatus != c.value {
-					t.Fatalf("主机 %d 显示状态 %q，与筛选值 %q 不一致", h.ID, h.AgentStatus, c.value)
+				// 按状态筛选时，列表显示的状态必须属于筛选值（筛选与显示同一规则）。
+				if c.param == "agent_status" {
+					allowed := c.multi
+					if len(allowed) == 0 {
+						allowed = []string{c.value}
+					}
+					found := false
+					for _, v := range allowed {
+						if h.AgentStatus == v {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatalf("主机 %d 显示状态 %q，不在筛选值 %v 中", h.ID, h.AgentStatus, allowed)
+					}
 				}
 				listIDs = append(listIDs, h.ID)
 			}

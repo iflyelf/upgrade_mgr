@@ -123,9 +123,29 @@ button.btn.danger:hover, a.btn.danger:hover { background: color-mix(in srgb, var
 button.btn.small, a.btn.small { padding: 4px 8px; font-size: 12px; }
 button.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
-/* 可搜索筛选框：输入框 + 相对定位的候选菜单 */
-.combo { position: relative; display: inline-block; min-width: 150px; max-width: 260px; }
-.combo-input { width: 100%; box-sizing: border-box; }
+/* 主机页多选标签筛选框：标签 + 输入框 + 候选菜单 */
+.filter-bar { align-items: flex-start; gap: 10px 12px; }
+.tag-filter { display: flex; flex-direction: column; gap: 4px; min-width: 200px; max-width: 300px; flex: 1 1 200px; }
+.tag-filter-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.tag-filter-label { font-weight: 600; }
+.tag-filter-mode { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
+.tag-filter-mode input { width: auto; margin: 0; padding: 0; }
+.tag-filter-box {
+  position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  min-height: 36px; padding: 4px 6px; border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); background: var(--panel-bg);
+}
+.tag-filter-box:focus-within { border-color: var(--primary-color); }
+.tag-filter-values { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
+.tag-filter-values .tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tag-filter-input {
+  flex: 1 1 80px; min-width: 80px; padding: 2px 4px;
+  border: 0; background: transparent; outline: none;
+}
+.tag-filter-input:focus { outline: none; }
 .combo-menu {
   position: absolute; z-index: 40; top: calc(100% + 2px); left: 0; right: 0;
   max-height: 260px; overflow: auto; padding: 4px;
@@ -374,7 +394,7 @@ th { position: relative; }
   .grid2 { grid-template-columns: 1fr; }
   .toolbar { flex-wrap: wrap; gap: 8px; }
   .toolbar > input, .toolbar > select { width: 100%; min-width: 0; }
-  .toolbar > .combo { width: 100%; max-width: none; }
+  .toolbar > .tag-filter { width: 100%; max-width: none; flex-basis: 100%; }
   .modal { width: calc(100vw - 16px); max-height: 92vh; }
   .pager { flex-wrap: wrap; gap: 6px; }
   .table-tools-cols { gap: 6px 10px; }
