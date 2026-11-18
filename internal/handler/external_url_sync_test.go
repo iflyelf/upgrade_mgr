@@ -17,9 +17,92 @@ import (
 	"github.com/iflyelf/upgrade_mgr/internal/svc"
 )
 
+// snapshotExternalURLHosts 快照会被 SyncExternalURLToAgents 修改的主机字段。
+//
+// 集成测试可能连生产库；该函数按全局条件更新所有 Agent 主机，测试结束后必须
+// 原样恢复，避免把生产主机的连接地址改成测试域名。
+func snapshotExternalURLHosts(t *testing.T, db *sql.DB) {
+	t.Helper()
+	type state struct {
+		id        int64
+		override  string
+		auto      bool
+		checkOK   sql.NullBool
+		source    string
+		checkAt   sql.NullTime
+		latency   int64
+		detail    string
+		requested sql.NullTime
+	}
+	rows, err := db.Query(`
+		SELECT id, COALESCE(server_url_override,''), server_url_auto,
+		       tunnel_check_ok, COALESCE(tunnel_check_source,''), tunnel_check_at,
+		       COALESCE(tunnel_check_latency_ms,0), COALESCE(tunnel_check_detail,''),
+		       tunnel_check_requested_at
+		  FROM hosts
+		 WHERE COALESCE(agent_id,'') <> ''
+		   AND (server_url_auto = TRUE OR COALESCE(server_url_override,'') = '')`)
+	if err != nil {
+		t.Fatalf("快照主机连接地址失败: %v", err)
+	}
+	defer rows.Close()
+	var states []state
+	for rows.Next() {
+		var st state
+		if err := rows.Scan(&st.id, &st.override, &st.auto, &st.checkOK, &st.source,
+			&st.checkAt, &st.latency, &st.detail, &st.requested); err != nil {
+			t.Fatal(err)
+		}
+		states = append(states, st)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, st := range states {
+			db.Exec(`
+				UPDATE hosts
+				   SET server_url_override=$2, server_url_auto=$3,
+				       tunnel_check_ok=$4, tunnel_check_source=$5, tunnel_check_at=$6,
+				       tunnel_check_latency_ms=$7, tunnel_check_detail=$8,
+				       tunnel_check_requested_at=$9
+				 WHERE id=$1`,
+				st.id, st.override, st.auto, st.checkOK, st.source,
+				st.checkAt, st.latency, st.detail, st.requested)
+		}
+	})
+}
+
+// snapshotSettingKeys 快照/恢复设置键，避免测试值写入真实配置。
+func snapshotSettingKeys(t *testing.T, db *sql.DB, keys ...string) {
+	t.Helper()
+	type state struct {
+		key, value string
+		ok         bool
+	}
+	saved := make([]state, 0, len(keys))
+	for _, k := range keys {
+		var v string
+		err := db.QueryRow(`SELECT value FROM app_settings WHERE key=$1`, k).Scan(&v)
+		saved = append(saved, state{key: k, value: v, ok: err == nil})
+	}
+	t.Cleanup(func() {
+		for _, s := range saved {
+			if s.ok {
+				db.Exec(`INSERT INTO app_settings (key,value,updated_at) VALUES ($1,$2,NOW())
+				         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
+					s.key, s.value)
+			} else {
+				db.Exec(`DELETE FROM app_settings WHERE key=$1`, s.key)
+			}
+		}
+	})
+}
+
 // TestSyncExternalURLToAgents 验证自动同步只更新「未手工覆盖」或「上次自动同步」的主机。
 func TestSyncExternalURLToAgents(t *testing.T) {
 	db, sc := setupHostDB(t)
+	snapshotExternalURLHosts(t, db)
 	prefix := fmt.Sprintf("extsync-%d", time.Now().UnixNano())
 	insertHost := func(suffix, agentID, override string, auto bool) string {
 		t.Helper()
@@ -102,6 +185,7 @@ func TestSyncExternalURLToAgents(t *testing.T) {
 // TestMaybeSyncExternalURLToAgentsGate 验证只在开启开关且地址变化（或刚开启）时下发。
 func TestMaybeSyncExternalURLToAgentsGate(t *testing.T) {
 	db, _ := setupHostDB(t)
+	snapshotExternalURLHosts(t, db)
 	prefix := fmt.Sprintf("extgate-%d", time.Now().UnixNano())
 	ip := prefix + "-host"
 	if _, err := db.Exec(`
@@ -150,6 +234,8 @@ func TestMaybeSyncExternalURLToAgentsGate(t *testing.T) {
 // TestUpdateSettingsAutoSyncExternalURL 验证设置页保存 external_url 后立即写入 Agent 覆盖。
 func TestUpdateSettingsAutoSyncExternalURL(t *testing.T) {
 	db, _ := setupHostDB(t)
+	snapshotExternalURLHosts(t, db)
+	snapshotSettingKeys(t, db, "server.external_url", "server.auto_sync_agent_url")
 	prefix := fmt.Sprintf("extsave-%d", time.Now().UnixNano())
 	ip := prefix + "-host"
 	if _, err := db.Exec(`
