@@ -2158,7 +2158,7 @@ install-windows-monitor.exe install -y --server http://console.example.com
 - 同一时间只保留一个可用的安装令牌；旧令牌自动停用。每日维护任务会自动删除已注销/过期/用尽超过 7 天的注册令牌，无需人工清理。
 - 安装/更新结束会自动探测 `http://127.0.0.1:16666/metrics`：单次 3 秒超时、最多重试 10 次，成功打印 ✅，失败打印端口占用/服务状态/最近日志并以非 0 退出；安装前也会提示 16666 端口是否被其它程序占用。Linux 与 Windows 安装器行为一致。
 - Windows 安装器执行 `install.ps1` 时与任务脚本一致：注入平台地址，由脚本按系统版本选择 legacy/latest 并优先走平台离线缓存，不再强制 `-BinaryUrl`；PowerShell 的完整输出写入 `%TEMP%\windows-exporter-install.log`，失败时会打印并回退到显式平台二进制地址重试。
-- 卸载流程的所有外部命令都有超时：卸载脚本下载最多 30 秒、PowerShell 卸载最多 5 分钟、Agent 卸载最多 2 分钟、`sc`/`reg` 等最多 20 秒。任一步失败或超时会直接执行本地兜底清理，不会因为平台不可达或服务卡在停止中而一直等待。
+- Windows 安装器卸载**不再调用 PowerShell 脚本**：直接本地停服务、删服务/注册表/防火墙规则、清理当前与历史安装目录，所有命令 30 秒超时；Agent 卸载 2 分钟超时。避免 install.ps1 在部分系统上“实际已卸载但进程不退出”导致卡住。安装仍使用 install.ps1（最长 15 分钟，输出写入 `%TEMP%\windows-exporter-install.log`）。
 - Windows 安装器随 Release 发布，也可在服务器执行 `make build-monitor-installer` 生成到 `dist/install-windows-monitor.exe`。
 
 **主机删除**

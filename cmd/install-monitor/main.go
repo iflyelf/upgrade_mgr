@@ -346,6 +346,10 @@ func installExporter(action string) {
 		"-File", ps1, action, "-Yes", "-InstallDir", exporterInstall}
 	log.Printf("执行 Windows Exporter %s（平台地址 %s）...", action, opts.Server)
 	if err := runPowerShell(env, baseArgs...); err != nil {
+		if strings.Contains(err.Error(), "超时") {
+			fatal("Windows Exporter %s 超时，请查看 %s 中的最后输出", action,
+				filepath.Join(os.TempDir(), "windows-exporter-install.log"))
+		}
 		// 回退：显式指定平台二进制地址（旧缓存/脚本异常时仍可安装）。
 		arch := resolveArch(opts.Arch)
 		asset := "windows-exporter-" + arch
@@ -437,31 +441,77 @@ func verifyExporter(action string) {
 	fatal("%s失败：Windows Exporter 指标不可用（Agent 已安装，可远程排查后重试）", action)
 }
 
+// uninstallExporter 直接本地清理，不下载/执行 PowerShell 卸载脚本。
+//
+// install.ps1 在某些 Windows 版本上会卡在服务停止/目录删除阶段（实际已卸载但
+// PowerShell 进程不退出）。卸载是确定性操作，直接用 sc/reg/netsh/文件删除即可，
+// 也避免平台不可达时等待脚本下载。
 func uninstallExporter() {
-	ps1 := filepath.Join(os.TempDir(), "windows-exporter-install.ps1")
-	// 卸载不能依赖平台一定可达：脚本下载最多 30 秒，失败直接走本地兜底清理，
-	// 避免旧版本下载客户端的 15 分钟超时 ×4 次重试导致“卡在卸载”。
-	err := downloadToTimeout(opts.Server+"/api/external/binary/windows-exporter-install.ps1",
-		ps1, 30*time.Second, 1)
-	if err != nil {
-		log.Printf("下载卸载脚本失败，直接执行本地兜底清理: %v", err)
-		fallbackRemoveExporter()
-		return
+	log.Printf("卸载 Windows Exporter（本地清理）...")
+	serviceDir := exporterServiceDir()
+	if serviceDir != "" {
+		log.Printf("服务实际安装目录: %s", serviceDir)
 	}
-	defer os.Remove(ps1)
-	if err := runTimeout(5*time.Minute, powershellPath(), "-NoProfile", "-ExecutionPolicy", "Bypass",
-		"-File", ps1, "uninstall", "-Yes", "-InstallDir", exporterInstall); err != nil {
-		log.Printf("Windows Exporter 卸载脚本失败或超时，执行兜底清理: %v", err)
-		fallbackRemoveExporter()
+	runQuietTimeout(30*time.Second, "sc", "stop", exporterService)
+	runQuietTimeout(30*time.Second, "sc", "delete", exporterService)
+	runQuietTimeout(30*time.Second, "reg", "delete",
+		`HKLM\SYSTEM\CurrentControlSet\Services\`+exporterService, "/f")
+	runQuietTimeout(30*time.Second, "netsh", "advfirewall", "firewall", "delete",
+		"rule", "name=windows_exporter (TCP 16666)")
+	// 服务删除后仍可能有手工启动的 exporter 进程占用 exe，先结束再删目录。
+	runQuietTimeout(20*time.Second, "taskkill", "/F", "/IM", "windows_exporter.exe")
+	_ = os.RemoveAll(exporterInstall)
+	if serviceDir != "" && !strings.EqualFold(serviceDir, exporterInstall) &&
+		fileExists(filepath.Join(serviceDir, "windows_exporter.exe")) {
+		log.Printf("清理历史安装目录: %s", serviceDir)
+		_ = os.RemoveAll(serviceDir)
 	}
+	_ = os.RemoveAll(`C:\monitor\windows_exporter\textfile_inputs`)
+	log.Printf("Windows Exporter 本地清理完成")
 }
 
-func fallbackRemoveExporter() {
-	log.Printf("兜底清理 Windows Exporter 服务与目录")
-	runQuiet("sc", "stop", exporterService)
-	runQuiet("sc", "delete", exporterService)
-	runQuiet("reg", "delete", `HKLM\SYSTEM\CurrentControlSet\Services\`+exporterService, "/f")
-	_ = os.RemoveAll(exporterInstall)
+// exporterServiceDir 从 sc qc 输出解析服务实际安装目录（删除服务前调用）。
+func exporterServiceDir() string {
+	out, err := exec.Command("sc", "qc", exporterService).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return parseBinPathDir(string(out))
+}
+
+// parseBinPathDir 从 sc qc 的 BINARY_PATH_NAME 行提取目录，兼容带引号/不带引号。
+func parseBinPathDir(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		upper := strings.ToUpper(line)
+		idx := strings.Index(upper, "BINARY_PATH_NAME")
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[idx+len("BINARY_PATH_NAME"):])
+		rest = strings.TrimLeft(rest, ":")
+		rest = strings.TrimSpace(rest)
+		if rest == "" {
+			continue
+		}
+		if rest[0] == '"' {
+			if end := strings.Index(rest[1:], `"`); end >= 0 {
+				return windowsDir(rest[1 : end+1])
+			}
+		}
+		// 不带引号时路径可能含空格：取第一个 .exe 之前的完整路径。
+		if i := strings.Index(strings.ToLower(rest), ".exe"); i >= 0 {
+			return windowsDir(rest[:i+4])
+		}
+	}
+	return ""
+}
+
+func windowsDir(p string) string {
+	p = strings.TrimSpace(strings.Trim(p, `"`))
+	if i := strings.LastIndexAny(p, `\/`); i > 0 {
+		return p[:i]
+	}
+	return ""
 }
 
 func uninstallAgent() {
@@ -709,6 +759,7 @@ func runPowerShell(env []string, args ...string) error {
 	ps := powershellPath()
 	log.Printf("执行: %s %s", ps, strings.Join(args, " "))
 	logPath := filepath.Join(os.TempDir(), "windows-exporter-install.log")
+	log.Printf("PowerShell 最长运行 15 分钟，实时输出写入 %s（结束后打印末尾）", logPath)
 	f, err := os.Create(logPath)
 	if err != nil {
 		return runWithEnv(env, ps, args...)
