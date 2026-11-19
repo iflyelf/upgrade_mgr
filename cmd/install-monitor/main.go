@@ -17,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -318,7 +319,7 @@ func installAgent(token string) {
 	log.Printf("下载 Agent: %s", url)
 	must(downloadTo(url, tmp))
 	log.Printf("安装/重新注册 Agent（--force）...")
-	must(run(tmp, "install", "--server", opts.Server, "--enroll-token", token, "--force"))
+	must(runTimeout(10*time.Minute, tmp, "install", "--server", opts.Server, "--enroll-token", token, "--force"))
 }
 
 func installExporter(action string) {
@@ -332,7 +333,7 @@ func installExporter(action string) {
 	defer os.Remove(ps1)
 	url := opts.Server + "/api/external/binary/windows-exporter-install.ps1"
 	log.Printf("下载 Windows Exporter 安装脚本: %s", url)
-	must(downloadTo(url, ps1))
+	must(downloadToTimeout(url, ps1, 60*time.Second, 3))
 
 	// 与「任务中的脚本」保持一致：注入平台地址，让 install.ps1 自己按 OS 选择
 	// legacy/latest 并优先走平台离线缓存。之前强制 -BinaryUrl 指向 legacy 资产，
@@ -438,16 +439,21 @@ func verifyExporter(action string) {
 
 func uninstallExporter() {
 	ps1 := filepath.Join(os.TempDir(), "windows-exporter-install.ps1")
-	if err := downloadTo(opts.Server+"/api/external/binary/windows-exporter-install.ps1", ps1); err == nil {
-		if err := run(powershellPath(), "-NoProfile", "-ExecutionPolicy", "Bypass",
-			"-File", ps1, "uninstall", "-Yes", "-InstallDir", exporterInstall); err != nil {
-			log.Printf("Windows Exporter 卸载脚本失败，执行兜底清理: %v", err)
-			fallbackRemoveExporter()
-		}
-		_ = os.Remove(ps1)
+	// 卸载不能依赖平台一定可达：脚本下载最多 30 秒，失败直接走本地兜底清理，
+	// 避免旧版本下载客户端的 15 分钟超时 ×4 次重试导致“卡在卸载”。
+	err := downloadToTimeout(opts.Server+"/api/external/binary/windows-exporter-install.ps1",
+		ps1, 30*time.Second, 1)
+	if err != nil {
+		log.Printf("下载卸载脚本失败，直接执行本地兜底清理: %v", err)
+		fallbackRemoveExporter()
 		return
 	}
-	fallbackRemoveExporter()
+	defer os.Remove(ps1)
+	if err := runTimeout(5*time.Minute, powershellPath(), "-NoProfile", "-ExecutionPolicy", "Bypass",
+		"-File", ps1, "uninstall", "-Yes", "-InstallDir", exporterInstall); err != nil {
+		log.Printf("Windows Exporter 卸载脚本失败或超时，执行兜底清理: %v", err)
+		fallbackRemoveExporter()
+	}
 }
 
 func fallbackRemoveExporter() {
@@ -461,8 +467,8 @@ func fallbackRemoveExporter() {
 func uninstallAgent() {
 	if fileExists(agentExePath) {
 		log.Printf("卸载 Agent 服务...")
-		if err := run(agentExePath, "uninstall"); err != nil {
-			log.Printf("Agent uninstall 返回错误: %v", err)
+		if err := runTimeout(2*time.Minute, agentExePath, "uninstall"); err != nil {
+			log.Printf("Agent uninstall 返回错误或超时: %v", err)
 		}
 	}
 	// Agent 二进制缺失时的兜底清理。
@@ -575,24 +581,31 @@ func cleanupLegacyTemp() {
 }
 
 func downloadTo(url, dest string) error {
+	return downloadToTimeout(url, dest, 15*time.Minute, 4)
+}
+
+// downloadToTimeout 带单次超时与重试次数的下载；脚本类小文件用短超时避免卸载卡住。
+func downloadToTimeout(url, dest string, timeout time.Duration, attempts int) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 	var lastErr error
-	for attempt := 1; attempt <= 4; attempt++ {
-		if err := downloadOnce(url, dest); err == nil {
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := downloadOnceTimeout(url, dest, timeout); err == nil {
 			return nil
 		} else {
 			lastErr = err
-			log.Printf("下载失败（%d/4）: %v", attempt, err)
-			time.Sleep(time.Duration(attempt*3) * time.Second)
+			log.Printf("下载失败（%d/%d）: %v", attempt, attempts, err)
+			if attempt < attempts {
+				time.Sleep(time.Duration(attempt*2) * time.Second)
+			}
 		}
 	}
 	return lastErr
 }
 
-func downloadOnce(url, dest string) error {
-	client := &http.Client{Timeout: 15 * time.Minute}
+func downloadOnceTimeout(url, dest string, timeout time.Duration) error {
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(url)
 	if err != nil {
 		return err
@@ -700,7 +713,9 @@ func runPowerShell(env []string, args ...string) error {
 	if err != nil {
 		return runWithEnv(env, ps, args...)
 	}
-	cmd := exec.Command(ps, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ps, args...)
 	cmd.Env = env
 	cmd.Stdout = f
 	cmd.Stderr = f
@@ -709,6 +724,9 @@ func runPowerShell(env []string, args ...string) error {
 	data, _ := os.ReadFile(logPath)
 	if len(data) > 0 {
 		log.Printf("PowerShell 输出（%s）:\n%s", logPath, tailText(string(data), 64<<10))
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%s 超时（15m，详细日志: %s）", ps, logPath)
 	}
 	if runErr != nil {
 		return fmt.Errorf("%s: %w（详细日志: %s）", ps, runErr, logPath)
@@ -739,12 +757,18 @@ func tailText(s string, n int) string {
 	return s[len(s)-n:]
 }
 
-func run(name string, args ...string) error {
-	log.Printf("执行: %s %s", name, strings.Join(args, " "))
-	cmd := exec.Command(name, args...)
+// runTimeout 执行外部命令并限制最长运行时间，避免服务/卸载脚本卡住整个安装器。
+func runTimeout(timeout time.Duration, name string, args ...string) error {
+	log.Printf("执行（超时 %s）: %s %s", timeout, name, strings.Join(args, " "))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
 		log.Printf("%s", strings.TrimSpace(string(out)))
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%s 超时（%s）", name, timeout)
 	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
@@ -753,7 +777,13 @@ func run(name string, args ...string) error {
 }
 
 func runQuiet(name string, args ...string) {
-	cmd := exec.Command(name, args...)
+	runQuietTimeout(20*time.Second, name, args...)
+}
+
+func runQuietTimeout(timeout time.Duration, name string, args ...string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	_ = cmd.Run()
