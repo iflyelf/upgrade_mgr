@@ -3,6 +3,8 @@
 // 后续用 Vue3 构建产物替换本文件与 app.css。
 (function () {
   var app = document.getElementById('app');
+  // 返回顶部按钮：固定在右下角，滚动超过一屏后显示。
+  var backTopBtn = null;
   var THEMES = [
     { value: 'warm', emoji: '🌞', label: '暖沙米' },
     { value: 'cool', emoji: '🌊', label: '冷蓝' },
@@ -8934,8 +8936,54 @@
     ]);
   }
 
+  // initBackToTop 创建全局返回顶部按钮（不随页面 render 重建）。
+  function initBackToTop() {
+    if (backTopBtn) return;
+    backTopBtn = h('button', {
+      type: 'button', class: 'back-to-top', tabindex: '-1',
+      'aria-label': '返回顶部', title: '返回顶部',
+      onclick: function () {
+        var reduce = window.matchMedia &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduce || !window.scrollTo) {
+          window.scrollTo(0, 0);
+          return;
+        }
+        try { window.scrollTo({ top: 0, behavior: 'smooth' }); }
+        catch (e) { window.scrollTo(0, 0); }
+      }
+    }, [h('span', { 'aria-hidden': 'true' }, ['↑'])]);
+    document.body.appendChild(backTopBtn);
+    updateBackToTopLabel();
+
+    var ticking = false;
+    function update() {
+      ticking = false;
+      var y = window.scrollY || window.pageYOffset || 0;
+      var show = y > 360;
+      backTopBtn.classList.toggle('visible', show);
+      // 隐藏时不进入 Tab 顺序，避免不可见焦点。
+      backTopBtn.setAttribute('tabindex', show ? '0' : '-1');
+    }
+    window.addEventListener('scroll', function () {
+      if (ticking) return;
+      ticking = true;
+      if (window.requestAnimationFrame) window.requestAnimationFrame(update);
+      else setTimeout(update, 100);
+    }, { passive: true });
+    update();
+  }
+
+  function updateBackToTopLabel() {
+    if (!backTopBtn) return;
+    var label = state.lang === 'en' ? 'Back to top' : '返回顶部';
+    backTopBtn.setAttribute('aria-label', label);
+    backTopBtn.setAttribute('title', label);
+  }
+
   function render() {
     app.innerHTML = '';
+    updateBackToTopLabel();
     if (!state.user) { app.appendChild(loginView()); return; }
     if (state.quickstart === undefined) {
       state.quickstart = null;
@@ -9753,6 +9801,8 @@
     applyHashToState(route);
     switchView(route.view);
   });
+
+  initBackToTop();
 
   // 启动：先取认证方式（casdoor 需要登录页展示 SSO 入口），再尝试拿当前用户。
   loadAuthConfig().then(function () {

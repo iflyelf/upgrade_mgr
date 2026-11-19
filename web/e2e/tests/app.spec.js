@@ -115,6 +115,24 @@ test('任务主机筛选：修改条件后清除过期预览', async ({ page }) 
   }
 });
 
+test('返回顶部按钮：滚动后出现，点击回到顶部', async ({ page }) => {
+  await login(page);
+  await expect(page.locator('.main-nav')).toBeVisible();
+
+  // 注入足够高的占位内容，模拟长列表页面。
+  await page.evaluate(() => {
+    const d = document.createElement('div');
+    d.style.height = '3000px';
+    document.querySelector('.container').appendChild(d);
+    window.scrollTo(0, 900);
+  });
+  const btn = page.locator('.back-to-top');
+  await expect(btn).toHaveClass(/visible/);
+  await btn.click();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeLessThan(50);
+  await expect(btn).not.toHaveClass(/visible/);
+});
+
 test('帮助菜单包含快速上手与接入主机示例', async ({ page }) => {
   await login(page);
   await openNavMenu(page, '帮助');
