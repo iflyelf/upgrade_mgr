@@ -317,49 +317,9 @@ func installAgent(token string) {
 	defer os.Remove(tmp)
 	url := opts.Server + "/api/agent/binary/windows-" + arch
 	log.Printf("下载 Agent: %s", url)
-	must(downloadTo(url, tmp))
+	must(downloadToTimeout(url, tmp, 10*time.Minute, 2))
 	log.Printf("安装/重新注册 Agent（--force）...")
-	must(runTimeout(10*time.Minute, tmp, "install", "--server", opts.Server, "--enroll-token", token, "--force"))
-}
-
-func installExporter(action string) {
-	// 更新时如果服务或新目录不存在（例如从旧目录迁移），退化为 install：
-	// install.ps1 的 install 动作本身支持覆盖升级与失败回滚。
-	if action == "update" && (!fileExists(exporterExePath) || serviceMissing(exporterService)) {
-		log.Printf("Windows Exporter 尚未安装或不在 %s，改用 install 动作", exporterInstall)
-		action = "install"
-	}
-	ps1 := filepath.Join(os.TempDir(), "windows-exporter-install.ps1")
-	defer os.Remove(ps1)
-	url := opts.Server + "/api/external/binary/windows-exporter-install.ps1"
-	log.Printf("下载 Windows Exporter 安装脚本: %s", url)
-	must(downloadToTimeout(url, ps1, 60*time.Second, 3))
-
-	// 与「任务中的脚本」保持一致：注入平台地址，让 install.ps1 自己按 OS 选择
-	// legacy/latest 并优先走平台离线缓存。之前强制 -BinaryUrl 指向 legacy 资产，
-	// 在部分 Server 2012 R2 上脚本会提前退出（且输出被吞，只剩 exit status 1）。
-	env := mergeEnv(os.Environ(),
-		"UPGRADE_MGR_EXTERNAL_URL="+opts.Server,
-		"UPGRADE_AGENT_SERVER_URL="+opts.Server,
-	)
-	baseArgs := []string{"-NoProfile", "-ExecutionPolicy", "Bypass",
-		"-File", ps1, action, "-Yes", "-InstallDir", exporterInstall}
-	log.Printf("执行 Windows Exporter %s（平台地址 %s）...", action, opts.Server)
-	if err := runPowerShell(env, baseArgs...); err != nil {
-		if strings.Contains(err.Error(), "超时") {
-			fatal("Windows Exporter %s 超时，请查看 %s 中的最后输出", action,
-				filepath.Join(os.TempDir(), "windows-exporter-install.log"))
-		}
-		// 回退：显式指定平台二进制地址（旧缓存/脚本异常时仍可安装）。
-		arch := resolveArch(opts.Arch)
-		asset := "windows-exporter-" + arch
-		if windowsMajorVersion() < 10 {
-			asset += "-legacy"
-		}
-		binURL := opts.Server + "/api/external/binary/" + asset
-		log.Printf("WARN: 默认安装失败（%v），回退指定 -BinaryUrl 重试: %s", err, binURL)
-		must(runPowerShell(env, append(baseArgs, "-BinaryUrl", binURL)...))
-	}
+	must(runTimeout(5*time.Minute, tmp, "install", "--server", opts.Server, "--enroll-token", token, "--force"))
 }
 
 // portInUse 检测本机端口是否已有程序监听（1 秒超时，避免探测卡死）。
@@ -630,10 +590,6 @@ func cleanupLegacyTemp() {
 	}
 }
 
-func downloadTo(url, dest string) error {
-	return downloadToTimeout(url, dest, 15*time.Minute, 4)
-}
-
 // downloadToTimeout 带单次超时与重试次数的下载；脚本类小文件用短超时避免卸载卡住。
 func downloadToTimeout(url, dest string, timeout time.Duration, attempts int) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
@@ -718,96 +674,13 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func powershellPath() string {
-	if root := os.Getenv("SystemRoot"); root != "" {
-		p := filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-		if fileExists(p) {
-			return p
-		}
-	}
-	return "powershell.exe"
-}
-
 // mergeEnv 合并环境变量：同名（Windows 大小写不敏感）以后传入的值为准，
 // 避免系统里已有的旧 UPGRADE_MGR_EXTERNAL_URL 覆盖本次 --server。
-func mergeEnv(base []string, pairs ...string) []string {
-	drop := make(map[string]bool, len(pairs))
-	for _, kv := range pairs {
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			drop[strings.ToUpper(kv[:i])] = true
-		}
-	}
-	out := make([]string, 0, len(base)+len(pairs))
-	for _, kv := range base {
-		k := kv
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			k = kv[:i]
-		}
-		if drop[strings.ToUpper(k)] {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return append(out, pairs...)
-}
-
 // runPowerShell 执行 PowerShell，并把 stdout/stderr 同时写入临时日志文件。
 //
 // 某些 PowerShell 版本在 stdout 被重定向为管道时 [Console]::Out 可能丢失输出，
 // 写文件再读回可以确保安装失败时能看到 install.ps1 的真实错误，而不是只有 exit status 1。
-func runPowerShell(env []string, args ...string) error {
-	ps := powershellPath()
-	log.Printf("执行: %s %s", ps, strings.Join(args, " "))
-	logPath := filepath.Join(os.TempDir(), "windows-exporter-install.log")
-	log.Printf("PowerShell 最长运行 15 分钟，实时输出写入 %s（结束后打印末尾）", logPath)
-	f, err := os.Create(logPath)
-	if err != nil {
-		return runWithEnv(env, ps, args...)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, ps, args...)
-	cmd.Env = env
-	cmd.Stdout = f
-	cmd.Stderr = f
-	runErr := cmd.Run()
-	_ = f.Close()
-	data, _ := os.ReadFile(logPath)
-	if len(data) > 0 {
-		log.Printf("PowerShell 输出（%s）:\n%s", logPath, tailText(string(data), 64<<10))
-	}
-	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("%s 超时（15m，详细日志: %s）", ps, logPath)
-	}
-	if runErr != nil {
-		return fmt.Errorf("%s: %w（详细日志: %s）", ps, runErr, logPath)
-	}
-	return nil
-}
-
-func runWithEnv(env []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	if len(env) > 0 {
-		cmd.Env = env
-	}
-	out, err := cmd.CombinedOutput()
-	if len(out) > 0 {
-		log.Printf("%s", strings.TrimSpace(string(out)))
-	}
-	if err != nil {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return nil
-}
-
 // tailText 只保留末尾 n 字节，避免超长构建日志淹没安装器输出。
-func tailText(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
-}
-
 // runTimeout 执行外部命令并限制最长运行时间，避免服务/卸载脚本卡住整个安装器。
 func runTimeout(timeout time.Duration, name string, args ...string) error {
 	log.Printf("执行（超时 %s）: %s %s", timeout, name, strings.Join(args, " "))

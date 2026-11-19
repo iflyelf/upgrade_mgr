@@ -2157,8 +2157,11 @@ install-windows-monitor.exe install -y --server http://console.example.com
 - 永久令牌保存在数据库 `app_settings`（键 `agent.install_monitor_token`，多副本共享），并兼容写入 `server.agent_binary_dir/.install-monitor/token.json`（0600）；脚本 URL 不变，重新生成会轮换令牌。令牌接口无鉴权，仅限内网部署。
 - 同一时间只保留一个可用的安装令牌；旧令牌自动停用。每日维护任务会自动删除已注销/过期/用尽超过 7 天的注册令牌，无需人工清理。
 - 安装/更新结束会自动探测 `http://127.0.0.1:16666/metrics`：单次 3 秒超时、最多重试 10 次，成功打印 ✅，失败打印端口占用/服务状态/最近日志并以非 0 退出；安装前也会提示 16666 端口是否被其它程序占用。Linux 与 Windows 安装器行为一致。
-- Windows 安装器执行 `install.ps1` 时与任务脚本一致：注入平台地址，由脚本按系统版本选择 legacy/latest 并优先走平台离线缓存，不再强制 `-BinaryUrl`；PowerShell 的完整输出写入 `%TEMP%\windows-exporter-install.log`，失败时会打印并回退到显式平台二进制地址重试。
-- Windows 安装器卸载**不再调用 PowerShell 脚本**：直接本地停服务、删服务/注册表/防火墙规则、清理当前与历史安装目录，所有命令 30 秒超时；Agent 卸载 2 分钟超时。避免 install.ps1 在部分系统上“实际已卸载但进程不退出”导致卡住。安装仍使用 install.ps1（最长 15 分钟，输出写入 `%TEMP%\windows-exporter-install.log`）。
+- Windows 安装器**完全不再调用 PowerShell / install.ps1**：
+  - 安装/更新：直接下载 `windows-exporter-<arch>[-legacy]`，校验 PE 后备份旧 exe、写入内置默认配置、创建/更新服务（延迟自启 + 失败自动重启）、配置防火墙并启动；失败自动回滚旧版本。
+  - 卸载：停/删服务、清注册表与防火墙规则、结束残留 `windows_exporter.exe`、删除当前与历史安装目录。
+  - 下载单次 10 分钟、`sc`/`reg`/`netsh` 30 秒、Agent 卸载 2 分钟；不会再卡在 PowerShell 脚本上。
+  - 内置配置与 `examples/windows_exporter/config.yaml` / `config-legacy.yaml` 保持一致（有测试校验）。
 - Windows 安装器随 Release 发布，也可在服务器执行 `make build-monitor-installer` 生成到 `dist/install-windows-monitor.exe`。
 
 **主机删除**
@@ -2501,6 +2504,16 @@ kubectl -n upgrade-mgr rollout restart deployment/upgrade-mgr
 6. **制品上传锁等待与连接占用**：等待跨副本锁最长 `artifact.lock_wait`（默认 30m）；每个并发上传持有一条 PostgreSQL 连接，连接池会按“上传并发数 + 4”自动抬高，但不应超过 PostgreSQL `max_connections`。
 
 7. **旧制品路径兼容**：新上传路径包含 `os_family` 维度；历史制品仍按数据库中的原路径下载，不会被自动迁移。同一身份重新上传后会改用新路径，旧对象可能成为孤儿文件，建议后续增加清理任务。
+
+### 2026-11-19 Windows 安装器改为纯 Go 直装直卸
+
+- 安装/更新不再下载/执行 `install.ps1`：直接下载 `windows-exporter-<arch>[-legacy]`，
+  校验 PE、备份旧版本、写入内置默认配置、建服务（自动启动 + 延迟自启 + 失败重启）、
+  配防火墙并启动；失败自动回滚。
+- 卸载不再调用 PowerShell：本地停/删服务、清注册表/防火墙、结束残留进程、
+  删除当前与历史安装目录，避免脚本“已卸载但进程不退出”导致卡住。
+- 内置配置与 `examples/windows_exporter/config.yaml` / `config-legacy.yaml` 保持一致，测试校验。
+- 所有外部命令带超时：下载 10 分钟/次、`sc`/`reg`/`netsh` 30 秒、Agent 卸载 2 分钟。
 
 ### 2026-11-19 返回顶部按钮
 
