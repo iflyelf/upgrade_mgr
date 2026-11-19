@@ -17,3 +17,15 @@ func TestTailText(t *testing.T) {
 		t.Fatalf("按字节截断结果异常: %q", got)
 	}
 }
+
+// TestMergeEnv 同名环境变量以本次传入值为准（Windows 大小写不敏感）。
+func TestMergeEnv(t *testing.T) {
+	got := mergeEnv([]string{"PATH=C:/x", "upgrade_mgr_external_url=http://old"}, "UPGRADE_MGR_EXTERNAL_URL=http://new")
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, "http://old") || !strings.Contains(joined, "UPGRADE_MGR_EXTERNAL_URL=http://new") {
+		t.Fatalf("旧环境变量未被覆盖: %v", got)
+	}
+	if !strings.Contains(joined, "PATH=C:/x") {
+		t.Fatalf("其它环境变量应保留: %v", got)
+	}
+}

@@ -337,7 +337,7 @@ func installExporter(action string) {
 	// 与「任务中的脚本」保持一致：注入平台地址，让 install.ps1 自己按 OS 选择
 	// legacy/latest 并优先走平台离线缓存。之前强制 -BinaryUrl 指向 legacy 资产，
 	// 在部分 Server 2012 R2 上脚本会提前退出（且输出被吞，只剩 exit status 1）。
-	env := append(os.Environ(),
+	env := mergeEnv(os.Environ(),
 		"UPGRADE_MGR_EXTERNAL_URL="+opts.Server,
 		"UPGRADE_AGENT_SERVER_URL="+opts.Server,
 	)
@@ -663,6 +663,29 @@ func powershellPath() string {
 		}
 	}
 	return "powershell.exe"
+}
+
+// mergeEnv 合并环境变量：同名（Windows 大小写不敏感）以后传入的值为准，
+// 避免系统里已有的旧 UPGRADE_MGR_EXTERNAL_URL 覆盖本次 --server。
+func mergeEnv(base []string, pairs ...string) []string {
+	drop := make(map[string]bool, len(pairs))
+	for _, kv := range pairs {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			drop[strings.ToUpper(kv[:i])] = true
+		}
+	}
+	out := make([]string, 0, len(base)+len(pairs))
+	for _, kv := range base {
+		k := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			k = kv[:i]
+		}
+		if drop[strings.ToUpper(k)] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, pairs...)
 }
 
 // runPowerShell 执行 PowerShell，并把 stdout/stderr 同时写入临时日志文件。
