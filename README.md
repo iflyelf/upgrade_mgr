@@ -2157,6 +2157,7 @@ install-windows-monitor.exe install -y --server http://console.example.com
 - 永久令牌保存在数据库 `app_settings`（键 `agent.install_monitor_token`，多副本共享），并兼容写入 `server.agent_binary_dir/.install-monitor/token.json`（0600）；脚本 URL 不变，重新生成会轮换令牌。令牌接口无鉴权，仅限内网部署。
 - 同一时间只保留一个可用的安装令牌；旧令牌自动停用。每日维护任务会自动删除已注销/过期/用尽超过 7 天的注册令牌，无需人工清理。
 - 安装/更新结束会自动探测 `http://127.0.0.1:16666/metrics`：单次 3 秒超时、最多重试 10 次，成功打印 ✅，失败打印端口占用/服务状态/最近日志并以非 0 退出；安装前也会提示 16666 端口是否被其它程序占用。Linux 与 Windows 安装器行为一致。
+- Windows 安装器执行 `install.ps1` 时与任务脚本一致：注入平台地址，由脚本按系统版本选择 legacy/latest 并优先走平台离线缓存，不再强制 `-BinaryUrl`；PowerShell 的完整输出写入 `%TEMP%\windows-exporter-install.log`，失败时会打印并回退到显式平台二进制地址重试。
 - Windows 安装器随 Release 发布，也可在服务器执行 `make build-monitor-installer` 生成到 `dist/install-windows-monitor.exe`。
 
 **主机删除**
