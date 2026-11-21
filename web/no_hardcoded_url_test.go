@@ -17,7 +17,8 @@ func TestNoHardcodedExternalURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	banned := "mgrup" + ".example.com" // 拆开写，避免扫描器命中本文件自身
+	// 用字节构造，避免守卫测试自身包含敏感域名。
+	banned := string([]byte{105, 102, 108, 121, 116, 101, 107, 46, 99, 111, 109})
 	textExt := map[string]bool{
 		".go": true, ".js": true, ".css": true, ".sh": true, ".ps1": true,
 		".yaml": true, ".yml": true, ".md": true, ".json": true, ".sql": true,
@@ -59,7 +60,6 @@ func TestNoHardcodedExternalURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(hits) > 0 {
-		t.Fatalf("发现硬编码的平台地址 %s，请改为 external_url/--server/环境变量：%v",
-			banned, hits)
+		t.Fatalf("发现硬编码的内部域名，请改为 external_url/--server/环境变量：%v", hits)
 	}
 }

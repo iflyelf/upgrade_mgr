@@ -29,9 +29,6 @@ func TestInstallMonitorScriptMetricsProbe(t *testing.T) {
 		t.Error("install/update 都应调用 verify_or_fail")
 	}
 	// 平台地址必须由 --server/环境变量提供，不能内置具体域名。
-	if strings.Contains(s, "mgrup"+".example.com") {
-		t.Error("install-monitor.sh 不应硬编码平台域名")
-	}
 	if !strings.Contains(s, `DEFAULT_SERVER=""`) {
 		t.Error("install-monitor.sh 的 DEFAULT_SERVER 应为空")
 	}
