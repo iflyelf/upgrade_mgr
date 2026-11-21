@@ -16,7 +16,7 @@ func TestInstallMonitorScriptMetricsProbe(t *testing.T) {
 	s := string(data)
 	for _, want := range []string{
 		"PROBE_TIMEOUT", "--max-time", "PROBE_RETRIES",
-		"check_port_conflict", "probe_metrics", "verify_or_fail",
+		"check_port_conflict", "probe_metrics", "verify_or_fail", "require_server",
 		"/metrics", "16666",
 		"$1成功", "监控指标探测失败",
 	} {
@@ -27,5 +27,12 @@ func TestInstallMonitorScriptMetricsProbe(t *testing.T) {
 	// 安装/更新都必须调用 verify_or_fail，避免只打印完成却未验证。
 	if strings.Count(s, `verify_or_fail "`) < 2 {
 		t.Error("install/update 都应调用 verify_or_fail")
+	}
+	// 平台地址必须由 --server/环境变量提供，不能内置具体域名。
+	if strings.Contains(s, "mgrup"+".example.com") {
+		t.Error("install-monitor.sh 不应硬编码平台域名")
+	}
+	if !strings.Contains(s, `DEFAULT_SERVER=""`) {
+		t.Error("install-monitor.sh 的 DEFAULT_SERVER 应为空")
 	}
 }

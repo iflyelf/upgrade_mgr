@@ -15,12 +15,12 @@
 #   - 如果控制台未配置 server.external_url，请用 --server 指定可访问地址。
 set -eu
 
-DEFAULT_SERVER="http://console.example.com"
+DEFAULT_SERVER=""
 ACTION="install"
 ASSUME_YES=0
 ACTION_SET=0
 INTERACTIVE=0
-SERVER="${UPGRADE_MGR_EXTERNAL_URL:-${UPGRADE_AGENT_SERVER_URL:-$DEFAULT_SERVER}}"
+SERVER="${UPGRADE_MGR_EXTERNAL_URL:-${UPGRADE_AGENT_SERVER_URL:-${UPGRADE_MGR_SERVER:-$DEFAULT_SERVER}}}"
 TOKEN="${INSTALL_MONITOR_TOKEN:-}"
 ARCH=""
 AGENT_BIN="/usr/local/bin/upgrade-agent"
@@ -40,7 +40,7 @@ usage() {
 
 选项:
   -y, --yes       卸载时跳过确认
-  --server URL    控制台地址（默认读取 UPGRADE_MGR_EXTERNAL_URL，最后回退内置地址）
+  --server URL    控制台地址（安装/更新/卸载必填；也可用 UPGRADE_MGR_EXTERNAL_URL）
   --token TOKEN   直接指定接入令牌（默认从控制台自动获取，控制台会自动创建）
   --arch ARCH     强制指定架构（amd64/arm64/arm/386；默认 uname -m）
   -h, --help      显示帮助
@@ -67,7 +67,19 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-rotate_server() { SERVER="${SERVER%/}"; }
+rotate_server() {
+  SERVER="${SERVER%/}"
+  if [ -n "$SERVER" ]; then
+    case "$SERVER" in
+      http://*|https://*) ;;
+      *) SERVER="http://$SERVER" ;;
+    esac
+  fi
+}
+
+require_server() {
+  [ -n "$SERVER" ] || die "未指定控制台地址：请使用 --server 或设置 UPGRADE_MGR_EXTERNAL_URL"
+}
 
 # choose_action 终端无参数运行时显示数字菜单；提示写 stderr，避免被日志/管道吞掉。
 choose_action() {
@@ -237,6 +249,7 @@ verify_or_fail() {
 }
 
 fetch_token() {
+  require_server
   [ -n "$TOKEN" ] && return 0
   log "读取控制台永久接入令牌: $SERVER/api/agent/install-monitor/token"
   raw="$(download "$SERVER/api/agent/install-monitor/token" 2>/dev/null || true)"
@@ -253,10 +266,10 @@ fetch_token() {
 
 # LEGACY-CLEANUP: 旧监控卸载。确认旧环境全部迁移后，可删除本函数及调用。
 #
-# 逻辑提取自 http://legacy.example.com/get/monitor/install-monitor.sh 的
+# 逻辑提取自旧 Qxbdown 监控脚本的
 # uninstall / pre_install_purge，避免目标机访问不了 qxbdown 时无法清理。
-# 原命令保留备查（不再执行）：
-# printf 'Y\n' | script -q -c "bash -c 'bash <(curl -fsSL http://legacy.example.com/get/monitor/install-monitor.sh) uninstall'" /dev/null
+# 原命令保留备查（不再执行，旧地址以 <legacy-monitor> 代替）：
+# printf 'Y\n' | script -q -c "bash -c 'bash <(curl -fsSL http://<legacy-monitor>/get/monitor/install-monitor.sh) uninstall'" /dev/null
 legacy_cleanup() {
   [ "$ACTION" = "install" ] || [ "$ACTION" = "update" ] || return 0
   log "清理旧监控（内置卸载逻辑，不依赖 qxbdown 脚本）..."
@@ -315,6 +328,7 @@ legacy_cleanup() {
 }
 
 install_agent() {
+  require_server
   tmp="$(mktemp /tmp/upgrade-agent.XXXXXX)"
   # shellcheck disable=SC2064
   trap "rm -f '$tmp'" EXIT
@@ -329,6 +343,7 @@ install_agent() {
 }
 
 install_node() {
+  require_server
   action="$1"
   tmp="$(mktemp /tmp/node-exporter-install.XXXXXX.sh)"
   # shellcheck disable=SC2064
@@ -378,7 +393,7 @@ uninstall_agent() {
 }
 
 status() {
-  log "控制台: $SERVER"
+  log "控制台: ${SERVER:-未指定（本地状态）}"
   if [ -x "$AGENT_BIN" ]; then
     "$AGENT_BIN" status || true
   else
@@ -398,6 +413,11 @@ status() {
 }
 
 rotate_server
+if [ "$ACTION" != "status" ] && [ -z "$SERVER" ] && [ "$INTERACTIVE" = "1" ]; then
+  printf '请输入控制台地址（如 http://mgr.example.com）: ' >&2
+  read -r SERVER || true
+  rotate_server
+fi
 case "$ACTION" in
   install)
     need_root

@@ -23,8 +23,9 @@ data:
       host: 0.0.0.0
       port: 8090
       web_embedded: true
-      # 改成负载均衡/Ingress 的对外地址；不要填 Pod IP 或 localhost。
-      external_url: "https://upgrade.example.com"
+      # 填写负载均衡/Ingress 的实际对外地址；不要填 Pod IP 或 localhost。
+      # 留空则由请求 Host 推导（建议生产显式配置，避免 Host 伪造/多域名歧义）。
+      external_url: ""
       # 位于 Ingress/Nginx 之后时改为 true，并只填代理所在 CIDR。
       # 直连 Service/端口转发保持 false，避免伪造 X-Forwarded-For。
       trust_proxy: false

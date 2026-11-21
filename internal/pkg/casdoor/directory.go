@@ -44,7 +44,7 @@ type Directory struct {
 
 // NewDirectory 创建目录客户端。
 //
-// endpoint 为服务端可达的 Casdoor 地址（如 http://sso.example.com）。
+// endpoint 为服务端可达的 Casdoor 地址（如 https://sso.example.com）。
 // application 可选：创建用户时写入 signupApplication，留空则沿用 Casdoor 默认值。
 func NewDirectory(endpoint, clientID, clientSecret, organization string, application ...string) *Directory {
 	app := ""

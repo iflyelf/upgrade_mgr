@@ -2139,14 +2139,15 @@ POST /api/hosts/{id}/tunnel-test        # 从平台侧拨测隧道地址（管�
 
 ```bash
 # Linux（自动识别 amd64/arm64/arm/386 与旧内核 legacy）
-curl -fsSL -m 3 --retry 3 "http://console.example.com/api/external/binary/install-monitor.sh" \
-  | bash -s -- install -y --server "http://console.example.com"
+# <控制台地址> 取自「设置 → 服务器 → external_url」，不要写死在脚本里
+curl -fsSL -m 3 --retry 3 "http://<控制台地址>/api/external/binary/install-monitor.sh" \
+  | bash -s -- install -y --server "http://<控制台地址>"
 ```
 
 ```text
 # Windows（安装器同时支持 install / update / uninstall / status）
-http://console.example.com/api/external/binary/install-windows-monitor.exe
-install-windows-monitor.exe install -y --server http://console.example.com
+http://<控制台地址>/api/external/binary/install-windows-monitor.exe
+install-windows-monitor.exe install -y --server http://<控制台地址>
 ```
 
 - Linux 安装 Agent + Node Exporter；Windows 安装 Agent + Windows Exporter；安装/更新始终 `--force` 重新注册主机，可重复执行。

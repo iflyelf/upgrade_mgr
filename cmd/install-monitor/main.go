@@ -32,7 +32,6 @@ import (
 )
 
 const (
-	defaultServer    = "http://console.example.com"
 	agentService     = "upgrade-agent"
 	exporterService  = "windows_exporter"
 	agentInstallDir  = `C:\Program Files\upgrade-agent`
@@ -82,6 +81,17 @@ func main() {
 		opts.Action = action
 	}
 	opts.Server = resolveServer(opts.Server)
+	if opts.Server == "" && (opts.Action == "install" || opts.Action == "update") {
+		if interactiveMode {
+			fmt.Print("请输入控制台地址（如 http://mgr.example.com）: ")
+			var server string
+			_, _ = fmt.Scanln(&server)
+			opts.Server = resolveServer(server)
+		}
+		if opts.Server == "" {
+			fatal("未指定控制台地址：请使用 --server 或设置 UPGRADE_MGR_EXTERNAL_URL")
+		}
+	}
 	if opts.Action != "status" {
 		mustRunAsAdmin()
 	}
@@ -171,7 +181,7 @@ func usage() {
   uninstall   卸载 Agent + Windows Exporter，并清理旧监控
   status      查看服务与文件状态
   -y, --yes   卸载时跳过确认
-  --server    控制台地址（默认 http://console.example.com）
+  --server    控制台地址（安装/更新必填；卸载/状态可省略；也可用 UPGRADE_MGR_EXTERNAL_URL）
   --token     直接指定接入令牌（默认从控制台获取永久令牌）
   --arch      强制指定架构（默认按 PROCESSOR_ARCHITECTURE 自动识别）`)
 }
@@ -259,9 +269,13 @@ func resolveServer(v string) string {
 		v = os.Getenv("UPGRADE_AGENT_SERVER_URL")
 	}
 	if v == "" {
-		v = defaultServer
+		v = os.Getenv("UPGRADE_MGR_SERVER")
 	}
-	return strings.TrimRight(strings.TrimSpace(v), "/")
+	v = strings.TrimRight(strings.TrimSpace(v), "/")
+	if v != "" && !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+		v = "http://" + v
+	}
+	return v
 }
 
 func resolveArch(v string) string {
