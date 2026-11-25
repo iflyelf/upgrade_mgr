@@ -151,6 +151,8 @@ func TestAgentStatsUsesBuildVersionAndTargetHash(t *testing.T) {
 		Data struct {
 			TargetVersion string `json:"target_version"`
 			Total         int    `json:"total"`
+			Online        int    `json:"online"`
+			Offline       int    `json:"offline"`
 			Outdated      int    `json:"outdated"`
 			List          []struct {
 				Version       string `json:"version"`
@@ -165,6 +167,9 @@ func TestAgentStatsUsesBuildVersionAndTargetHash(t *testing.T) {
 	}
 	if out.Data.TargetVersion != "9.9.9" || out.Data.Total < 2 {
 		t.Fatalf("统计头部不符: %+v", out.Data)
+	}
+	if out.Data.Online != out.Data.Total-out.Data.Offline {
+		t.Fatalf("在线数应为 total-offline: %+v", out.Data)
 	}
 
 	byVersion := map[string]bool{}

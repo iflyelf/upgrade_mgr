@@ -137,8 +137,11 @@ button.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-sha
 .tag-filter-values { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
 .tag-filter-values .tag {
   display: inline-flex; align-items: center; gap: 4px;
-  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%; min-width: 0;
 }
+/* 长名称只截断文本，× 始终可见可点；完整值在 title 中。 */
+.tag-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-filter-values .tag-x, .tag-picker-values .tag-x { flex: 0 0 auto; }
 .tag-filter-input {
   flex: 1 1 80px; min-width: 80px; padding: 2px 4px;
   border: 0; background: transparent; outline: none;
@@ -359,7 +362,10 @@ td.tunnel-fail-cell { box-shadow: inset 3px 0 0 var(--err-color); }
 
 /* 多选标签输入（如团队授权的主机分组范围） */
 .tag-picker-values { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
-.tag-picker-values .tag { display: inline-flex; align-items: center; gap: 4px; }
+.tag-picker-values .tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 100%; min-width: 0;
+}
 .tag-x { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
 .tag-x:hover { color: #d33; }
 .tag-picker .toolbar { margin: 0; flex-wrap: wrap; }

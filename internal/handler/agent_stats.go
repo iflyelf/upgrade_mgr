@@ -162,9 +162,13 @@ func AgentStats(s *svc.ServiceContext) http.HandlerFunc {
 			return list[i]["arch"].(string) < list[j]["arch"].(string)
 		})
 
+		online := total - offline
+		if online < 0 {
+			online = 0
+		}
 		httpx.OK(w, map[string]any{
-			"target_version": targetVersion, "total": total, "offline": offline,
-			"outdated": outdated, "list": list,
+			"target_version": targetVersion, "total": total, "online": online,
+			"offline": offline, "outdated": outdated, "list": list,
 			"offline_after": offlineAfter,
 		})
 	}

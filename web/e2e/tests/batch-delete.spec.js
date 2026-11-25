@@ -71,6 +71,36 @@ test('主机：按筛选条件全选 → 后台删除进度 → 刷新后恢复'
   }
 });
 
+test('主机：超长筛选标签仍可移除', async ({ page }) => {
+  test.skip(!DB_URL, '未设置 E2E_DATABASE_URL，跳过超长标签用例');
+  const tag = 'e2e-hlong-' + Date.now();
+  const longApp = 'E2E_LONG_' + 'X'.repeat(80);
+  psql(`INSERT INTO hosts (ip, hostname, app_code, tenant_id, source)
+        VALUES ('${tag}-1', '${tag}', '${longApp}', 1, 'manual')`);
+  try {
+    await login(page);
+    await page.locator('input[aria-label="搜索主机"]').fill(tag);
+    await page.getByRole('button', { name: '搜索', exact: true }).click();
+    await expect(page.getByText('共 1')).toBeVisible();
+
+    const appBox = page.locator('.tag-filter[data-key="app_code"]');
+    const input = appBox.getByLabel('按 app_code 筛选');
+    await input.fill(longApp);
+    await input.press('Enter');
+    await expect(appBox.locator('.tag')).toHaveCount(1);
+
+    // 文本被截断，但 × 必须始终可见且可点击。
+    const x = appBox.locator('.tag-x');
+    await expect(x).toBeVisible();
+    const box = await x.boundingBox();
+    expect(box && box.width > 0 && box.height > 0).toBeTruthy();
+    await x.click();
+    await expect(appBox.locator('.tag')).toHaveCount(0);
+  } finally {
+    psql(`DELETE FROM hosts WHERE hostname='${tag}'`);
+  }
+});
+
 test('组件：多选批量删除', async ({ page }) => {
   const dialogs = collectDialogs(page);
   await login(page);

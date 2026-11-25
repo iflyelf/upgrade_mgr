@@ -49,6 +49,9 @@ func TestAgentStatsAutoRefreshWithHosts(t *testing.T) {
 		t.Error("agentStatsCard() 缺少「自动刷新中」提示")
 	}
 	// 状态列要显示剩余旧版本数量，逐台升级时 3 -> 2 -> 1 也能看出刷新。
+	if !strings.Contains(card, "在线 ") {
+		t.Error("agentStatsCard() 应显示在线台数")
+	}
 	if !strings.Contains(card, "outdated_count") {
 		t.Error("agentStatsCard() 状态列未使用 outdated_count，整组升级完成前看不到变化")
 	}

@@ -1687,7 +1687,7 @@
       tagsEl.textContent = '';
       values.forEach(function (v, i) {
         tagsEl.appendChild(h('span', { class: 'tag' }, [
-          v,
+          h('span', { class: 'tag-label', title: v }, [v]),
           h('button', {
             class: 'tag-x', type: 'button', title: '移除', 'aria-label': '移除 ' + v,
             // preventDefault 避免先触发输入框 blur 导致整体重绘、点击丢失。
@@ -2344,7 +2344,8 @@
     return h('div', { class: 'card' }, [
       head,
       hint('目标版本：' + (st.target_version || '-') +
-        '；离线 ' + (st.offline || 0) + ' 台；旧版本 ' + (st.outdated || 0) +
+        '；在线 ' + (st.online || 0) + ' 台；离线 ' + (st.offline || 0) +
+        ' 台；旧版本 ' + (st.outdated || 0) +
         ' 台' + offlineNote + '。'),
       state.agentStatsErr
         ? h('div', { class: 'err', role: 'alert' }, [state.agentStatsErr + '（显示上次数据）'])
@@ -5168,7 +5169,7 @@
       }
       values.forEach(function (v, i) {
         tagsEl.appendChild(h('span', { class: 'tag' }, [
-          v,
+          h('span', { class: 'tag-label', title: v }, [v]),
           h('button', {
             class: 'tag-x', type: 'button', title: '移除', 'aria-label': '移除 ' + v,
             onclick: function () { removeAt(i); }

@@ -30,9 +30,19 @@ func TestHostFilterSearchableCombo(t *testing.T) {
 		"&q=",
 		"&limit=200",
 		"tag-filter-box",
+		"tag-label",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("app.js 缺少主机筛选搜索/业务组关键逻辑: %q", want)
+		}
+	}
+	css, err := os.ReadFile("dist/assets/app.css")
+	if err != nil {
+		t.Fatalf("读取 app.css 失败: %v", err)
+	}
+	for _, want := range []string{".tag-label", "flex: 0 0 auto"} {
+		if !strings.Contains(string(css), want) {
+			t.Errorf("app.css 缺少长标签截断/删除按钮样式: %q", want)
 		}
 	}
 	// 筛选框只保留多选标签（选一个即单选），不再有额外的「单选」复选框。
