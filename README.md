@@ -2155,6 +2155,7 @@ install-windows-monitor.exe install -y --server http://<控制台地址>
 - 安装前会清理旧监控：Linux 已把原 `qxbdown` 安装脚本的卸载逻辑内置到 `install-monitor.sh`（原命令保留在注释中，不再依赖 qxbdown 脚本）；Windows 清理旧 Zabbix 服务/目录/注册表/计划任务。相关代码带 `LEGACY-CLEANUP` 注释，迁移完成后可删除。
 - `install-monitor.sh` 已加入「外部文件」白名单，可在「运维 → 外部文件」刷新/上传；平台无法出网时自动使用随服务端发布的内置版本，无需手工缓存。
 - 只从控制台内网地址下载，不访问 GitHub；控制台无法出网时请先在「外部文件」上传/缓存 node-exporter、windows-exporter。
+- Linux 接入脚本自动识别旧内核：CentOS 6 等 2.x 内核下载 `linux-<arch>-legacy`（Go 1.23 构建），避免 `procresize: invalid arg`；Node Exporter 同样按内核选择 legacy。
 - 永久令牌保存在数据库 `app_settings`（键 `agent.install_monitor_token`，多副本共享），并兼容写入 `server.agent_binary_dir/.install-monitor/token.json`（0600）；脚本 URL 不变，重新生成会轮换令牌。令牌接口无鉴权，仅限内网部署。
 - 同一时间只保留一个可用的安装令牌；旧令牌自动停用。每日维护任务会自动删除已注销/过期/用尽超过 7 天的注册令牌，无需人工清理。
 - 安装/更新结束会自动探测 `http://127.0.0.1:16666/metrics`：单次 3 秒超时、最多重试 10 次，成功打印 ✅，失败打印端口占用/服务状态/最近日志并以非 0 退出；安装前也会提示 16666 端口是否被其它程序占用。Linux 与 Windows 安装器行为一致。

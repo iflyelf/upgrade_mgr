@@ -17,6 +17,7 @@ func TestInstallMonitorScriptMetricsProbe(t *testing.T) {
 	for _, want := range []string{
 		"PROBE_TIMEOUT", "--max-time", "PROBE_RETRIES",
 		"check_port_conflict", "probe_metrics", "verify_or_fail", "require_server",
+		"uname -r", `legacy_suffix="-legacy"`, "?kernel=$kernel",
 		"/metrics", "16666",
 		"$1成功", "监控指标探测失败",
 	} {

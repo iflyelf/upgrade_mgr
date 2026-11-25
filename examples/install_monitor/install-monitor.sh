@@ -332,8 +332,16 @@ install_agent() {
   tmp="$(mktemp /tmp/upgrade-agent.XXXXXX)"
   # shellcheck disable=SC2064
   trap "rm -f '$tmp'" EXIT
-  url="$SERVER/api/agent/binary/linux-$ARCH"
-  log "下载 Agent: $url"
+  # 旧内核（CentOS 6 的 2.6.32 等）必须用 Go 1.23 legacy 构建，
+  # 否则新 Agent 启动会报 "procresize: invalid arg"。
+  kernel="$(uname -r 2>/dev/null || true)"
+  legacy_suffix=""
+  case "$kernel" in
+    2.*) legacy_suffix="-legacy" ;;
+  esac
+  url="$SERVER/api/agent/binary/linux-$ARCH$legacy_suffix"
+  [ -z "$kernel" ] || url="$url?kernel=$kernel"
+  log "下载 Agent: $url（内核 ${kernel:-未知}）"
   download_to "$url" "$tmp"
   chmod +x "$tmp"
   log "安装/重新注册 Agent（--force）..."
