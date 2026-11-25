@@ -2165,6 +2165,7 @@ install-windows-monitor.exe install -y --server http://<控制台地址>
   - 下载单次 10 分钟、`sc`/`reg`/`netsh` 30 秒、Agent 卸载 2 分钟；不会再卡在 PowerShell 脚本上。
   - 内置配置与 `examples/windows_exporter/config.yaml` / `config-legacy.yaml` 保持一致（有测试校验）。
 - Windows 安装器随 Release 发布，也可在服务器执行 `make build-monitor-installer` 生成到 `dist/install-windows-monitor.exe`。
+- 旧 Windows 兼容：NT 主版本 < 10（Server 2008 R2 / 2012 / 2012 R2）自动使用 `windows-exporter-<arch>-legacy`（Go 1.20）；Windows Agent 与安装器本身也用 Go 1.20 构建，单套覆盖 Server 2008 R2 ~ Windows 11，不会出现 Linux 旧内核的 `procresize` 问题。
 
 **主机删除**
 

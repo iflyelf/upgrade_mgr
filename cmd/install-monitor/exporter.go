@@ -22,6 +22,14 @@ const (
 	exporterFirewallRule  = "windows_exporter (TCP 16666)"
 )
 
+// exporterFlavor 按 NT 主版本选择通道：Server 2008 R2/2012/2012 R2 用 legacy。
+func exporterFlavor(major int) string {
+	if major < 10 {
+		return "legacy"
+	}
+	return "latest"
+}
+
 // installExporter 直接安装/更新 Windows Exporter。
 //
 // 流程：下载 PE → 停服务/结束进程 → 备份 → 写默认配置 → 替换 exe →
@@ -29,10 +37,7 @@ const (
 // 全程不调用 PowerShell，避免 install.ps1 在部分系统上卡住。
 func installExporter(action string) {
 	arch := resolveArch(opts.Arch)
-	flavor := "latest"
-	if windowsMajorVersion() < 10 {
-		flavor = "legacy"
-	}
+	flavor := exporterFlavor(windowsMajorVersion())
 	asset := "windows-exporter-" + arch
 	if flavor == "legacy" {
 		asset += "-legacy"

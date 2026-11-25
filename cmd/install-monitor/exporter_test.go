@@ -88,3 +88,13 @@ func TestEmbeddedConfigMatchesExamples(t *testing.T) {
 		}
 	}
 }
+
+// TestExporterFlavor 旧 Windows（NT < 10）必须使用 legacy 资产。
+func TestExporterFlavor(t *testing.T) {
+	cases := map[int]string{5: "legacy", 6: "legacy", 10: "latest", 11: "latest"}
+	for major, want := range cases {
+		if got := exporterFlavor(major); got != want {
+			t.Fatalf("NT %d flavor=%s, want %s", major, got, want)
+		}
+	}
+}
